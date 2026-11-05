@@ -25,6 +25,7 @@
 - Rust 与 cargo，以及 GTK4、libadwaita 的系统开发文件。
 - Node.js >= 24.9。
 - pnpm 11。
+本机实测环境：Node 26.13.0、pnpm 12.17.0、rustc/cargo 1.93.1 stable（设计基线写的是 nightly，实际为 stable）、gtk4-rs 0.10.3 / libadwaita-rs 0.8.1。
 
 ## 构建与测试入口
 
