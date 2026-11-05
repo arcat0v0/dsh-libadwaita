@@ -151,6 +151,48 @@ bridge 是一个表示层适配器，职责边界：
 4. **桌面手动验证** — Wayland 下窗口与深浅色/缩放跟随、Portal 目录选择、系统默认程序打开结果、通知、单实例 D-Bus 激活、凭据存进 Secret Service、关闭窗口后任务继续。
 5. **上游升级验证** — 每次 bump `engines.dsh`：`--dump-config` + 上述集成测试全绿才算兼容。
 
+#### 阶段 1 spike 验证结论（2026-11-06）
+
+真实行 id（来自 `@deepseek-ai/dsh` 0.2.2-rc.1 `--dump-config` 实际输出）：
+- HMR 行 id：`hmr`（模块 `@deepseek-ai/dsh-hmr`）
+- 本地凭据提供方行 id：`credentials`（模块 `@deepseek-ai/dsh-credentials-local`）
+- DeepSeek API key 模型适配器行 id：`llm-deepseek`（模块 `@deepseek-ai/dsh-llm-deepseek-api-key`）
+
+`--dump-config` 组合验证摘录：
+```yaml
+- id: hmr
+  name: '@deepseek-ai/dsh-hmr'
+  disabled: true
+  config:
+    root: []
+- id: credentials
+  name: '@deepseek-ai/dsh-credentials-local'
+  disabled: true
+- id: llm-deepseek
+  name: '@deepseek-ai/dsh-llm-deepseek-api-key'
+  config:
+    baseURL: http://127.0.0.1:4000/anthropic
+- id: spike-credentials
+  name: file:///tmp/dsh-spike/dsh-home/profiles/libadwaita/node_modules/dsh-spike-bridge-bundle/credentials.js
+- id: spike-bridge
+  name: file:///tmp/dsh-spike/dsh-home/profiles/libadwaita/node_modules/dsh-spike-bridge-bundle/bridge.js
+```
+
+Mock 端点配置方案：
+- 本地启动 Node.js HTTP 监听 `127.0.0.1:4000`，提供 Messages 协议 SSE 端点 `/anthropic/v1/messages`。
+- 通过 profile `cordis.patch.yml` 将 `llm-deepseek` 的 `baseURL` 覆盖为 `http://127.0.0.1:4000/anthropic`（运行时自动拼接 `/v1/messages`）。
+
+核心技术假设验证结果（4/4 全部 PASS）：
+- **假设 A（PASS）**：base-backed 自定义 profile 启动正常；stdin 经 `/dev/null` 输入 EOF 不导致进程退出；stdout 严格保持 0 字节无任何杂质；全部运行日志与诊断均输出至 stderr。
+- **假设 B（PASS）**：bridge 插件通过 `ctx.on('agent/assistant-stream', ...)` 成功作为第二个 remote consumer 接收到 live 帧，完整捕获 `start`、`chunk`（多段 `text-delta`）与最终 `end`（`outcome.kind = 'committed'`），并伴随 `session/event` 正常推进。
+- **假设 C（PASS）**：Rust 客户端（GTK4 + libadwaita + tokio）连接 0600 权限的 Unix domain socket，成功反序列化 NDJSON JSON-RPC 通知，终端与 `libadwaita::ApplicationWindow` 中的 `Label` 同步实时渲染增量文本（完整内容 `"Hello from mock endpoint!"`）。
+- **假设 D（PASS）**：profile patch 将 `credentials` 行标记为 `disabled: true` 并插入自写内存凭据提供方（继承 `CredentialProvider`），替换生效；`ctx.credentials.resolve('DEEPSEEK_API_KEY')` 返回注入值；mock 服务器收到请求头 `x-api-key: mock-test-key`；`$DSH_HOME` 未写入任何 `.credentials.yaml` 文件。
+- **HMR 禁用验证（PASS）**：`cordis.patch.yml` 中的 `- id: hmr` / `disabled: true` 在 `--dump-config` 中确认生效并正确覆盖 base 默认值。
+
+注意事项与实现细节：
+- `ctx.agents.create({ sessionId })` 内部会自动创建对应 session，bridge 侧不可提前调用 `ctx.sessions.create(sessionId)`，否则会报 session already exists 错误。
+- Cordis patch 对已存在行进行覆盖时，`name` 仅用于一致性断言，不可直接修改目标模块名；替换 Service Provider 的正规方式是在 patch 中将原行 `disabled: true`，并使用 `insert` 挂载自定义实现行。
+
 ## 用户已决定的部分
 
 - 走自有薄 bridge（候选 C）。
