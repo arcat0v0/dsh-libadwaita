@@ -1,0 +1,7 @@
+- insert:
+    - id: tool-ask-user
+      name: '@deepseek-ai/dsh-tool-ask-user'
+    - id: bridge-credentials
+      name: '@dsh-libadwaita/bridge/credentials'
+    - id: bridge
+      name: '@dsh-libadwaita/bridge'

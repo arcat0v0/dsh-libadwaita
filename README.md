@@ -41,6 +41,6 @@ cargo test --manifest-path app/Cargo.toml
 pnpm -C bridge install
 pnpm -C bridge typecheck
 pnpm -C bridge build
+pnpm -C bridge test
+pnpm -C bridge lint
 ```
-
-bridge 的测试将在阶段 2 按 TDD 引入；当前不提供 `test` 脚本。

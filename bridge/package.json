@@ -3,14 +3,45 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "main": "dist/src/index.js",
+  "exports": {
+    ".": "./dist/src/index.js",
+    "./credentials": "./dist/src/credentials.js"
+  },
   "engines": {
-    "node": ">=24.9"
+    "node": ">=24.9",
+    "dsh": "0.2.2-rc.1"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
   },
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test 'dist/tests/**/*.spec.js'",
+    "lint": "biome check src tests",
+    "format": "biome format --write src tests"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "4.1.0",
+    "@deepseek-ai/dsh-credentials": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-sdk-protocol": "0.2.2-rc.1"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.6.5",
+    "@deepseek-ai/dsh": "0.2.2-rc.1",
+    "@types/node": "26.6.6",
     "typescript": "^5.9.3"
+  },
+  "pnpm": {
+    "ignoredBuiltDependencies": [
+      "@deepseek-ai/dsh-subprocess-local",
+      "@google/genai",
+      "koffi",
+      "node-pty",
+      "protobufjs"
+    ]
   }
 }
