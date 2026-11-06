@@ -26,6 +26,7 @@ pub enum RenderBlock {
     ToolResult {
         call_id: String,
         name: String,
+        arguments: Option<String>,
         result: String,
         is_error: bool,
         seq: i64,
@@ -34,8 +35,18 @@ pub enum RenderBlock {
         active: bool,
         seq: i64,
     },
+    PlanCard {
+        plan: String,
+        status: String,
+        seq: i64,
+    },
     TodoBlock {
         items: Vec<TodoItem>,
+        seq: i64,
+    },
+    DeliverablesBlock {
+        summary: serde_json::Value,
+        diff: Option<serde_json::Value>,
         seq: i64,
     },
     GenericEvent {
@@ -87,6 +98,7 @@ pub struct ConversationTranscript {
     blocks: Vec<RenderBlock>,
     last_seq: i64,
     live_attempt: Option<LiveAttemptState>,
+    pending_tool_calls: std::collections::HashMap<String, (String, String)>,
 }
 
 impl Default for ConversationTranscript {
@@ -101,6 +113,7 @@ impl ConversationTranscript {
             blocks: Vec::new(),
             last_seq: -1,
             live_attempt: None,
+            pending_tool_calls: std::collections::HashMap::new(),
         }
     }
 
@@ -120,6 +133,7 @@ impl ConversationTranscript {
         self.blocks.clear();
         self.last_seq = -1;
         self.live_attempt = None;
+        self.pending_tool_calls.clear();
     }
 
     pub fn apply_baseline(&mut self, baseline: Option<SessionAssistantBaseline>) {
@@ -322,13 +336,48 @@ impl ConversationTranscript {
                     Ok(TranscriptUpdate::Appended(self.blocks.len() - 1))
                 }
             }
+            "tool/call" => {
+                let call_id = event.data["callId"]
+                    .as_str()
+                    .or_else(|| event.data["call_id"].as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let name = event.data["name"].as_str().unwrap_or_default().to_string();
+                let arguments = event.data["arguments"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+
+                if name == "exit_plan_mode" {
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(&arguments).unwrap_or_default();
+                    let plan = parsed["plan"].as_str().unwrap_or(&arguments).to_string();
+                    self.blocks.push(RenderBlock::PlanCard {
+                        plan,
+                        status: "Plan finalized".to_string(),
+                        seq: event.seq,
+                    });
+                }
+                self.pending_tool_calls.insert(call_id, (name, arguments));
+                Ok(TranscriptUpdate::Appended(self.blocks.len() - 1))
+            }
             "tool/result" => {
                 let call_id = event.data["message"]["callId"]
                     .as_str()
                     .or_else(|| event.data["callId"].as_str())
                     .unwrap_or_default()
                     .to_string();
-                let name = event.data["name"].as_str().unwrap_or_default().to_string();
+                let (pending_name, pending_args) = self
+                    .pending_tool_calls
+                    .remove(&call_id)
+                    .unwrap_or_default();
+                let name = if let Some(n) = event.data["name"].as_str() {
+                    n.to_string()
+                } else if !pending_name.is_empty() {
+                    pending_name
+                } else {
+                    String::new()
+                };
                 let result = if let Some(arr) = event.data["message"]["content"].as_array() {
                     arr.iter()
                         .filter_map(|c| c["text"].as_str())
@@ -342,8 +391,23 @@ impl ConversationTranscript {
                 self.blocks.push(RenderBlock::ToolResult {
                     call_id,
                     name,
+                    arguments: if pending_args.is_empty() {
+                        None
+                    } else {
+                        Some(pending_args)
+                    },
                     result,
                     is_error,
+                    seq: event.seq,
+                });
+                Ok(TranscriptUpdate::Appended(self.blocks.len() - 1))
+            }
+            "workspace/changes" => {
+                let summary = event.data["summary"].clone();
+                let diff = event.data.get("diff").cloned();
+                self.blocks.push(RenderBlock::DeliverablesBlock {
+                    summary,
+                    diff,
                     seq: event.seq,
                 });
                 Ok(TranscriptUpdate::Appended(self.blocks.len() - 1))
@@ -471,5 +535,169 @@ impl ConversationTranscript {
             return text.to_string();
         }
         String::new()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BashToolInfo {
+    pub command: String,
+    pub cwd: Option<String>,
+    pub exit_code: Option<i32>,
+    pub output: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileDiffInfo {
+    pub path: String,
+    pub diff: String,
+    pub is_patch: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileReadInfo {
+    pub path: String,
+    pub range: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchToolInfo {
+    pub tool: String,
+    pub pattern: String,
+    pub path: String,
+    pub results: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebToolInfo {
+    pub tool: String,
+    pub query_or_url: String,
+    pub status_code: Option<u16>,
+    pub content: String,
+}
+
+pub fn parse_bash_tool(arguments: &str, result: &str) -> BashToolInfo {
+    let parsed: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
+    let command = parsed["command"]
+        .as_str()
+        .unwrap_or(arguments)
+        .to_string();
+    let cwd = parsed["cwd"]
+        .as_str()
+        .or_else(|| parsed["workdir"].as_str())
+        .map(|s| s.to_string());
+
+    let mut exit_code = None;
+    if let Some(pos) = result.find("[exit code:") {
+        let after = &result[pos + 11..];
+        if let Some(end) = after.find(']') {
+            if let Ok(code) = after[..end].trim().parse::<i32>() {
+                exit_code = Some(code);
+            }
+        }
+    }
+
+    BashToolInfo {
+        command,
+        cwd,
+        exit_code,
+        output: result.to_string(),
+    }
+}
+
+pub fn parse_file_diff(arguments: &str, result: &str) -> FileDiffInfo {
+    let parsed: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
+    let is_patch = parsed["patch"].is_string();
+
+    let path = parsed["path"]
+        .as_str()
+        .or_else(|| parsed["file"].as_str())
+        .unwrap_or_else(|| if is_patch { "patch" } else { "file" })
+        .to_string();
+
+    let diff = parsed["diff"]
+        .as_str()
+        .or_else(|| parsed["patch"].as_str())
+        .unwrap_or(result)
+        .to_string();
+
+    FileDiffInfo {
+        path,
+        diff,
+        is_patch,
+    }
+}
+
+pub fn parse_file_read(arguments: &str, result: &str) -> FileReadInfo {
+    let parsed: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
+    let path = parsed["path"]
+        .as_str()
+        .or_else(|| parsed["file_path"].as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    let offset = parsed["offset"].as_u64();
+    let limit = parsed["limit"].as_u64();
+
+    let range = match (offset, limit) {
+        (Some(o), Some(l)) => format!("{}-{}", o, o + l),
+        (Some(o), None) => format!("{}-", o),
+        (None, Some(l)) => format!("1-{}", l),
+        (None, None) => "1-".to_string(),
+    };
+
+    FileReadInfo {
+        path,
+        range,
+        content: result.to_string(),
+    }
+}
+
+pub fn parse_search_tool(tool_name: &str, arguments: &str, result: &str) -> SearchToolInfo {
+    let parsed: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
+    let pattern = parsed["pattern"]
+        .as_str()
+        .or_else(|| parsed["query"].as_str())
+        .unwrap_or(arguments)
+        .to_string();
+
+    let path = parsed["path"]
+        .as_str()
+        .or_else(|| parsed["dir"].as_str())
+        .unwrap_or(".")
+        .to_string();
+
+    SearchToolInfo {
+        tool: tool_name.to_string(),
+        pattern,
+        path,
+        results: result.to_string(),
+    }
+}
+
+pub fn parse_web_tool(tool_name: &str, arguments: &str, result: &str) -> WebToolInfo {
+    let parsed: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
+    let query_or_url = parsed["query"]
+        .as_str()
+        .or_else(|| parsed["url"].as_str())
+        .or_else(|| parsed["queries"].as_str())
+        .unwrap_or(arguments)
+        .to_string();
+
+    let mut status_code = None;
+    if let Some(pos) = result.find("[status:") {
+        let after = &result[pos + 8..];
+        if let Some(end) = after.find(']') {
+            if let Ok(code) = after[..end].trim().parse::<u16>() {
+                status_code = Some(code);
+            }
+        }
+    }
+
+    WebToolInfo {
+        tool: tool_name.to_string(),
+        query_or_url,
+        status_code,
+        content: result.to_string(),
     }
 }

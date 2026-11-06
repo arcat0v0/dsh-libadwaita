@@ -1,4 +1,5 @@
 pub mod approval_dialog;
+pub mod cards;
 pub mod composer;
 pub mod controller;
 pub mod conversation;

@@ -669,19 +669,35 @@ pub fn render_block(block: &RenderBlock) -> (gtk4::Box, Option<AssistantLiveHand
             (widget, Some(handle))
         }
         RenderBlock::ToolResult {
-            call_id,
             name,
+            arguments,
             result,
             is_error,
-            seq,
+            ..
         } => (
-            build_tool_result(call_id, name, result, *is_error, *seq),
+            crate::ui::cards::render_tool_result_card(
+                name,
+                arguments.as_deref(),
+                result,
+                *is_error,
+            ),
+            None,
+        ),
+        RenderBlock::PlanCard { plan, status, .. } => (
+            crate::ui::cards::build_plan_card(plan, status),
+            None,
+        ),
+        RenderBlock::DeliverablesBlock { summary, diff, .. } => (
+            crate::ui::cards::build_deliverables_card(summary, diff.as_ref()),
             None,
         ),
         RenderBlock::PlanModeBadge { active, seq } => {
             (build_plan_mode_badge(*active, *seq), None)
         }
-        RenderBlock::TodoBlock { items, seq } => (build_todo_block(items, *seq), None),
+        RenderBlock::TodoBlock { items, .. } => (
+            crate::ui::cards::build_todo_diff_card(items, "Tasks updated"),
+            None,
+        ),
         RenderBlock::GenericEvent {
             event_type,
             summary,
