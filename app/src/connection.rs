@@ -121,6 +121,7 @@ pub enum IncomingNotification {
     JobOutput(JobOutputNotificationParams),
     PluginInstallState(PluginInstallStateNotificationParams),
     PluginInstallLog(PluginInstallLogNotificationParams),
+    ScheduleChanged(ScheduleChangedNotificationParams),
     Unknown {
         method: String,
         params: serde_json::Value,
@@ -243,6 +244,16 @@ impl IncomingNotification {
             NOTIFICATION_PLUGIN_INSTALL_LOG => {
                 if let Ok(parsed) = serde_json::from_value(params.clone()) {
                     Self::PluginInstallLog(parsed)
+                } else {
+                    Self::Unknown {
+                        method: method.to_string(),
+                        params,
+                    }
+                }
+            }
+            NOTIFICATION_SCHEDULE_CHANGED => {
+                if let Ok(parsed) = serde_json::from_value(params.clone()) {
+                    Self::ScheduleChanged(parsed)
                 } else {
                     Self::Unknown {
                         method: method.to_string(),

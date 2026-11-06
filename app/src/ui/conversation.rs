@@ -4,6 +4,7 @@ use crate::ui::composer::Composer;
 use crate::ui::desktop::{open_path_in_default_app, open_terminal_in_dir};
 use crate::ui::message_renderer::{render_block, AssistantLiveHandle};
 use crate::ui::queue_dock::QueueDock;
+use crate::ui::schedules::SchedulesPage;
 use crate::ui::todo_dock::TodoDock;
 use libadwaita as adw;
 use gtk4::prelude::*;
@@ -27,6 +28,7 @@ pub struct ConversationView {
     transcript_scroll: gtk4::ScrolledWindow,
     on_load_older: Rc<RefCell<Option<Box<dyn Fn()>>>>,
     live_handle: RefCell<Option<AssistantLiveHandle>>,
+    schedules_page: SchedulesPage,
     rendered_count: Cell<usize>,
     active_cwd: Rc<RefCell<PathBuf>>,
     title_activate: Rc<RefCell<Option<Box<dyn Fn()>>>>,
@@ -251,12 +253,8 @@ impl ConversationView {
             .build();
         stack.add_named(&plugins_page, Some("plugins"));
 
-        let schedules_page = adw::StatusPage::builder()
-            .title("Schedules")
-            .description("Automated recurring agent tasks")
-            .icon_name("alarm-symbolic")
-            .build();
-        stack.add_named(&schedules_page, Some("schedules"));
+        let schedules_page = SchedulesPage::new();
+        stack.add_named(schedules_page.widget(), Some("schedules"));
 
         Self {
             stack,
@@ -274,6 +272,7 @@ impl ConversationView {
             transcript_scroll,
             on_load_older: load_slot_for_scroll,
             live_handle: RefCell::new(None),
+            schedules_page,
             rendered_count: Cell::new(0),
             active_cwd,
             title_activate,
@@ -282,6 +281,10 @@ impl ConversationView {
 
     pub fn widget(&self) -> &gtk4::Stack {
         &self.stack
+    }
+
+    pub fn schedules_page(&self) -> &SchedulesPage {
+        &self.schedules_page
     }
 
     pub fn composer(&self) -> &Composer {

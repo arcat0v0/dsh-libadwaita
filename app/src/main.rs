@@ -9,10 +9,19 @@ use libadwaita as adw;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+extern "C" fn on_terminate(_signal: libc::c_int) {
+    std::process::exit(0);
+}
+
+
 fn main() -> adw::glib::ExitCode {
     let application = adw::Application::builder().application_id(APP_ID).build();
 
     application.connect_startup(|_| configure_system_style());
+    unsafe {
+        libc::signal(libc::SIGTERM, on_terminate as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, on_terminate as *const () as libc::sighandler_t);
+    }
 
     application.set_accels_for_action("app.settings", &["<Primary>comma"]);
     application.set_accels_for_action("win.toggle-sidebar", &["<Primary>b"]);

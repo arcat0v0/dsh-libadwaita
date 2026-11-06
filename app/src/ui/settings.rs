@@ -288,6 +288,79 @@ pub fn build_preferences_dialog(
                         });
                     });
                     row.add_suffix(&read);
+                    let edit = gtk4::Button::builder()
+                        .label("Edit")
+                        .css_classes(["flat"])
+                        .valign(gtk4::Align::Center)
+                        .build();
+                    let edit_key = record.key.clone();
+                    let edit_conn = conn_for_actions.clone();
+                    let edit_label = label_for_ui.clone();
+                    let edit_parent = list_for_ui.clone();
+                    edit.connect_clicked(move |_| {
+                        let dialog = adw::Dialog::builder()
+                            .title("Edit Credential Record")
+                            .content_width(480)
+                            .build();
+                        let content = gtk4::Box::builder()
+                            .orientation(gtk4::Orientation::Vertical)
+                            .spacing(10)
+                            .margin_start(16)
+                            .margin_end(16)
+                            .margin_top(16)
+                            .margin_bottom(16)
+                            .build();
+                        let entry = adw::EntryRow::builder()
+                            .title("Record JSON")
+                            .text(r#"{"kind":"api-key"}"#)
+                            .build();
+                        content.append(&entry);
+                        let save = gtk4::Button::builder()
+                            .label("Save")
+                            .css_classes(["suggested-action"])
+                            .build();
+                        let dialog_for_save = dialog.clone();
+                        let entry_for_save = entry.clone();
+                        let key_for_save = edit_key.clone();
+                        let conn_for_save = edit_conn.clone();
+                        let label_for_save = edit_label.clone();
+                        save.connect_clicked(move |_| {
+                            let Ok(record) =
+                                serde_json::from_str::<serde_json::Value>(&entry_for_save.text())
+                            else {
+                                label_for_save.set_label("Invalid record JSON");
+                                return;
+                            };
+                            let rx = rpc_receiver::<
+                                CredentialRecordModifyParams,
+                                CredentialRecordMutationResult,
+                            >(
+                                conn_for_save.clone(),
+                                METHOD_CREDENTIALS_RECORDS_MODIFY,
+                                CredentialRecordModifyParams {
+                                    key: key_for_save.clone(),
+                                    record,
+                                },
+                                Duration::from_secs(10),
+                            );
+                            let label = label_for_save.clone();
+                            gtk4::glib::MainContext::default().spawn_local(async move {
+                                let mut rx = rx;
+                                match rx.recv().await {
+                                    Some(Ok(meta)) => label.set_label(&format!(
+                                        "Updated {} · configured={}",
+                                        meta.metadata.key, meta.metadata.configured
+                                    )),
+                                    _ => label.set_label("Record modify failed"),
+                                }
+                            });
+                            dialog_for_save.close();
+                        });
+                        content.append(&save);
+                        dialog.set_child(Some(&content));
+                        dialog.present(Some(&edit_parent));
+                    });
+                    row.add_suffix(&edit);
                     let delete = gtk4::Button::builder()
                         .label("Delete")
                         .css_classes(["flat", "destructive-action"])

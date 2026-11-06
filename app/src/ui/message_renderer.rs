@@ -2,6 +2,7 @@ use crate::protocol::{MessageFeedbackItem, TodoItem};
 use crate::transcript::{RenderBlock, ToolCallItem};
 use crate::ui::controller::SessionController;
 use gtk4::prelude::*;
+use libadwaita::prelude::*;
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
 use sourceview5::prelude::*;
 use std::cell::RefCell;
@@ -639,6 +640,46 @@ pub fn build_assistant_message(
             });
             actions_box.append(&up);
             actions_box.append(&down);
+            let note = gtk4::Button::builder()
+                .label("Feedback")
+                .css_classes(["flat"])
+                .build();
+            let note_parent = actions_box.clone();
+            note.connect_clicked(move |_| {
+                let dialog = libadwaita::Dialog::builder()
+                    .title("Session Feedback")
+                    .content_width(420)
+                    .build();
+                let content = gtk4::Box::builder()
+                    .orientation(gtk4::Orientation::Vertical)
+                    .spacing(10)
+                    .margin_start(16)
+                    .margin_end(16)
+                    .margin_top(16)
+                    .margin_bottom(16)
+                    .build();
+                let entry = libadwaita::EntryRow::builder()
+                    .title("What went wrong or right?")
+                    .build();
+                content.append(&entry);
+                let send = gtk4::Button::builder()
+                    .label("Record")
+                    .css_classes(["suggested-action"])
+                    .build();
+                let dialog_for_send = dialog.clone();
+                let entry_for_send = entry.clone();
+                send.connect_clicked(move |_| {
+                    let text = entry_for_send.text().to_string();
+                    if !text.trim().is_empty() {
+                        with_controller(|ctrl| ctrl.record_session_feedback(&text));
+                    }
+                    dialog_for_send.close();
+                });
+                content.append(&send);
+                dialog.set_child(Some(&content));
+                dialog.present(Some(&note_parent));
+            });
+            actions_box.append(&note);
             bubble.append(&actions_box);
         }
     }

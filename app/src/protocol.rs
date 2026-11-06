@@ -2068,3 +2068,157 @@ pub struct JobOutputNotificationParams {
 pub fn json_text(value: &serde_json::Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
 }
+
+pub const METHOD_TERMINAL_CREATE: &str = "libadwaita/terminal/create";
+pub const METHOD_TERMINAL_LIST: &str = "libadwaita/terminal/list";
+pub const METHOD_TERMINAL_INPUT: &str = "libadwaita/terminal/input";
+pub const METHOD_TERMINAL_OUTPUT: &str = "libadwaita/terminal/output";
+pub const METHOD_TERMINAL_CLOSE: &str = "libadwaita/terminal/close";
+pub const METHOD_SCHEDULE_CATALOG: &str = "libadwaita/schedule/catalog";
+pub const METHOD_SCHEDULE_CREATE: &str = "libadwaita/schedule/create";
+pub const METHOD_SCHEDULE_EDIT: &str = "libadwaita/schedule/edit";
+pub const METHOD_SCHEDULE_RUN: &str = "libadwaita/schedule/run";
+pub const METHOD_SCHEDULE_HISTORY: &str = "libadwaita/schedule/history";
+pub const METHOD_SCHEDULE_DELETE: &str = "libadwaita/schedule/delete";
+pub const NOTIFICATION_SCHEDULE_CHANGED: &str = "schedule.changed";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalCreateParams {
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalCreateResult {
+    pub terminal_id: String,
+    pub session_id: String,
+    pub pid: u32,
+    pub cwd: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalInfo {
+    pub terminal_id: String,
+    pub pid: u32,
+    pub cwd: String,
+    pub running: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalListParams {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalListResult {
+    pub terminals: Vec<TerminalInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalInputParams {
+    pub session_id: String,
+    pub terminal_id: String,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalOutputParams {
+    pub session_id: String,
+    pub terminal_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalOutputResult {
+    pub text: String,
+    pub total_lines: u64,
+    pub line_begin: u64,
+    pub line_end: u64,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalCloseParams {
+    pub session_id: String,
+    pub terminal_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalCloseResult {
+    pub closed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScheduleCatalogResult {
+    pub result: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleCreateParams {
+    pub title: String,
+    pub prompt: String,
+    pub timing: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleEditParams {
+    pub id: String,
+    pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patch: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleRunParams {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleHistoryParams {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleDeleteParams {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScheduleOperationResult {
+    pub result: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleChangedNotificationParams {
+    pub changed: bool,
+}
+
+pub fn schedule_field<'a>(entry: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    entry.get(key).and_then(|value| value.as_str())
+}

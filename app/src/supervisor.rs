@@ -349,7 +349,7 @@ impl Default for SupervisorConfig {
             dsh_bin,
             client_version: "0.1.0".to_string(),
             profile_config: ProfileTemplateConfig::default(),
-            handshake_timeout: Duration::from_secs(10),
+            handshake_timeout: Duration::from_secs(20),
             shutdown_timeout: Duration::from_secs(5),
         }
     }

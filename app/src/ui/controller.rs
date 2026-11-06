@@ -109,6 +109,15 @@ pub enum UiMessage {
         text: String,
         error: String,
     },
+    TerminalListed(Vec<TerminalInfo>),
+    TerminalCreated(TerminalCreateResult),
+    TerminalOutput(TerminalOutputResult),
+    ScheduleCatalogLoaded(Vec<serde_json::Value>),
+    ScheduleHistoryLoaded(serde_json::Value),
+    ScheduleOperationDone {
+        label: String,
+        value: serde_json::Value,
+    },
     HistoryPageLoaded {
         events: Vec<SessionEvent>,
         has_more: bool,
@@ -262,6 +271,10 @@ impl SessionController {
         *controller.self_weak.borrow_mut() = Rc::downgrade(&controller);
 
         controller.right_dock.set_controller(controller.clone());
+        controller
+            .conversation_view
+            .schedules_page()
+            .set_controller(controller.clone());
         controller.setup_ui_receiver(ui_receiver, Rc::downgrade(&controller));
         controller.setup_composer();
         controller.setup_double_esc();
@@ -1275,6 +1288,7 @@ impl SessionController {
 
         self.load_session_list();
         self.load_workspaces();
+        self.load_schedules();
     }
 
     pub fn load_session_list(&self) {
@@ -2194,6 +2208,7 @@ impl SessionController {
                             ctrl.refresh_files(".");
                             ctrl.refresh_permission(&session_id);
                             ctrl.update_continue_state();
+                            ctrl.right_dock.on_session_followed(&session_id, &cwd);
                             ctrl.refresh_subagents();
                             ctrl.refresh_jobs();
                             ctrl.load_feedback();
@@ -2255,6 +2270,11 @@ impl SessionController {
                                     .unwrap_or(false);
                                 if matches_active {
                                     conv_view.job_output_append(&p.chunks);
+                                }
+                            }
+                            IncomingNotification::ScheduleChanged(_) => {
+                                if let Some(ctrl) = ctrl_weak.upgrade() {
+                                    ctrl.load_schedules();
                                 }
                             }
                             IncomingNotification::PluginInstallState(p) => {
@@ -2539,6 +2559,33 @@ impl SessionController {
                     }
                     UiMessage::JobFollowLoaded(follow) => {
                         conv_view.show_job_follow(&follow);
+                    }
+                    UiMessage::TerminalListed(terminals) => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.right_dock.terminal_panel().handle_list(&terminals);
+                        }
+                    }
+                    UiMessage::TerminalCreated(created) => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.right_dock.terminal_panel().handle_created(&created);
+                        }
+                    }
+                    UiMessage::TerminalOutput(output) => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.right_dock.terminal_panel().handle_output(&output);
+                        }
+                    }
+                    UiMessage::ScheduleCatalogLoaded(entries) => {
+                        conv_view.schedules_page().handle_catalog(&entries);
+                    }
+                    UiMessage::ScheduleHistoryLoaded(value) => {
+                        conv_view.schedules_page().show_history(&value);
+                    }
+                    UiMessage::ScheduleOperationDone { label, value } => {
+                        let text = serde_json::to_string(&value).unwrap_or_default();
+                        toast_overlay
+                            .add_toast(adw::Toast::new(&format!("{}: {}", label, text)));
+                        conv_view.schedules_page().load();
                     }
                     UiMessage::QuestionReopened(request) => {
                         let (sender, _receiver) = oneshot::channel();
@@ -3163,6 +3210,188 @@ impl SessionController {
         );
     }
 
+
+    pub fn load_terminals(&self, session_id: &str) {
+        self.dispatch_call(
+            METHOD_TERMINAL_LIST,
+            TerminalListParams {
+                session_id: session_id.to_string(),
+            },
+            Duration::from_secs(10),
+            |result: Result<TerminalListResult, ConnectionError>| match result {
+                Ok(list) => UiMessage::TerminalListed(list.terminals),
+                Err(err) => UiMessage::Toast(format!("Terminal list failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn create_terminal(&self, session_id: &str, cwd: &str) {
+        self.dispatch_call(
+            METHOD_TERMINAL_CREATE,
+            TerminalCreateParams {
+                session_id: session_id.to_string(),
+                cwd: Some(cwd.to_string()),
+            },
+            Duration::from_secs(15),
+            |result: Result<TerminalCreateResult, ConnectionError>| match result {
+                Ok(created) => UiMessage::TerminalCreated(created),
+                Err(err) => UiMessage::Toast(format!("Terminal create failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn send_terminal_input(&self, session_id: &str, terminal_id: &str, data: &str) {
+        self.dispatch_call(
+            METHOD_TERMINAL_INPUT,
+            TerminalInputParams {
+                session_id: session_id.to_string(),
+                terminal_id: terminal_id.to_string(),
+                data: data.to_string(),
+            },
+            Duration::from_secs(10),
+            |result: Result<serde_json::Value, ConnectionError>| match result {
+                Ok(_) => UiMessage::Toast(String::new()),
+                Err(err) => UiMessage::Toast(format!("Terminal input failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn poll_terminal_output(
+        &self,
+        session_id: &str,
+        terminal_id: &str,
+        offset: Option<u64>,
+    ) {
+        self.dispatch_call(
+            METHOD_TERMINAL_OUTPUT,
+            TerminalOutputParams {
+                session_id: session_id.to_string(),
+                terminal_id: terminal_id.to_string(),
+                offset,
+                count: Some(400),
+            },
+            Duration::from_secs(10),
+            |result: Result<TerminalOutputResult, ConnectionError>| match result {
+                Ok(output) => UiMessage::TerminalOutput(output),
+                Err(err) => UiMessage::Toast(format!("Terminal output failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn close_terminal(&self, session_id: &str, terminal_id: &str) {
+        self.dispatch_call(
+            METHOD_TERMINAL_CLOSE,
+            TerminalCloseParams {
+                session_id: session_id.to_string(),
+                terminal_id: terminal_id.to_string(),
+            },
+            Duration::from_secs(10),
+            |result: Result<TerminalCloseResult, ConnectionError>| match result {
+                Ok(_) => UiMessage::Toast("Terminal closed".to_string()),
+                Err(err) => UiMessage::Toast(format!("Terminal close failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn load_schedules(&self) {
+        self.dispatch_call(
+            METHOD_SCHEDULE_CATALOG,
+            serde_json::json!({}),
+            Duration::from_secs(10),
+            |result: Result<ScheduleCatalogResult, ConnectionError>| match result {
+                Ok(catalog) => UiMessage::ScheduleCatalogLoaded(catalog.result),
+                Err(err) => UiMessage::Toast(format!("Schedule catalog failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn schedule_create(&self, title: &str, prompt: &str, timing: serde_json::Value) {
+        self.dispatch_call(
+            METHOD_SCHEDULE_CREATE,
+            ScheduleCreateParams {
+                title: title.to_string(),
+                prompt: prompt.to_string(),
+                timing,
+                target: None,
+            },
+            Duration::from_secs(15),
+            |result: Result<ScheduleOperationResult, ConnectionError>| match result {
+                Ok(value) => UiMessage::ScheduleOperationDone {
+                    label: "Created".to_string(),
+                    value: value.result,
+                },
+                Err(err) => UiMessage::Toast(format!("Schedule create failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn schedule_run(&self, id: &str) {
+        self.dispatch_call(
+            METHOD_SCHEDULE_RUN,
+            ScheduleRunParams { id: id.to_string() },
+            Duration::from_secs(10),
+            |result: Result<ScheduleOperationResult, ConnectionError>| match result {
+                Ok(value) => UiMessage::ScheduleOperationDone {
+                    label: "Run".to_string(),
+                    value: value.result,
+                },
+                Err(err) => UiMessage::Toast(format!("Schedule run failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn schedule_history(&self, id: &str) {
+        self.dispatch_call(
+            METHOD_SCHEDULE_HISTORY,
+            ScheduleHistoryParams {
+                id: id.to_string(),
+                limit: Some(50),
+                before: None,
+            },
+            Duration::from_secs(10),
+            |result: Result<ScheduleOperationResult, ConnectionError>| match result {
+                Ok(value) => UiMessage::ScheduleHistoryLoaded(value.result),
+                Err(err) => UiMessage::Toast(format!("Schedule history failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn schedule_delete(&self, id: &str) {
+        self.dispatch_call(
+            METHOD_SCHEDULE_DELETE,
+            ScheduleDeleteParams {
+                id: id.to_string(),
+                expected_updated_at: None,
+            },
+            Duration::from_secs(10),
+            |result: Result<ScheduleOperationResult, ConnectionError>| match result {
+                Ok(value) => UiMessage::ScheduleOperationDone {
+                    label: "Deleted".to_string(),
+                    value: value.result,
+                },
+                Err(err) => UiMessage::Toast(format!("Schedule delete failed: {}", err)),
+            },
+        );
+    }
+    pub fn schedule_edit(&self, id: &str, patch: serde_json::Value) {
+        self.dispatch_call(
+            METHOD_SCHEDULE_EDIT,
+            ScheduleEditParams {
+                id: id.to_string(),
+                action: "update".to_string(),
+                patch: Some(patch),
+                expected_updated_at: None,
+            },
+            Duration::from_secs(10),
+            |result: Result<ScheduleOperationResult, ConnectionError>| match result {
+                Ok(value) => UiMessage::ScheduleOperationDone {
+                    label: "Updated".to_string(),
+                    value: value.result,
+                },
+                Err(err) => UiMessage::Toast(format!("Schedule edit failed: {}", err)),
+            },
+        );
+    }
 }
 
 pub fn permission_display_label(state: &PermissionGetResult) -> String {

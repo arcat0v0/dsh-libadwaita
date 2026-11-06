@@ -12,6 +12,8 @@ pub mod right_dock;
 pub mod session_dialogs;
 pub mod settings;
 pub mod sidebar;
+pub mod schedules;
 pub mod trigger_popup;
 pub mod todo_dock;
+pub mod terminal_panel;
 pub mod window;

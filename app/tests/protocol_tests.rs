@@ -1,3 +1,4 @@
+use dsh_libadwaita::connection::IncomingNotification;
 use dsh_libadwaita::protocol::*;
 
 #[test]
@@ -406,4 +407,29 @@ fn test_batch_d_notifications_and_types() {
         updated_at: 2,
     };
     assert_eq!(feedback.rating, "positive");
+}
+
+#[test]
+fn test_terminal_and_schedule_protocol_shapes() {
+    let created: TerminalCreateResult = serde_json::from_str(
+        r#"{"terminalId":"t1","sessionId":"s1","pid":42,"cwd":"/tmp"}"#,
+    )
+    .unwrap();
+    assert_eq!(created.terminal_id, "t1");
+
+    let output: TerminalOutputResult = serde_json::from_str(
+        r#"{"text":"hi\n","totalLines":1,"lineBegin":0,"lineEnd":1,"truncated":false}"#,
+    )
+    .unwrap();
+    assert_eq!(output.text, "hi\n");
+
+    let catalog: ScheduleCatalogResult =
+        serde_json::from_str(r#"{"result":[{"id":"sch1","title":"Nightly"}]}"#).unwrap();
+    assert_eq!(schedule_field(&catalog.result[0], "title"), Some("Nightly"));
+
+    let changed = serde_json::json!({"changed": true});
+    match IncomingNotification::from_raw(NOTIFICATION_SCHEDULE_CHANGED, changed) {
+        IncomingNotification::ScheduleChanged(p) => assert!(p.changed),
+        other => panic!("unexpected notification: {:?}", other),
+    }
 }

@@ -1,5 +1,6 @@
 use crate::ui::controller::SessionController;
 use crate::ui::files_panel::{FilesPanel, PreviewPanel};
+use crate::ui::terminal_panel::TerminalPanel;
 use gtk4::prelude::*;
 use libadwaita as adw;
 use std::rc::Rc;
@@ -10,6 +11,7 @@ pub struct RightDock {
     tab_bar: adw::TabBar,
     files_panel: Rc<FilesPanel>,
     preview_panel: Rc<PreviewPanel>,
+    terminal_panel: Rc<TerminalPanel>,
 }
 
 impl RightDock {
@@ -26,12 +28,8 @@ impl RightDock {
 
         container.append(&tab_bar);
 
-        let terminal_page = adw::StatusPage::builder()
-            .title("Terminal")
-            .description("Embedded terminal is not available in this build")
-            .icon_name("utilities-terminal-symbolic")
-            .build();
-        let page1 = tab_view.append(&terminal_page);
+        let terminal_panel = Rc::new(TerminalPanel::new());
+        let page1 = tab_view.append(terminal_panel.widget());
         page1.set_title("Terminal");
         page1.set_icon(Some(&gtk4::gio::ThemedIcon::new(
             "utilities-terminal-symbolic",
@@ -57,6 +55,7 @@ impl RightDock {
             tab_bar,
             files_panel,
             preview_panel,
+            terminal_panel,
         }
     }
 
@@ -82,6 +81,15 @@ impl RightDock {
 
     pub fn set_controller(&self, controller: Rc<SessionController>) {
         self.files_panel.set_controller(controller.clone());
+        self.terminal_panel.set_controller(controller.clone());
+    }
+
+    pub fn terminal_panel(&self) -> &Rc<TerminalPanel> {
+        &self.terminal_panel
+    }
+
+    pub fn on_session_followed(&self, session_id: &str, cwd: &str) {
+        self.terminal_panel.restore(session_id, cwd);
     }
 
     pub fn show_files(&self) {
