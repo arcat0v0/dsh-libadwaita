@@ -5,6 +5,10 @@ use crate::session::{SessionModel, SessionStatus};
 use crate::supervisor::HarnessSupervisor;
 use crate::ui::approval_dialog::{show_approval_dialog, show_user_question_dialog};
 use crate::ui::conversation::ConversationView;
+use crate::ui::desktop::{
+    send_turn_completed_notification, should_notify_turn_completion, truncate_snippet,
+    withdraw_notification,
+};
 use crate::ui::onboarding::show_onboarding_dialog;
 use crate::ui::sidebar::Sidebar;
 use crate::ui::window::MainWindow;
@@ -12,6 +16,7 @@ use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -94,6 +99,10 @@ pub struct SessionController {
     toast_overlay: adw::ToastOverlay,
     ui_sender: UnboundedSender<UiMessage>,
     credential_store: CredentialStore,
+    running_sessions: Rc<RefCell<HashSet<String>>>,
+    turn_start_times: Rc<RefCell<HashMap<String, Instant>>>,
+    background_hold: Rc<RefCell<Option<gtk4::gio::ApplicationHoldGuard>>>,
+    background_session: Rc<RefCell<Option<String>>>,
 }
 
 impl SessionController {
@@ -122,6 +131,10 @@ impl SessionController {
                 .unwrap(),
             ui_sender,
             credential_store,
+            running_sessions: Rc::new(RefCell::new(HashSet::new())),
+            turn_start_times: Rc::new(RefCell::new(HashMap::new())),
+            background_hold: Rc::new(RefCell::new(None)),
+            background_session: Rc::new(RefCell::new(None)),
         });
 
         controller.setup_ui_receiver(ui_receiver, Rc::downgrade(&controller));
@@ -133,6 +146,122 @@ impl SessionController {
 
     pub fn credential_store(&self) -> &CredentialStore {
         &self.credential_store
+    }
+
+    pub fn running_session_info(&self) -> Option<(String, String)> {
+        let running = self.running_sessions.borrow();
+        if running.is_empty() {
+            return None;
+        }
+
+        let active = self.active_session.borrow();
+        if let Some(sess) = active.as_ref() {
+            if running.contains(&sess.id) {
+                return Some((sess.id.clone(), sess.title.clone()));
+            }
+        }
+
+        running
+            .iter()
+            .next()
+            .map(|id| (id.clone(), "dsh".to_string()))
+    }
+
+    pub fn any_session_running(&self) -> bool {
+        !self.running_sessions.borrow().is_empty()
+    }
+
+    pub fn set_background_hold(
+        &self,
+        hold: gtk4::gio::ApplicationHoldGuard,
+        session_id: &str,
+    ) {
+        *self.background_hold.borrow_mut() = Some(hold);
+        *self.background_session.borrow_mut() = Some(session_id.to_string());
+    }
+
+    pub fn handle_follow_status(&self, session_id: &str, status: &str) {
+        if status == "running" {
+            let already_running = self.running_sessions.borrow().contains(session_id);
+            self.running_sessions
+                .borrow_mut()
+                .insert(session_id.to_string());
+            if !already_running {
+                self.turn_start_times
+                    .borrow_mut()
+                    .insert(session_id.to_string(), Instant::now());
+            }
+        } else {
+            self.running_sessions.borrow_mut().remove(session_id);
+            self.turn_start_times.borrow_mut().remove(session_id);
+        }
+    }
+
+    pub fn handle_status_notification(&self, session_id: &str, status: &str) {
+        let app_opt = self.window.application();
+        let window_focused = self.window.is_active();
+
+        if status == "running" {
+            let already_running = self.running_sessions.borrow().contains(session_id);
+            self.running_sessions
+                .borrow_mut()
+                .insert(session_id.to_string());
+            if !already_running {
+                self.turn_start_times
+                    .borrow_mut()
+                    .insert(session_id.to_string(), Instant::now());
+            }
+        } else {
+            let was_running = self.running_sessions.borrow_mut().remove(session_id);
+            let start = self.turn_start_times.borrow_mut().remove(session_id);
+            let duration_ms = start
+                .map(|started| started.elapsed().as_millis() as u64)
+                .unwrap_or(0);
+
+            if was_running
+                && should_notify_turn_completion(window_focused, duration_ms)
+            {
+                if let Some(app) = app_opt.as_ref() {
+                    let (title, raw_snippet) = {
+                        let active = self.active_session.borrow();
+                        match active.as_ref() {
+                            Some(sess) => (
+                                sess.title.clone(),
+                                sess.transcript
+                                    .latest_snippet()
+                                    .unwrap_or_else(|| "Turn finished.".to_string()),
+                            ),
+                            None => ("dsh".to_string(), "Turn finished.".to_string()),
+                        }
+                    };
+                    let snippet = truncate_snippet(&raw_snippet, 100);
+                    send_turn_completed_notification(app, session_id, &title, &snippet);
+                }
+            }
+
+            if let Some(app) = app_opt.as_ref() {
+                let background_id = self.background_session.borrow().clone();
+                if let Some(background_id) = background_id {
+                    withdraw_notification(
+                        app,
+                        &format!("{}-background", background_id),
+                    );
+                }
+            }
+
+            if self.running_sessions.borrow().is_empty() {
+                self.background_hold.borrow_mut().take();
+                self.background_session.borrow_mut().take();
+            }
+        }
+
+        if let Some(sess) = self.active_session.borrow_mut().as_mut() {
+            if sess.id == session_id {
+                sess.handle_status(status);
+                self.conversation_view
+                    .set_status(if status == "running" { "Running" } else { "Idle" });
+            }
+        }
     }
 
     pub fn set_supervisor(&self, sup: Arc<HarnessSupervisor>) {
@@ -623,54 +752,63 @@ impl SessionController {
                             .as_ref()
                             .map(|t| t.title.clone())
                             .unwrap_or_else(|| "New Session".to_string());
+                        let cwd = follow.header.cwd.clone();
+                        let status = follow.status.clone();
+                        let session_id = follow.header.id.clone();
 
                         window_title.set_subtitle(&title);
                         conv_view.set_title(&title);
-                        conv_view.set_status(if follow.status == "running" {
+                        conv_view.set_cwd(&cwd);
+                        conv_view.set_status(if status == "running" {
                             "Running"
                         } else {
                             "Idle"
                         });
+
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.handle_follow_status(&session_id, &status);
+                        }
 
                         let sess_model = SessionModel::from_follow(follow);
                         conv_view.update_transcript(&sess_model.transcript);
                         *active_sess.borrow_mut() = Some(sess_model);
                     }
                     UiMessage::Notification(notif) => {
-                        let mut sess_guard = active_sess.borrow_mut();
-                        if let Some(sess) = sess_guard.as_mut() {
-                            match notif {
-                                IncomingNotification::SessionEvent(p) => {
+                        match notif {
+                            IncomingNotification::SessionEvent(p) => {
+                                let mut sess_guard = active_sess.borrow_mut();
+                                if let Some(sess) = sess_guard.as_mut() {
                                     if p.session_id == sess.id {
                                         let _ = sess.handle_event(p.event);
                                         conv_view.update_transcript(&sess.transcript);
                                     }
                                 }
-                                IncomingNotification::AgentStream(p) => {
+                            }
+                            IncomingNotification::AgentStream(p) => {
+                                let mut sess_guard = active_sess.borrow_mut();
+                                if let Some(sess) = sess_guard.as_mut() {
                                     if p.session_id == sess.id {
                                         sess.handle_stream_frame(p.frame);
                                         conv_view.update_transcript(&sess.transcript);
                                     }
                                 }
-                                IncomingNotification::SessionStatus(p) => {
-                                    if p.session_id == sess.id {
-                                        sess.handle_status(&p.status);
-                                        conv_view.set_status(if p.status == "running" {
-                                            "Running"
-                                        } else {
-                                            "Idle"
-                                        });
-                                    }
+                            }
+                            IncomingNotification::SessionStatus(p) => {
+                                if let Some(ctrl) = ctrl_weak.upgrade() {
+                                    ctrl.handle_status_notification(&p.session_id, &p.status);
                                 }
-                                IncomingNotification::SessionTitle(p) => {
+                            }
+                            IncomingNotification::SessionTitle(p) => {
+                                let mut sess_guard = active_sess.borrow_mut();
+                                if let Some(sess) = sess_guard.as_mut() {
                                     if p.session_id == sess.id {
                                         sess.handle_title(&p.title);
                                         window_title.set_subtitle(&p.title);
                                         conv_view.set_title(&p.title);
                                     }
                                 }
-                                _ => {}
                             }
+                            _ => {}
                         }
                     }
                     UiMessage::Toast(msg) => {
@@ -742,6 +880,44 @@ impl SessionController {
                 c.open_model_picker(btn);
             }
         });
+
+        let enter_controller = gtk4::EventControllerKey::new();
+        let c_weak_enter = controller_weak.clone();
+        let tv_enter = text_view.clone();
+        enter_controller.connect_key_pressed(move |_, key, _, modifier| {
+            if key == gtk4::gdk::Key::Return || key == gtk4::gdk::Key::KP_Enter {
+                let has_modifier = modifier
+                    .contains(gtk4::gdk::ModifierType::SHIFT_MASK)
+                    || modifier.contains(gtk4::gdk::ModifierType::CONTROL_MASK)
+                    || modifier.contains(gtk4::gdk::ModifierType::ALT_MASK)
+                    || modifier.contains(gtk4::gdk::ModifierType::SUPER_MASK)
+                    || modifier.contains(gtk4::gdk::ModifierType::META_MASK);
+
+                if !has_modifier {
+                    if let Some(c) = c_weak_enter.upgrade() {
+                        let is_running = {
+                            c.active_session
+                                .borrow()
+                                .as_ref()
+                                .map(|s| s.status == SessionStatus::Running)
+                                .unwrap_or(false)
+                        };
+                        if !is_running {
+                            let buf = tv_enter.buffer();
+                            let (start, end) = buf.bounds();
+                            let text = buf.text(&start, &end, false).to_string();
+                            if !text.trim().is_empty() {
+                                buf.set_text("");
+                                c.send_prompt(&text);
+                            }
+                        }
+                    }
+                    return gtk4::glib::Propagation::Stop;
+                }
+            }
+            gtk4::glib::Propagation::Proceed
+        });
+        text_view.add_controller(enter_controller);
     }
 
     fn setup_double_esc(&self) {
@@ -788,6 +964,10 @@ impl SessionController {
             toast_overlay: self.toast_overlay.clone(),
             ui_sender: self.ui_sender.clone(),
             credential_store: self.credential_store.clone(),
+            running_sessions: self.running_sessions.clone(),
+            turn_start_times: self.turn_start_times.clone(),
+            background_hold: self.background_hold.clone(),
+            background_session: self.background_session.clone(),
         }
     }
 }

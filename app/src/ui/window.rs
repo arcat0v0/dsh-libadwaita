@@ -1,5 +1,6 @@
 use crate::ui::controller::SessionController;
 use crate::ui::conversation::ConversationView;
+use crate::ui::desktop::{begin_background_continuation, build_shortcuts_window};
 use crate::ui::right_dock::RightDock;
 use crate::ui::settings::show_settings_dialog;
 use crate::ui::sidebar::Sidebar;
@@ -18,6 +19,7 @@ pub struct MainWindow {
     window_title: adw::WindowTitle,
     model_btn: gtk4::Button,
     controller: RefCell<Option<Rc<SessionController>>>,
+    shortcuts_window: Rc<RefCell<Option<gtk4::ShortcutsWindow>>>,
 }
 
 impl MainWindow {
@@ -117,6 +119,23 @@ impl MainWindow {
         });
         window.add_action(&show_schedules_action);
 
+        let shortcuts_window = Rc::new(RefCell::new(None));
+        let shortcuts_store = shortcuts_window.clone();
+        let help_window_weak = window.downgrade();
+        let show_help_action = gtk4::gio::SimpleAction::new("show-help-overlay", None);
+        show_help_action.connect_activate(move |_, _| {
+            let mut guard = shortcuts_store.borrow_mut();
+            if let Some(w) = help_window_weak.upgrade() {
+                if guard.is_none() {
+                    *guard = Some(build_shortcuts_window(&w));
+                }
+                if let Some(shortcuts) = guard.as_ref() {
+                    shortcuts.present();
+                }
+            }
+        });
+        window.add_action(&show_help_action);
+
         let window_weak = window.downgrade();
         let show_account_action = gtk4::gio::SimpleAction::new("show-account", None);
         show_account_action.connect_activate(move |_, _| {
@@ -136,6 +155,7 @@ impl MainWindow {
             window_title,
             model_btn,
             controller: RefCell::new(None),
+            shortcuts_window,
         }
     }
 
@@ -184,6 +204,25 @@ impl MainWindow {
             }
         });
 
+
+        let ctrl_close = Rc::downgrade(&controller);
+        let window_for_close = self.window.clone();
+        self.window.connect_close_request(move |_| {
+            if let Some(c) = ctrl_close.upgrade() {
+                if c.any_session_running() {
+                    if let Some((session_id, title)) = c.running_session_info() {
+                        if let Some(app) = window_for_close.application() {
+                            let hold =
+                                begin_background_continuation(&app, &session_id, &title);
+                            c.set_background_hold(hold, &session_id);
+                        }
+                    }
+                    window_for_close.set_visible(false);
+                    return gtk4::glib::Propagation::Stop;
+                }
+            }
+            gtk4::glib::Propagation::Proceed
+        });
         *self.controller.borrow_mut() = Some(controller);
     }
 
@@ -217,5 +256,9 @@ impl MainWindow {
 
     pub fn window_title(&self) -> &adw::WindowTitle {
         &self.window_title
+    }
+
+    pub fn shortcuts_window(&self) -> &Rc<RefCell<Option<gtk4::ShortcutsWindow>>> {
+        &self.shortcuts_window
     }
 }

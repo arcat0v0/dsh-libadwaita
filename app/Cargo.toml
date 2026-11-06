@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-gtk4 = { version = "0.10", features = ["v4_10"] }
+gtk4 = { version = "0.10", features = ["v4_10", "v4_14"] }
 libadwaita = { version = "0.8", features = ["v1_4", "v1_5", "v1_6"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time", "process", "fs"] }
 serde = { version = "1", features = ["derive"] }

@@ -1,9 +1,12 @@
 use crate::transcript::{ConversationTranscript, RenderBlock};
 use crate::ui::composer::Composer;
+use crate::ui::desktop::{open_path_in_default_app, open_terminal_in_dir};
 use crate::ui::message_renderer::{render_block, AssistantLiveHandle};
 use gtk4::prelude::*;
 use libadwaita as adw;
 use std::cell::{Cell, RefCell};
+use std::path::PathBuf;
+use std::rc::Rc;
 
 pub struct ConversationView {
     stack: gtk4::Stack,
@@ -13,6 +16,7 @@ pub struct ConversationView {
     title_label: gtk4::Label,
     live_handle: RefCell<Option<AssistantLiveHandle>>,
     rendered_count: Cell<usize>,
+    active_cwd: Rc<RefCell<PathBuf>>,
 }
 
 impl ConversationView {
@@ -24,6 +28,10 @@ impl ConversationView {
         let conversation_box = gtk4::Box::builder()
             .orientation(gtk4::Orientation::Vertical)
             .build();
+
+        let active_cwd = Rc::new(RefCell::new(PathBuf::from(
+            std::env::var("HOME").unwrap_or_else(|_| ".".to_string()),
+        )));
 
         let session_header = gtk4::Box::builder()
             .orientation(gtk4::Orientation::Horizontal)
@@ -41,6 +49,30 @@ impl ConversationView {
             .css_classes(["title-4"])
             .build();
         session_header.append(&title_label);
+
+        let open_folder_btn = gtk4::Button::builder()
+            .label("Open Folder")
+            .tooltip_text("Open project folder in default file manager")
+            .css_classes(["flat"])
+            .build();
+        let cwd_for_folder = active_cwd.clone();
+        open_folder_btn.connect_clicked(move |_| {
+            let path = cwd_for_folder.borrow().clone();
+            open_path_in_default_app(&path);
+        });
+        session_header.append(&open_folder_btn);
+
+        let open_terminal_btn = gtk4::Button::builder()
+            .label("Open Terminal")
+            .tooltip_text("Open terminal in project directory")
+            .css_classes(["flat"])
+            .build();
+        let cwd_for_terminal = active_cwd.clone();
+        open_terminal_btn.connect_clicked(move |_| {
+            let path = cwd_for_terminal.borrow().clone();
+            open_terminal_in_dir(&path);
+        });
+        session_header.append(&open_terminal_btn);
 
         let status_label = gtk4::Label::builder()
             .label("Idle")
@@ -153,6 +185,7 @@ impl ConversationView {
             title_label,
             live_handle: RefCell::new(None),
             rendered_count: Cell::new(0),
+            active_cwd,
         }
     }
 
@@ -175,6 +208,10 @@ impl ConversationView {
     pub fn set_status(&self, status: &str) {
         self.status_label.set_label(status);
         self.composer.set_is_running(status == "Running");
+    }
+
+    pub fn set_cwd(&self, cwd: &str) {
+        *self.active_cwd.borrow_mut() = PathBuf::from(cwd);
     }
 
     pub fn select_panel(&self, panel_name: &str) {

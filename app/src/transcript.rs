@@ -125,6 +125,44 @@ impl ConversationTranscript {
         self.last_seq
     }
 
+    pub fn latest_snippet(&self) -> Option<String> {
+        self.blocks.iter().rev().find_map(|block| match block {
+            RenderBlock::UserMessage { text, .. } => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }
+            RenderBlock::AssistantMessage { text, .. } => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }
+            RenderBlock::ToolResult { result, .. } => {
+                let trimmed = result.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }
+            RenderBlock::GenericEvent { summary, .. } => {
+                let trimmed = summary.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }
+            _ => None,
+        })
+    }
+
     pub fn set_last_seq(&mut self, seq: i64) {
         self.last_seq = seq;
     }
