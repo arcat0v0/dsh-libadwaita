@@ -7,6 +7,10 @@ import type { BridgeCredentials } from './credentials.js';
 import { BridgeServer } from './server.js';
 import {
   type AssistantStreamFrame,
+  type AttachmentReadParams,
+  type AttachmentReadResult,
+  type AttachmentUploadParams,
+  type AttachmentUploadResult,
   BRIDGE_ERROR_CODES,
   BridgeError,
   type CommandDescriptor,
@@ -31,6 +35,22 @@ import {
   type GoalMutationResult,
   type GoalUpdatedNotification,
   type GoalView,
+  type JobChunkWire,
+  type JobFollowParams,
+  type JobFollowResult,
+  type JobKillParams,
+  type JobKillResult,
+  type JobListParams,
+  type JobListResult,
+  type JobOutputNotification,
+  type JobWireView,
+  type MessageFeedbackDeleteParams,
+  type MessageFeedbackDeleteResult,
+  type MessageFeedbackItem,
+  type MessageFeedbackListParams,
+  type MessageFeedbackListResult,
+  type MessageFeedbackPutParams,
+  type MessageFeedbackPutResult,
   type ModelCatalogResult,
   type PermissionCatalogResult,
   type PermissionGetParams,
@@ -40,6 +60,8 @@ import {
   type PermissionUpdatedNotification,
   type PluginListResult,
   type PluginToggleResult,
+  type QuestionReopenParams,
+  type QuestionReopenResult,
   type QueueEditParams,
   type QueueItem,
   type QueueListParams,
@@ -59,6 +81,8 @@ import {
   type SessionCreateParams,
   type SessionCreateResult,
   type SessionEvent,
+  type SessionFeedbackRecordParams,
+  type SessionFeedbackRecordResult,
   type SessionFollowParams,
   type SessionFollowResult,
   type SessionForkParams,
@@ -72,11 +96,17 @@ import {
   type SessionModelSetParams,
   type SessionPageParams,
   type SessionPageResult,
+  type SessionProjectionNotification,
+  type SessionProjectionsParams,
+  type SessionProjectionsResult,
   type SessionProjectionsSnapshot,
   type SessionPromptParams,
   type SessionPromptResult,
   type SessionRenameParams,
   type SessionRenameResult,
+  type SessionSearchItem,
+  type SessionSearchParams,
+  type SessionSearchResult,
   type SessionTitleSnapshot,
   type SessionWorkdirGetParams,
   type SessionWorkdirGetResult,
@@ -92,6 +122,9 @@ import {
   type SkillListResult,
   type StreamChunk,
   type TodoItem,
+  type ToolResultUpdatedNotification,
+  type ToolResultWatchParams,
+  type ToolResultWatchResult,
   type WorkspaceChangesParams,
   type WorkspaceChangesResult,
   type WorkspaceCreateParams,
@@ -208,6 +241,11 @@ export class BridgeService extends Service {
   private readonly followedSessions = new Set<string>();
   private readonly activeTurnBaselines = new Map<string, ActiveTurnState>();
   private readonly archivedSessions = new Set<string>();
+  private readonly watchedToolResults = new Set<string>();
+  private readonly jobTimers = new Map<string, NodeJS.Timeout>();
+  private readonly pendingQuestionsBySession = new Map<string, SdkUserQuestionRequest>();
+  private readonly projectionRevisions = new Map<string, number>();
+  private readonly projectionSignatures = new Map<string, string>();
 
   constructor(ctx: Context, config: BridgeConfig = {}) {
     super(ctx, 'bridge');
@@ -264,7 +302,7 @@ export class BridgeService extends Service {
     });
 
     this.ctx.on('session/event', (session: unknown, event: unknown) => {
-      const s = session as { id?: string };
+      const s = session as SessionLike;
       const ev = event as SessionEvent;
       if (!s?.id || !ev) return;
 
@@ -333,6 +371,53 @@ export class BridgeService extends Service {
             this.server.notify('permission.updated', notification);
           }
         }
+
+        if (ev.type === 'tool/result' && this.watchedToolResults.has(s.id)) {
+          const data =
+            ev.data && typeof ev.data === 'object'
+              ? (ev.data as { callId?: string; name?: string })
+              : {};
+          const notification: ToolResultUpdatedNotification = {
+            sessionId: s.id,
+            seq: ev.seq,
+            ...(data.callId === undefined ? {} : { callId: data.callId }),
+            ...(data.name === undefined ? {} : { name: data.name }),
+            data: ev.data,
+          };
+          this.server.notify('tool-result.updated', notification);
+        }
+        if (
+          ev.type === 'assistant/message' ||
+          ev.type === 'step/end' ||
+          ev.type === 'turn/end' ||
+          ev.type === 'compaction/end'
+        ) {
+          const projections = this.ctx.get('sessionProjections') as unknown as {
+            snapshot?: (
+              session: SessionLike,
+              keys: string[],
+            ) => { values: Record<string, unknown> };
+          };
+          const keys = ['tokenUsage', 'contextPressure', 'contextBreakdown'];
+          const snapshot = projections?.snapshot?.(s, keys);
+          for (const kind of keys) {
+            const value = snapshot?.values[kind];
+            if (value === undefined) continue;
+            const cacheKey = `${s.id}:${kind}`;
+            const signature = JSON.stringify(value);
+            if (this.projectionSignatures.get(cacheKey) === signature) continue;
+            this.projectionSignatures.set(cacheKey, signature);
+            const revision = Math.max(this.projectionRevisions.get(cacheKey) ?? 0, ev.seq);
+            this.projectionRevisions.set(cacheKey, revision);
+            const notification: SessionProjectionNotification = {
+              sessionId: s.id,
+              kind,
+              value,
+              revision,
+            };
+            this.server.notify('session.projection', notification);
+          }
+        }
       }
     });
 
@@ -388,6 +473,7 @@ export class BridgeService extends Service {
         toolName?: string;
         callId?: string;
         reason?: string;
+        displayReason?: Record<string, string>;
         signal?: AbortSignal;
       };
       const sessionId = r.agent?.session?.id ?? '';
@@ -395,8 +481,9 @@ export class BridgeService extends Service {
         {
           sessionId,
           toolName: r.toolName ?? 'unknown',
-          callId: r.callId,
-          reason: r.reason,
+          ...(r.callId === undefined ? {} : { callId: r.callId }),
+          ...(r.reason === undefined ? {} : { reason: r.reason }),
+          ...(r.displayReason === undefined ? {} : { displayReason: r.displayReason }),
         },
         300_000,
         r.signal,
@@ -412,19 +499,24 @@ export class BridgeService extends Service {
         agent?: { session?: { id?: string } };
         questions?: unknown[];
         signal?: AbortSignal;
+        wait?: { callId?: string; timed?: boolean };
       };
       const sessionId = r.agent?.session?.id ?? '';
       const requestId = `q-${crypto.randomUUID()}`;
+      const payload: SdkUserQuestionRequest = {
+        requestId,
+        sessionId,
+        questions: (r.questions ?? []) as SdkUserQuestionRequest['questions'],
+        ...(r.wait?.callId === undefined ? {} : { callId: r.wait.callId }),
+        ...(r.wait?.timed === undefined ? {} : { timed: r.wait.timed }),
+      };
+      this.pendingQuestionsBySession.set(sessionId, payload);
 
-      const res = await this.server.requestUserQuestion(
-        {
-          requestId,
-          sessionId,
-          questions: (r.questions ?? []) as SdkUserQuestionRequest['questions'],
-        },
-        300_000,
-        r.signal,
-      );
+      const res = await this.server.requestUserQuestion(payload, 300_000, r.signal).finally(() => {
+        if (this.pendingQuestionsBySession.get(sessionId) === payload) {
+          this.pendingQuestionsBySession.delete(sessionId);
+        }
+      });
 
       if ('answers' in res) {
         return { answers: res.answers };
@@ -438,6 +530,8 @@ export class BridgeService extends Service {
 
     this.ctx.effect(() => {
       return () => {
+        for (const timer of this.jobTimers.values()) clearInterval(timer);
+        this.jobTimers.clear();
         void this.server.close();
       };
     }, 'bridge.server.lifecycle');
@@ -529,6 +623,32 @@ export class BridgeService extends Service {
         return this.handleFilesRead(params as unknown as FilesReadParams);
       case 'libadwaita/files/readBytes':
         return this.handleFilesReadBytes(params as unknown as FilesReadBytesParams);
+      case 'libadwaita/session/projections':
+        return this.handleSessionProjections(params as unknown as SessionProjectionsParams);
+      case 'libadwaita/tool-result/watch':
+        return this.handleToolResultWatch(params as unknown as ToolResultWatchParams);
+      case 'libadwaita/message-feedback/list':
+        return this.handleMessageFeedbackList(params as unknown as MessageFeedbackListParams);
+      case 'libadwaita/message-feedback/put':
+        return this.handleMessageFeedbackPut(params as unknown as MessageFeedbackPutParams);
+      case 'libadwaita/message-feedback/delete':
+        return this.handleMessageFeedbackDelete(params as unknown as MessageFeedbackDeleteParams);
+      case 'libadwaita/session-feedback/record':
+        return this.handleSessionFeedbackRecord(params as unknown as SessionFeedbackRecordParams);
+      case 'libadwaita/question/reopen':
+        return this.handleQuestionReopen(params as unknown as QuestionReopenParams);
+      case 'libadwaita/job/list':
+        return this.handleJobList(params as unknown as JobListParams);
+      case 'libadwaita/job/follow':
+        return this.handleJobFollow(params as unknown as JobFollowParams);
+      case 'libadwaita/job/kill':
+        return this.handleJobKill(params as unknown as JobKillParams);
+      case 'libadwaita/session/search':
+        return this.handleSessionSearch(params as unknown as SessionSearchParams);
+      case 'libadwaita/attachment/upload':
+        return this.handleAttachmentUpload(params as unknown as AttachmentUploadParams);
+      case 'libadwaita/attachment/read':
+        return this.handleAttachmentRead(params as unknown as AttachmentReadParams);
       case 'libadwaita/plugin/list':
         return this.handlePluginList();
       case 'libadwaita/plugin/enable':
@@ -772,11 +892,48 @@ export class BridgeService extends Service {
     }
 
     const messageId = `msg-${crypto.randomUUID()}`;
-    const blocks: SdkPromptContentBlock[] = params.contentBlocks.map((b) => {
-      if (b.type === 'text' && 'text' in b) {
-        return { type: 'text', text: String(b.text) };
+    const encodedImages = params.contentBlocks.filter(
+      (block): block is { type: 'image'; data: string; mimeType: string; name?: string } =>
+        block.type === 'image' && 'data' in block && typeof block.data === 'string',
+    );
+    const attachments = this.ctx.get('attachments') as unknown as {
+      saveImages?: (
+        inputs: Array<{ data: Uint8Array; mediaType: string; name?: string }>,
+      ) => Promise<Array<{ id: string }>>;
+    };
+    let imageRefs: Array<{ id: string }> = [];
+    if (encodedImages.length > 0) {
+      if (!attachments?.saveImages) {
+        throw new BridgeError(
+          BRIDGE_ERROR_CODES.ATTACHMENT_INVALID,
+          'image attachment store is not available',
+        );
       }
-      return b;
+      try {
+        imageRefs = await attachments.saveImages(
+          encodedImages.map((image) => ({
+            data: Buffer.from(image.data, 'base64'),
+            mediaType: image.mimeType,
+            ...(image.name === undefined ? {} : { name: image.name }),
+          })),
+        );
+      } catch (error) {
+        throw new BridgeError(
+          BRIDGE_ERROR_CODES.ATTACHMENT_INVALID,
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
+    let imageIndex = 0;
+    const blocks: SdkPromptContentBlock[] = params.contentBlocks.map((block) => {
+      if (block.type === 'text' && 'text' in block) {
+        return { type: 'text', text: String(block.text) };
+      }
+      if (block.type === 'image' && 'data' in block && typeof block.data === 'string') {
+        const ref = imageRefs[imageIndex++];
+        return ref ? { type: 'image', attachment: ref } : block;
+      }
+      return block;
     });
 
     const userMessage = {
@@ -1857,6 +2014,515 @@ export class BridgeService extends Service {
     };
   }
 
+  private async handleSessionProjections(
+    params: SessionProjectionsParams,
+  ): Promise<SessionProjectionsResult> {
+    const { session, agent } = await this.resolveSessionEntry(params.sessionId);
+    const projections = this.ctx.get('sessionProjections') as unknown as {
+      snapshot: (
+        session: SessionLike,
+        keys: string[],
+      ) => { asOfSeq: number; values: Record<string, unknown> };
+    };
+    if (!projections?.snapshot) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.INTERNAL_ERROR,
+        'session projection service is not available',
+      );
+    }
+    const snapshot = projections.snapshot(session, [
+      'tokenUsage',
+      'contextPressure',
+      'contextBreakdown',
+    ]);
+    const goals = this.ctx.get('goals') as unknown as {
+      get: (agent: AgentLike) => GoalView | undefined;
+    };
+    return {
+      asOfSeq: snapshot.asOfSeq,
+      ...(snapshot.values.tokenUsage === undefined
+        ? {}
+        : { tokenUsage: snapshot.values.tokenUsage }),
+      ...(snapshot.values.contextPressure === undefined
+        ? {}
+        : { contextPressure: snapshot.values.contextPressure }),
+      ...(snapshot.values.contextBreakdown === undefined
+        ? {}
+        : { contextBreakdown: snapshot.values.contextBreakdown }),
+      ...(agent === undefined ? {} : { goal: this.goalView(goals?.get(agent)) }),
+    };
+  }
+
+  private async handleToolResultWatch(
+    params: ToolResultWatchParams,
+  ): Promise<ToolResultWatchResult> {
+    await this.resolveSessionEntry(params.sessionId);
+    if (params.subscribe) {
+      this.watchedToolResults.add(params.sessionId);
+    } else {
+      this.watchedToolResults.delete(params.sessionId);
+    }
+    return {
+      sessionId: params.sessionId,
+      subscribed: this.watchedToolResults.has(params.sessionId),
+    };
+  }
+
+  private mapFeedbackFailure(error: {
+    code?: string;
+    sessionId?: string;
+    messageId?: string;
+    item?: MessageFeedbackItem | null;
+  }): never {
+    if (error.code === 'session-not-found') {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.SESSION_NOT_FOUND,
+        `session not found: ${String(error.sessionId)}`,
+      );
+    }
+    if (error.code === 'target-not-found') {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.FEEDBACK_TARGET_NOT_FOUND,
+        `message not found: ${String(error.messageId)}`,
+      );
+    }
+    if (error.code === 'version-conflict') {
+      throw new BridgeError(BRIDGE_ERROR_CODES.FEEDBACK_CONFLICT, 'feedback version conflict', {
+        item: error.item,
+      });
+    }
+    throw new BridgeError(-32602, `feedback rejected: ${String(error.code)}`);
+  }
+
+  private mapFeedbackItem(item: MessageFeedbackItem): MessageFeedbackItem {
+    return {
+      messageId: item.messageId,
+      rating: item.rating,
+      ...(item.note === undefined ? {} : { note: item.note }),
+      ...(item.category === undefined ? {} : { category: item.category }),
+      version: item.version,
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt,
+    };
+  }
+
+  private async handleMessageFeedbackList(
+    params: MessageFeedbackListParams,
+  ): Promise<MessageFeedbackListResult> {
+    const feedback = this.ctx.get('messageFeedback') as unknown as {
+      list: (request: object) => Promise<
+        | { ok: true; value: { items: MessageFeedbackItem[] } }
+        | {
+            ok: false;
+            error: {
+              code?: string;
+              sessionId?: string;
+              messageId?: string;
+              item?: MessageFeedbackItem | null;
+            };
+          }
+      >;
+    };
+    if (!feedback?.list) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.INTERNAL_ERROR,
+        'message feedback service is not available',
+      );
+    }
+    const result = await feedback.list({ sessionId: params.sessionId });
+    if (!result.ok) this.mapFeedbackFailure(result.error);
+    return { items: result.value.items.map((item) => this.mapFeedbackItem(item)) };
+  }
+
+  private async handleMessageFeedbackPut(
+    params: MessageFeedbackPutParams,
+  ): Promise<MessageFeedbackPutResult> {
+    const feedback = this.ctx.get('messageFeedback') as unknown as {
+      put: (request: object) => Promise<
+        | { ok: true; value: MessageFeedbackItem }
+        | {
+            ok: false;
+            error: {
+              code?: string;
+              sessionId?: string;
+              messageId?: string;
+              item?: MessageFeedbackItem | null;
+            };
+          }
+      >;
+    };
+    if (!feedback?.put) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.INTERNAL_ERROR,
+        'message feedback service is not available',
+      );
+    }
+    const result = await feedback.put({
+      sessionId: params.sessionId,
+      messageId: params.messageId,
+      rating: params.rating,
+      ...(params.note === undefined ? {} : { note: params.note }),
+      ...(params.category === undefined ? {} : { category: params.category }),
+      ifVersion: params.ifVersion,
+    });
+    if (!result.ok) this.mapFeedbackFailure(result.error);
+    return { item: this.mapFeedbackItem(result.value) };
+  }
+
+  private async handleMessageFeedbackDelete(
+    params: MessageFeedbackDeleteParams,
+  ): Promise<MessageFeedbackDeleteResult> {
+    const feedback = this.ctx.get('messageFeedback') as unknown as {
+      delete: (request: object) => Promise<
+        | { ok: true; value: { absent: true } }
+        | {
+            ok: false;
+            error: {
+              code?: string;
+              sessionId?: string;
+              messageId?: string;
+              item?: MessageFeedbackItem | null;
+            };
+          }
+      >;
+    };
+    if (!feedback?.delete) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.INTERNAL_ERROR,
+        'message feedback service is not available',
+      );
+    }
+    const result = await feedback.delete({
+      sessionId: params.sessionId,
+      messageId: params.messageId,
+      ifVersion: params.ifVersion,
+    });
+    if (!result.ok) this.mapFeedbackFailure(result.error);
+    return { absent: true };
+  }
+
+  private async handleSessionFeedbackRecord(
+    params: SessionFeedbackRecordParams,
+  ): Promise<SessionFeedbackRecordResult> {
+    const feedback = this.ctx.get('sessionFeedback') as unknown as {
+      record: (
+        request: object,
+      ) => Promise<
+        | { ok: true; value: { recorded: true } }
+        | { ok: false; error: { code?: string; sessionId?: string } }
+      >;
+    };
+    if (!feedback?.record) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.INTERNAL_ERROR,
+        'session feedback service is not available',
+      );
+    }
+    const result = await feedback.record({
+      sessionId: params.sessionId,
+      ...(params.text === undefined ? {} : { text: params.text }),
+      ...(params.category === undefined ? {} : { category: params.category }),
+    });
+    if (!result.ok) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.SESSION_NOT_FOUND,
+        `session not found: ${params.sessionId}`,
+      );
+    }
+    return { recorded: true };
+  }
+
+  private async handleQuestionReopen(params: QuestionReopenParams): Promise<QuestionReopenResult> {
+    const request = this.pendingQuestionsBySession.get(params.sessionId);
+    if (!request) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.QUESTION_NOT_PENDING,
+        'no pending user question for this session',
+      );
+    }
+    return { request };
+  }
+
+  private mapJob(job: {
+    id: string;
+    kind: string;
+    label: string;
+    owner?: string;
+    status: JobWireView['status'];
+    progress?: string;
+    detail?: string;
+    startedAt: number;
+    finishedAt?: number;
+    output: { total: number; earliest: number; spillPaths?: readonly string[] };
+  }): JobWireView {
+    return {
+      id: job.id,
+      kind: job.kind,
+      label: job.label,
+      ...(job.owner === undefined ? {} : { owner: job.owner }),
+      status: job.status,
+      ...(job.progress === undefined ? {} : { progress: job.progress }),
+      ...(job.detail === undefined ? {} : { detail: job.detail }),
+      startedAt: job.startedAt,
+      ...(job.finishedAt === undefined ? {} : { finishedAt: job.finishedAt }),
+      output: {
+        total: job.output.total,
+        earliest: job.output.earliest,
+        ...(job.output.spillPaths === undefined ? {} : { spillPaths: [...job.output.spillPaths] }),
+      },
+    };
+  }
+
+  private mapJobChunk(chunk: JobChunkWire): JobChunkWire {
+    return {
+      at: chunk.at,
+      text: chunk.text,
+      ...(chunk.channel === undefined ? {} : { channel: chunk.channel }),
+      ...(chunk.gapBefore === undefined ? {} : { gapBefore: chunk.gapBefore }),
+    };
+  }
+
+  private jobService():
+    | {
+        list: (sessionId: string) => Array<object>;
+        get: (jobId: string, sessionId: string) => object;
+        readAt: (
+          jobId: string,
+          from: number,
+          sessionId: string,
+        ) => { chunks: JobChunkWire[]; next: number; lossy: boolean };
+        kill: (jobId: string, sessionId: string, reason?: string) => JobKillResult['status'];
+      }
+    | undefined {
+    return this.ctx.get('jobs') as
+      | {
+          list: (sessionId: string) => Array<object>;
+          get: (jobId: string, sessionId: string) => object;
+          readAt: (
+            jobId: string,
+            from: number,
+            sessionId: string,
+          ) => { chunks: JobChunkWire[]; next: number; lossy: boolean };
+          kill: (jobId: string, sessionId: string, reason?: string) => JobKillResult['status'];
+        }
+      | undefined;
+  }
+
+  private jobError(error: unknown): BridgeError {
+    if (error instanceof Error) {
+      return new BridgeError(BRIDGE_ERROR_CODES.JOB_NOT_FOUND, error.message);
+    }
+    return new BridgeError(BRIDGE_ERROR_CODES.JOB_NOT_FOUND, String(error));
+  }
+
+  private async handleJobList(params: JobListParams): Promise<JobListResult> {
+    const jobs = this.jobService();
+    if (!jobs) {
+      throw new BridgeError(BRIDGE_ERROR_CODES.INTERNAL_ERROR, 'jobs service is not available');
+    }
+    return {
+      jobs: jobs
+        .list(params.sessionId)
+        .map((job) => this.mapJob(job as Parameters<BridgeService['mapJob']>[0])),
+    };
+  }
+
+  private async handleJobFollow(params: JobFollowParams): Promise<JobFollowResult> {
+    const jobs = this.jobService();
+    if (!jobs) {
+      throw new BridgeError(BRIDGE_ERROR_CODES.INTERNAL_ERROR, 'jobs service is not available');
+    }
+    try {
+      const job = jobs.get(params.jobId, params.sessionId) as Parameters<
+        BridgeService['mapJob']
+      >[0];
+      const read = jobs.readAt(params.jobId, params.from ?? 0, params.sessionId);
+      const result: JobFollowResult = {
+        job: this.mapJob(job),
+        chunks: read.chunks.map((chunk) => this.mapJobChunk(chunk)),
+        next: read.next,
+        lossy: read.lossy,
+      };
+      const key = `${params.sessionId}:${params.jobId}`;
+      clearInterval(this.jobTimers.get(key));
+      if (job.status === 'running' || job.status === 'stopping') {
+        let cursor = read.next;
+        const timer = setInterval(() => {
+          try {
+            const next = jobs.readAt(params.jobId, cursor, params.sessionId);
+            cursor = next.next;
+            const current = jobs.get(params.jobId, params.sessionId) as Parameters<
+              BridgeService['mapJob']
+            >[0];
+            const notification: JobOutputNotification = {
+              sessionId: params.sessionId,
+              jobId: params.jobId,
+              job: this.mapJob(current),
+              chunks: next.chunks.map((chunk) => this.mapJobChunk(chunk)),
+              next: next.next,
+              lossy: next.lossy,
+            };
+            this.server.notify('job.output', notification);
+            if (current.status !== 'running' && current.status !== 'stopping') {
+              clearInterval(timer);
+              this.jobTimers.delete(key);
+            }
+          } catch {
+            clearInterval(timer);
+            this.jobTimers.delete(key);
+          }
+        }, 250);
+        this.jobTimers.set(key, timer);
+      }
+      return result;
+    } catch (error) {
+      throw this.jobError(error);
+    }
+  }
+
+  private async handleJobKill(params: JobKillParams): Promise<JobKillResult> {
+    const jobs = this.jobService();
+    if (!jobs) {
+      throw new BridgeError(BRIDGE_ERROR_CODES.INTERNAL_ERROR, 'jobs service is not available');
+    }
+    try {
+      return { status: jobs.kill(params.jobId, params.sessionId, params.reason) };
+    } catch (error) {
+      throw this.jobError(error);
+    }
+  }
+
+  private async handleSessionSearch(params: SessionSearchParams): Promise<SessionSearchResult> {
+    const sessions = this.ctx.get('sessions') as unknown as {
+      list: () => SessionLike[];
+    };
+    const limit = Math.min(Math.max(params.limit ?? 50, 1), 200);
+    const query = params.query.trim().toLowerCase();
+    const includeArchived = params.archived ?? false;
+    const items: SessionSearchItem[] = [];
+    for (const session of sessions?.list() ?? []) {
+      const archived = this.archivedSessions.has(session.id);
+      if (archived && !includeArchived) continue;
+      const events = session.snapshotEvents();
+      const titleEvent = events.findLast((event) => event.type === 'session/title');
+      const title =
+        titleEvent?.data && typeof titleEvent.data === 'object' && 'title' in titleEvent.data
+          ? String(titleEvent.data.title)
+          : '';
+      const cwd = session.header.cwd ?? '';
+      if (
+        query.length > 0 &&
+        !title.toLowerCase().includes(query) &&
+        !cwd.toLowerCase().includes(query)
+      ) {
+        continue;
+      }
+      const last = events.at(-1);
+      items.push({
+        id: session.id,
+        title,
+        cwd,
+        updatedAt: last?.time ?? session.header.createdAt,
+      });
+    }
+    items.sort((left, right) => right.updatedAt - left.updatedAt);
+    return {
+      items: items.slice(0, limit),
+      hasMore: items.length > limit,
+      fullText: false,
+    };
+  }
+
+  private attachmentsRoot(sessionId: string): string {
+    const sessionDir = path.basename(sessionId);
+    if (sessionDir !== sessionId) {
+      throw new BridgeError(BRIDGE_ERROR_CODES.ATTACHMENT_INVALID, 'invalid session id');
+    }
+    return path.join(
+      process.env.DSH_HOME ?? process.cwd(),
+      'attachments',
+      'libadwaita',
+      sessionDir,
+    );
+  }
+
+  private async handleAttachmentUpload(
+    params: AttachmentUploadParams,
+  ): Promise<AttachmentUploadResult> {
+    await this.resolveSessionEntry(params.sessionId);
+    if (!params.name.trim() || typeof params.data !== 'string') {
+      throw new BridgeError(BRIDGE_ERROR_CODES.ATTACHMENT_INVALID, 'name and data are required');
+    }
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(params.data) || params.data.length % 4 !== 0) {
+      throw new BridgeError(BRIDGE_ERROR_CODES.ATTACHMENT_INVALID, 'data must be valid base64');
+    }
+    const bytes = Buffer.from(params.data, 'base64');
+    if (bytes.length > 16_777_216) {
+      throw new BridgeError(BRIDGE_ERROR_CODES.ATTACHMENT_TOO_LARGE, 'attachment exceeds 16 MiB');
+    }
+    const safeName = path.basename(params.name).replace(/[^A-Za-z0-9._-]/g, '_');
+    const attachmentId = crypto.randomUUID();
+    const dir = this.attachmentsRoot(params.sessionId);
+    await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+    await fs.writeFile(path.join(dir, `${attachmentId}__${safeName}`), bytes, { mode: 0o600 });
+    return {
+      attachmentId,
+      name: safeName,
+      size: bytes.length,
+      mimeType: params.mimeType ?? 'application/octet-stream',
+    };
+  }
+
+  private async handleAttachmentRead(params: AttachmentReadParams): Promise<AttachmentReadResult> {
+    await this.resolveSessionEntry(params.sessionId);
+    if (!/^[0-9a-f-]{36}$/i.test(params.attachmentId)) {
+      throw new BridgeError(BRIDGE_ERROR_CODES.ATTACHMENT_INVALID, 'invalid attachment id');
+    }
+    const dir = this.attachmentsRoot(params.sessionId);
+    let entries: string[];
+    try {
+      entries = await fs.readdir(dir);
+    } catch {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.ATTACHMENT_NOT_FOUND,
+        `attachment not found: ${params.attachmentId}`,
+      );
+    }
+    const match = entries.find((entry) => entry.startsWith(`${params.attachmentId}__`));
+    if (!match) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.ATTACHMENT_NOT_FOUND,
+        `attachment not found: ${params.attachmentId}`,
+      );
+    }
+    const bytes = await fs.readFile(path.join(dir, match));
+    const encoding = params.encoding ?? 'base64';
+    if (encoding === 'text') {
+      const text = bytes.toString('utf8');
+      if (bytes.includes(0) || text.includes('\uFFFD')) {
+        throw new BridgeError(
+          BRIDGE_ERROR_CODES.ATTACHMENT_INVALID,
+          'attachment is not valid UTF-8 text',
+        );
+      }
+      return {
+        attachmentId: params.attachmentId,
+        name: match.slice(match.indexOf('__') + 2),
+        size: bytes.length,
+        mimeType: 'text/plain',
+        encoding: 'text',
+        data: text,
+      };
+    }
+    return {
+      attachmentId: params.attachmentId,
+      name: match.slice(match.indexOf('__') + 2),
+      size: bytes.length,
+      mimeType: 'application/octet-stream',
+      encoding: 'base64',
+      data: bytes.toString('base64'),
+    };
+  }
   private async handlePluginList(): Promise<PluginListResult> {
     const pm = this.ctx.get('pluginManager') as unknown as {
       listPlugins?: () => Promise<Array<{ entryId: string; moduleName: string; enabled: boolean }>>;

@@ -121,7 +121,7 @@ describe('Gap batch B', { timeout: 60_000 }, () => {
       assert.ok(target);
       assert.equal(typeof target.revision, 'number');
       const updates: SettingsUpdatedNotification[] = [];
-      harness.transport.onNotification((method, params) => {
+      harness.onNotification((method, params) => {
         if (method === 'settings.updated') {
           updates.push(params as unknown as SettingsUpdatedNotification);
         }
@@ -164,7 +164,7 @@ describe('Gap batch B', { timeout: 60_000 }, () => {
       })) as PermissionGetResult;
       assert.equal(typeof current.currentValue, 'string');
       const updates: PermissionUpdatedNotification[] = [];
-      harness.transport.onNotification((method, params) => {
+      harness.onNotification((method, params) => {
         if (method === 'permission.updated') {
           updates.push(params as unknown as PermissionUpdatedNotification);
         }
@@ -207,7 +207,7 @@ describe('Gap batch B', { timeout: 60_000 }, () => {
       assert.ok(first.goal);
       assert.equal(first.goal.objective, 'Ship batch B');
       const updates: GoalUpdatedNotification[] = [];
-      harness.transport.onNotification((method, params) => {
+      harness.onNotification((method, params) => {
         if (method === 'goal.updated') {
           updates.push(params as unknown as GoalUpdatedNotification);
         }

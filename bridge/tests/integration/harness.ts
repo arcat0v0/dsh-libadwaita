@@ -116,6 +116,13 @@ export class MockLlmServer {
   }
 }
 
+export type HarnessNotificationListener = (method: string, params: Record<string, unknown>) => void;
+
+export type HarnessRequestListener = (
+  method: string,
+  params: Record<string, unknown>,
+) => Promise<unknown>;
+
 export interface DshTestHarness {
   homeDir: string;
   runtimeDir: string;
@@ -125,6 +132,8 @@ export interface DshTestHarness {
   dshProc: ChildProcess;
   transport: JsonRpcLineTransport;
   socket: net.Socket;
+  onNotification: (listener: HarnessNotificationListener) => () => void;
+  onRequest: (listener: HarnessRequestListener) => () => void;
   getStdout: () => Buffer;
   getStderr: () => string;
   cleanup: () => Promise<void>;
@@ -256,6 +265,20 @@ export async function createDshHarness(
   }
 
   const transport = new JsonRpcLineTransport(socket, socket);
+  const notificationListeners = new Set<HarnessNotificationListener>();
+  const requestListeners = new Set<
+    (method: string, params: Record<string, unknown>) => Promise<unknown>
+  >();
+  transport.onNotification((method, params) => {
+    for (const listener of [...notificationListeners]) listener(method, params);
+  });
+  transport.onRequest(async (method, params) => {
+    for (const listener of [...requestListeners]) {
+      const result = await listener(method, params);
+      if (result !== undefined) return result;
+    }
+    return {};
+  });
   transport.start();
 
   const cleanup = async () => {
@@ -289,6 +312,18 @@ export async function createDshHarness(
     dshProc,
     transport,
     socket,
+    onNotification: (listener) => {
+      notificationListeners.add(listener);
+      return () => {
+        notificationListeners.delete(listener);
+      };
+    },
+    onRequest: (listener) => {
+      requestListeners.add(listener);
+      return () => {
+        requestListeners.delete(listener);
+      };
+    },
     getStdout: () => Buffer.concat(stdoutChunks),
     getStderr: () => stderrText,
     cleanup,

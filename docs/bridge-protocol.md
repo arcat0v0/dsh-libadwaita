@@ -231,6 +231,19 @@ GUI 连接 Socket 后的第一个请求必须为 `libadwaita/initialize`。在�
 | `libadwaita/files/stat` | 查询文件元数据 | bridge 本地安全文件访问 |
 | `libadwaita/files/read` | 读取会话 cwd 内文本文件 | bridge 本地安全文件访问 |
 | `libadwaita/files/readBytes` | 读取会话 cwd 内字节文件 | bridge 本地安全文件访问 |
+| `libadwaita/session/projections` | 读取会话可用投影基线 | `ctx.sessionProjections.snapshot` + `ctx.goals.get` |
+| `libadwaita/session/search` | 元数据搜索会话标题与 cwd | bridge 侧元数据过滤（非全文） |
+| `libadwaita/tool-result/watch` | 订阅/取消会话工具结果通知 | bridge 侧派生自 `session.event` |
+| `libadwaita/message-feedback/list` | 列出消息反馈 | `ctx.messageFeedback.list` |
+| `libadwaita/message-feedback/put` | 写入消息反馈（CAS） | `ctx.messageFeedback.put` |
+| `libadwaita/message-feedback/delete` | 删除消息反馈 | `ctx.messageFeedback.delete` |
+| `libadwaita/session-feedback/record` | 记录会话级反馈 | `ctx.sessionFeedback.record` |
+| `libadwaita/question/reopen` | 取回仍在等待中的用户提问快照 | bridge 内存快照 |
+| `libadwaita/job/list` | 列出会话后台 jobs | `ctx.jobs.list(sessionId)` |
+| `libadwaita/job/follow` | 读取并跟随 job 输出 | `ctx.jobs.get/readAt` |
+| `libadwaita/job/kill` | 请求停止 job | `ctx.jobs.kill` |
+| `libadwaita/attachment/upload` | 上传会话附件（base64，限 16 MiB） | bridge 本地会话附件存储 |
+| `libadwaita/attachment/read` | 读取会话附件 | bridge 本地会话附件存储 |
 | `libadwaita/plugin/list` | 查询已安装与已启用的插件 | `ctx.pluginManager.list` |
 | `libadwaita/plugin/enable` | 启用插件（返回 restart-required） | `ctx.pluginManager.setPluginEnabled` |
 | `libadwaita/plugin/disable` | 禁用插件（返回 restart-required） | `ctx.pluginManager.setPluginEnabled` |
@@ -828,6 +841,103 @@ Bridge 直接投影上游 `agent.inbox`：`nextTurn` 为等待独立 turn 的排
 - **请求参数**：`{ "sessionId": string, "path": string, "maxBytes"?: number }`
 - **响应结果**：`{ "path": string, "data": string, "size": number }`
 - **错误**：`-32027`；非普通文件 `-32028`；超过上限 `-32029 FILE_TOO_LARGE`。
+
+### 6.11 投影、工具结果、反馈、Jobs、搜索与附件
+
+#### `libadwaita/session/projections`
+
+- **说明**：读取会话当前可用的投影基线。上游 `ctx.sessionProjections.snapshot` 提供 `tokenUsage`、`contextPressure`、`contextBreakdown`（由 base 的 `token-meter` 行提供）；`goal` 由 `ctx.goals.get` 提供。上游 `session-stats` 与 `session-turn-outline` 仅在 web-app 挂载，因此 `turnOutline` 与 `sessionStats` 在 base 组合下**始终省略**，协议不会伪造这些字段。
+- **请求参数**：`{ "sessionId": string }`
+- **响应结果（`SessionProjectionsResult`）**：
+  | 字段 | 类型 | 必选 | 说明 |
+  |---|---|---|---|
+  | `asOfSeq` | `number` | 是 | 基线所处日志游标 |
+  | `tokenUsage` | `unknown` | 否 | 累计 token 用量（上游存在时） |
+  | `contextPressure` | `unknown` | 否 | 最新请求压力与容量 |
+  | `contextBreakdown` | `unknown` | 否 | system/tools/message 组成 |
+  | `goal` | `GoalView \| null` | 否 | 当前 goal |
+  | `turnOutline` / `sessionStats` | `unknown` | 否 | 仅在未来挂载对应上游 provider 时存在 |
+- **增量通知**：见 §7.10 `session.projection`。
+
+#### `libadwaita/session/search`
+
+- **说明**：元数据搜索。按标题与 cwd 的子串（大小写不敏感）过滤实时会话并按最近事件时间倒序返回。**不是全文搜索**：base 的 `session-query-sqlite` 以 `openAt: never` 挂载，全文 provider 默认禁用（见 `packages/bundle/base/cordis.patch.yml` 第 149–161 行）。若未来 profile 显式启用全文 provider，本协议仍需另行评估。
+- **请求参数**：`{ "query": string, "limit"?: number, "archived"?: boolean }`
+- **响应结果（`SessionSearchResult`）**：
+  | 字段 | 类型 | 必选 | 说明 |
+  |---|---|---|---|
+  | `items` | `SessionSearchItem[]` | 是 | `{ id, title, cwd, updatedAt }` |
+  | `hasMore` | `boolean` | 是 | 是否超出 `limit` |
+  | `fullText` | `false` | 是 | 恒为 `false`，标识仅元数据匹配 |
+
+#### `libadwaita/tool-result/watch`
+
+- **说明**：订阅或取消会话的工具结果通知。上游 `sessionToolResults`（`toolResults.watch`）属于 web-app 的 trajectory Host 插件，base 不可用；本方法由 bridge **派生实现**：对已 follow 会话，把每条 `session.event` 的 `tool/result` 直接转为 `tool-result.updated`。只覆盖持久化后的最终结果，不承诺原始未落盘中间值。
+- **请求参数**：`{ "sessionId": string, "subscribe": boolean }`
+- **响应结果**：`{ "sessionId": string, "subscribed": boolean }`
+- **通知**：见 §7.11 `tool-result.updated`。
+
+#### `libadwaita/message-feedback/list` / `put` / `delete`
+
+- **说明**：消息反馈。bridge bundle 挂载 `@deepseek-ai/dsh-message-feedback`（`maxNoteBytes: 8192`），复用上游持久化服务与 `ifVersion` CAS 语义。
+- **`list`**：`{ "sessionId": string }` → `{ "items": MessageFeedbackItem[] }`。
+- **`put`**：`{ "sessionId", "messageId", "rating": 'positive' | 'negative', "note"?: string, "category"?: string, "ifVersion": string | null }` → `{ "item": MessageFeedbackItem }`。`ifVersion` 为 `null` 表示要求此前无反馈项；不匹配时返回 `-32031 FEEDBACK_CONFLICT`（`data.item` 为权威当前项）。
+- **`delete`**：`{ "sessionId", "messageId", "ifVersion": string }` → `{ "absent": true }`；项已不存在时幂等成功。
+- **`MessageFeedbackItem`**：`{ messageId, rating, note?, category?, version, createdAt, updatedAt }`。
+- **错误**：目标消息不存在 `-32032 FEEDBACK_TARGET_NOT_FOUND`；版本冲突 `-32031`；会话不存在 `-32002`。
+
+#### `libadwaita/session-feedback/record`
+
+- **说明**：会话级反馈（base 已挂载 `command-feedback`）。
+- **请求参数**：`{ "sessionId": string, "text"?: string, "category"?: string }`
+- **响应结果**：`{ "recorded": true }`；会话不存在返回 `-32002`。
+
+#### `libadwaita/question/reopen`
+
+- **说明**：取回仍在等待回答的用户提问快照。Bridge 在为 `user-question/ask` 建立请求时保存 payload，响应后清除。上游没有独立 `question/reopen` RPC；GUI 隐藏卡片后可据此恢复同一请求，并以原 JSON-RPC `id` 回复。迟到回答仍由 fail-closed 规则仲裁。
+- **请求参数**：`{ "sessionId": string }`
+- **响应结果**：`{ "request": SdkUserQuestionRequest }`
+- **错误**：当前无等待中的提问 `-32030 QUESTION_NOT_PENDING`。
+
+#### `libadwaita/job/list`
+
+- **说明**：列出会话拥有的后台 jobs（base 的 `jobs-local` 服务）。`JobWireView` 复用上游 `JobView`：`id`、`kind`、`label`、`owner?`、`status`、`progress?`、`detail?`、`startedAt`、`finishedAt?`、`output:{total, earliest, spillPaths?}`。
+- **请求参数**：`{ "sessionId": string }`
+- **响应结果**：`{ "jobs": JobWireView[] }`
+- **错误**：未知或跨会话 job `-32033 JOB_NOT_FOUND`。
+
+#### `libadwaita/job/follow`
+
+- **说明**：读取 job 的当前输出并开启 250ms 间隔的输出跟随。首个结果包含 `readAt(from)` 的块、下一偏移和 job 快照；随后用 `job.output` 通知推送新增块。job 进入终态后自动停止跟随。
+- **请求参数**：`{ "sessionId": string, "jobId": string, "from"?: number }`
+- **响应结果（`JobFollowResult`）**：
+  | 字段 | 类型 | 必选 | 说明 |
+  |---|---|---|---|
+  | `job` | `JobWireView` | 是 | job 快照 |
+  | `chunks` | `JobChunkWire[]` | 是 | 输出块：`{ at, text, channel?, gapBefore? }` |
+  | `next` | `number` | 是 | 下次读取偏移 |
+  | `lossy` | `boolean` | 是 | 是否因保留窗口丢弃了更早字节 |
+
+#### `libadwaita/job/kill`
+
+- **说明**：请求取消 job。返回上游 `requested`（运行中）或 `already-finished`（已结束）。
+- **请求参数**：`{ "sessionId": string, "jobId": string, "reason"?: string }`
+- **响应结果**：`{ "status": 'requested' | 'already-finished' }`
+
+#### `libadwaita/attachment/upload`
+
+- **说明**：桥本地附件暂存（上游通用 `fileUploads` 为 web-app 服务）。base64 解码后写入 `$DSH_HOME/attachments/libadwaita/<sessionId>/<uuid>__<safeName>`（目录 0700、文件 0600），单附件上限 16 MiB，名称做 basename 与字符清洗，禁止路径穿越。
+- **请求参数**：`{ "sessionId": string, "name": string, "data": string, "mimeType"?: string }`
+- **响应结果**：`{ "attachmentId": string, "name": string, "size": number, "mimeType": string }`
+- **错误**：大小超限 `-32036 ATTACHMENT_TOO_LARGE`；参数/编码非法 `-32037 ATTACHMENT_INVALID`。
+
+#### `libadwaita/attachment/read`
+
+- **说明**：按 `attachmentId` 读取本会话暂存附件；`encoding: 'text'` 时要求 UTF-8 且无 NUL，否则返回错误，不提供伪造文本。
+- **请求参数**：`{ "sessionId": string, "attachmentId": string, "encoding"?: 'base64' | 'text' }`
+- **响应结果**：`{ "attachmentId", "name", "size", "mimeType", "encoding", "data" }`
+- **错误**：不存在 `-32035 ATTACHMENT_NOT_FOUND`；非法 id/编码 `-32037`。
+- **prompt 图片链路**：`session/prompt` 的 `{type:'image', data, mimeType, name?}` 先经上游 `ctx.attachments.saveImages` 验证与持久化，再以 `{type:'image', attachment: ref}` 进入模型历史，复用 base 的 `attachment-local` 限制。
 ---
 
 ## 7. 服务端推流通知（Server-to-Client Notifications）
@@ -1074,6 +1184,71 @@ Bridge 直接投影上游 `agent.inbox`：`nextTurn` 为等待独立 turn 的排
 }
 ```
 
+### 7.10 `session.projection`：投影增量通知
+
+当已 follow 会话的 `assistant/message`、`step/end`、`turn/end` 或 `compaction/end` 引起投影值变化时推送。Bridge 对 `tokenUsage`、`contextPressure`、`contextBreakdown` 做签名去重；`revision` 取触发该变化的事件 seq 的单调最大值。`kind` 为投影键名。
+
+#### 载荷（`SessionProjectionNotification`）
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "session.projection",
+  "params": {
+    "sessionId": "sess-uuid",
+    "kind": "tokenUsage",
+    "value": { "inputTokens": 120, "outputTokens": 16, "totalTokens": 136 },
+    "revision": 14
+  }
+}
+```
+
+### 7.11 `tool-result.updated`：工具结果通知
+
+已订阅会话的 `tool/result` 事件推送（bridge 派生）。`seq` 为事件序号，`data` 为原始事件 `data` 字段；`callId`、`name` 在可用时附带。
+
+#### 载荷（`ToolResultUpdatedNotification`）
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "tool-result.updated",
+  "params": {
+    "sessionId": "sess-uuid",
+    "seq": 21,
+    "callId": "call_1",
+    "name": "read",
+    "data": { "turn": 1, "step": 1, "message": { "role": "tool" } }
+  }
+}
+```
+
+### 7.12 `job.output`：后台 Job 输出通知
+
+跟随中的 job 每 250ms 轮询输出并推送新增块；`job` 为最新快照，`next` 为下一读取偏移。
+
+#### 载荷（`JobOutputNotification`）
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "job.output",
+  "params": {
+    "sessionId": "sess-uuid",
+    "jobId": "bash-abc123",
+    "job": {
+      "id": "bash-abc123",
+      "kind": "bash",
+      "label": "sleep 3; echo hi",
+      "owner": "sess-uuid",
+      "status": "running",
+      "startedAt": 1762419200000,
+      "output": { "total": 5, "earliest": 0 }
+    },
+    "chunks": [{ "at": 0, "text": "hello\n", "channel": "stdout" }],
+    "next": 5,
+    "lossy": false
+  }
+}
+```
+
 ---
 
 ## 8. 双向交互请求（Server-to-Client Requests）与 Fail-Closed 语义
@@ -1114,6 +1289,8 @@ Bridge 直接投影上游 `agent.inbox`：`nextTurn` 为等待独立 turn 的排
 - `"rejected"`：用户显式拒绝该操作。
 - `"cancelled"`：用户取消或弹窗关闭。
 
+可选扩展字段（直接透传上游 `ApprovalRequestEvent`）：`displayReason?: Record<string, string>` 为本地化展示文案。`displayReason` 不参与持久化审计，仅用于 GUI 展示；缺省时 GUI 回退到 `reason`。
+
 ### 8.2 用户提问与计划评审：`user-question/ask`
 
 用于向用户索取必要信息、分支选择，以及**计划模式下的 Plan Review**。
@@ -1147,6 +1324,8 @@ Bridge 直接投影上游 `agent.inbox`：`nextTurn` 为等待独立 turn 的排
   }
 }
 ```
+
+可选扩展字段（直接透传上游 `AskUserQuestionRequestEvent.wait`）：`callId?: string`（问题对应的工具调用）与 `timed?: boolean`（是否为前台计时等待）。`remainingMs` 需要持续消费上游 `attachWait` 流，本版不伪造固定值；GUI 的倒计时从 `timed` 与本地收到的等待状态推导。
 
 #### 客户端正常答复响应（`SdkUserQuestionResult`）
 ```json
@@ -1241,6 +1420,14 @@ Bridge 直接投影上游 `agent.inbox`：`nextTurn` 为等待独立 turn 的排
 | `-32027` | `FILE_NOT_FOUND` | 会话 cwd 内目标路径不存在 |
 | `-32028` | `FILE_ACCESS_DENIED` | 路径逃逸会话 cwd、符号链接逃逸或目标类型不合法 |
 | `-32029` | `FILE_TOO_LARGE` | 文件超过读取上限 |
+| `-32030` | `QUESTION_NOT_PENDING` | 请求重开的用户提问已结算或不存在 |
+| `-32031` | `FEEDBACK_CONFLICT` | 消息反馈 `ifVersion` CAS 冲突，`data.item` 为权威当前项 |
+| `-32032` | `FEEDBACK_TARGET_NOT_FOUND` | 反馈指向的 assistant 消息不存在 |
+| `-32033` | `JOB_NOT_FOUND` | 指定后台 job 不存在或跨会话不可见 |
+| `-32034` | `SCHEDULE_UNAVAILABLE` | 计划任务服务未在 base 组合中挂载（文档保留，未实现方法） |
+| `-32035` | `ATTACHMENT_NOT_FOUND` | 指定会话附件不存在 |
+| `-32036` | `ATTACHMENT_TOO_LARGE` | 附件超过 16 MiB 限制 |
+| `-32037` | `ATTACHMENT_INVALID` | 附件 id、base64、文件名或文本编码非法 |
 
 ---
 
@@ -1348,6 +1535,14 @@ Bridge 直接投影上游 `agent.inbox`：`nextTurn` 为等待独立 turn 的排
 
 6. **G20 Agent Preset 目录暂为 base 阻塞缺口**：上游 `AgentPresetRegistry`（`packages/preset/agent-preset-registry`）仅在 `packages/bundle/web-app` 挂载（`cordis.patch.yml` 第 598 行）；其 preset 声明（`packages/bundle/web-app/presets/standard.patch.yml`）会再次挂载 bash/fs/skill/goal 等工具插件，与 base 已全局挂载的行冲突。为遵守"不伪造、不重复挂载"原则，本协议暂不定义 `libadwaita/agent-preset/*`，GUI 的 Agent Preset 卡（映射表 S16）标记为缺失，直至上游提供 base 安全的注册表组合。
 
+7. **G26 Schedule 计划任务为 base 阻塞缺口**：上游 `ScheduleService`（`packages/schedule/schedule/src/index.ts`）只在 `packages/bundle/web-app/cordis.patch.yml` 挂载（第 135–136 行），base 组合不提供 `ctx.schedule`。协议不定义 `libadwaita/schedule/*`；GUI 的自动化任务页标记缺失，直至上游提供经 base 兼容验证的组合。
+
+8. **G12 中 `turnOutline` / `sessionStats` 为 base 省略字段**：`packages/session/session-stats` 与 `session-turn-outline` 仅由 `packages/bundle/web-app/cordis.patch.yml` 第 98–104 行挂载；协议只允许省略这些字段，不允许桥侧合成。
+
+9. **G04 全文搜索保持禁用**：base 的 `session-query-sqlite` 以 `openAt: never` 配置（`packages/bundle/base/cordis.patch.yml` 第 157–161 行），因此 `session/search` 只做标题与 cwd 元数据匹配，`fullText` 恒为 `false`。
+
+10. **G28 中 `remainingMs` 不伪造**：上游 `attachWait` 是异步流（`packages/interaction/user-questions/src/index.ts`），bridge 以原请求快照支持 `question/reopen`，不承诺静态剩余毫秒值。
+
 ---
 
 ## 12. 上游源码引用与映射依据
@@ -1372,6 +1567,12 @@ Bridge 直接投影上游 `agent.inbox`：`nextTurn` 为等待独立 turn 的排
 | **凭据提供方接口** | `packages/credentials/credentials/src/types.ts` | `CredentialProvider`, `CredentialDescriptor` |
 | **会话重命名** | `packages/session/session-title/src/index.ts` | `SessionTitleService.rename`, `SessionTitleInvalidError` |
 | **会话分支** | `packages/core/session/src/fork.ts`; `packages/api/session-controller/src/commands.ts` | `buildForkSeed`, `latestCompletedPrefixBoundary`, `incrementedTitle` |
+| **投影基线与增量** | `packages/session/session-projection/src/index.ts`; `packages/llm/token-meter/src/projection.ts` | `SessionProjectionRegistry.snapshot/onEventChanged`, `tokenUsage`, `contextPressure`, `contextBreakdown` |
+| **工具结果检查** | `packages/client/ui-trajectory/src/index.ts` | `sessionToolResults`（web-app only；bridge 派生自 `tool/result` 事件） |
+| **反馈服务** | `packages/feedback/message-feedback/src/index.ts`; `packages/feedback/command-feedback/src/index.ts` | `MessageFeedbackService.list/put/delete`, `SessionFeedbackService.record`, `ifVersion` CAS |
+| **后台 Jobs** | `packages/jobs/jobs/src/index.ts`; `packages/jobs/jobs/src/view.ts` | `JobRegistry.list/get/readAt/kill`, `JobView`, `JobChunk` |
+| **计划任务** | `packages/schedule/schedule/src/index.ts` | `ScheduleService`（web-app only，base 阻塞） |
+| **附件暂存与图片** | `packages/attachment/attachment/src/index.ts` | `AttachmentStore.saveImages/admitPromptContent`（bridge 附件上传为本地实现） |
 | **Inbox 队列** | `packages/core/agent/src/runtime-types.ts`; `packages/api/session-controller/src/commands.ts` | `Inbox.nextTurn/nextStep/replace/remove`, `agent.steer`, `updateQueue` |
 | **Slash 命令** | `packages/interaction/commands/src/index.ts`; `packages/interaction/commands/src/types.ts` | `CommandsService.list/execute`, `CommandDescriptor`, `CommandExecution` |
 | **Skill 目录** | `packages/skill/skill/src/index.ts`; `packages/skill/skill-filesystem/src/index.ts` | `skills.snapshot/list`, `SkillSummary`, `SkillInvocationPolicy` |

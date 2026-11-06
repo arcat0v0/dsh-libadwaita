@@ -5,6 +5,10 @@
       name: '@deepseek-ai/dsh-file-reference-local'
     - id: workspace
       name: '@deepseek-ai/dsh-workspace'
+    - id: message-feedback
+      name: '@deepseek-ai/dsh-message-feedback'
+      config:
+        maxNoteBytes: 8192
     - id: bridge-credentials
       name: '@dsh-libadwaita/bridge/credentials'
     - id: bridge

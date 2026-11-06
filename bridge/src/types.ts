@@ -32,6 +32,14 @@ export const BRIDGE_ERROR_CODES = {
   FILE_NOT_FOUND: -32027,
   FILE_ACCESS_DENIED: -32028,
   FILE_TOO_LARGE: -32029,
+  QUESTION_NOT_PENDING: -32030,
+  FEEDBACK_CONFLICT: -32031,
+  FEEDBACK_TARGET_NOT_FOUND: -32032,
+  JOB_NOT_FOUND: -32033,
+  SCHEDULE_UNAVAILABLE: -32034,
+  ATTACHMENT_NOT_FOUND: -32035,
+  ATTACHMENT_TOO_LARGE: -32036,
+  ATTACHMENT_INVALID: -32037,
 } as const;
 
 export class BridgeError extends Error {
@@ -367,6 +375,7 @@ export interface ApprovalRequestParams {
   toolName: string;
   callId?: string;
   reason?: string;
+  displayReason?: Record<string, string>;
 }
 
 export interface ApprovalRequestResult {
@@ -396,6 +405,8 @@ export interface SdkUserQuestionRequest {
   requestId: string;
   sessionId: string;
   questions: AskUserQuestionItem[];
+  callId?: string;
+  timed?: boolean;
 }
 
 export interface AskUserQuestionAnswerItem {
@@ -753,6 +764,216 @@ export interface FilesReadBytesResult {
   path: string;
   data: string;
   size: number;
+}
+
+export interface SessionProjectionsParams {
+  sessionId: string;
+}
+
+export interface SessionProjectionsResult {
+  asOfSeq: number;
+  turnOutline?: unknown;
+  sessionStats?: unknown;
+  tokenUsage?: unknown;
+  contextPressure?: unknown;
+  contextBreakdown?: unknown;
+  goal?: GoalView | null;
+}
+
+export interface SessionProjectionNotification {
+  sessionId: string;
+  kind: string;
+  value: unknown;
+  revision: number;
+}
+
+export interface ToolResultWatchParams {
+  sessionId: string;
+  subscribe: boolean;
+}
+
+export interface ToolResultWatchResult {
+  sessionId: string;
+  subscribed: boolean;
+}
+
+export interface ToolResultUpdatedNotification {
+  sessionId: string;
+  seq: number;
+  callId?: string;
+  name?: string;
+  data: unknown;
+}
+
+export interface MessageFeedbackItem {
+  messageId: string;
+  rating: 'positive' | 'negative';
+  note?: string;
+  category?: string;
+  version: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface MessageFeedbackListParams {
+  sessionId: string;
+}
+
+export interface MessageFeedbackListResult {
+  items: MessageFeedbackItem[];
+}
+
+export interface MessageFeedbackPutParams {
+  sessionId: string;
+  messageId: string;
+  rating: 'positive' | 'negative';
+  note?: string;
+  category?: string;
+  ifVersion: string | null;
+}
+
+export interface MessageFeedbackPutResult {
+  item: MessageFeedbackItem;
+}
+
+export interface MessageFeedbackDeleteParams {
+  sessionId: string;
+  messageId: string;
+  ifVersion: string;
+}
+
+export interface MessageFeedbackDeleteResult {
+  absent: true;
+}
+
+export interface SessionFeedbackRecordParams {
+  sessionId: string;
+  text?: string;
+  category?: string;
+}
+
+export interface SessionFeedbackRecordResult {
+  recorded: true;
+}
+
+export interface QuestionReopenParams {
+  sessionId: string;
+}
+
+export interface QuestionReopenResult {
+  request: SdkUserQuestionRequest;
+}
+
+export interface JobWireView {
+  id: string;
+  kind: string;
+  label: string;
+  owner?: string;
+  status: 'running' | 'stopping' | 'completed' | 'killed' | 'failed';
+  progress?: string;
+  detail?: string;
+  startedAt: number;
+  finishedAt?: number;
+  output: {
+    total: number;
+    earliest: number;
+    spillPaths?: string[];
+  };
+}
+
+export interface JobChunkWire {
+  at: number;
+  text: string;
+  channel?: 'stdout' | 'stderr' | 'log';
+  gapBefore?: true;
+}
+
+export interface JobListParams {
+  sessionId: string;
+}
+
+export interface JobListResult {
+  jobs: JobWireView[];
+}
+
+export interface JobFollowParams {
+  sessionId: string;
+  jobId: string;
+  from?: number;
+}
+
+export interface JobFollowResult {
+  job: JobWireView;
+  chunks: JobChunkWire[];
+  next: number;
+  lossy: boolean;
+}
+
+export interface JobKillParams {
+  sessionId: string;
+  jobId: string;
+  reason?: string;
+}
+
+export interface JobKillResult {
+  status: 'requested' | 'already-finished';
+}
+
+export interface JobOutputNotification {
+  sessionId: string;
+  jobId: string;
+  job: JobWireView;
+  chunks: JobChunkWire[];
+  next: number;
+  lossy: boolean;
+}
+
+export interface SessionSearchParams {
+  query: string;
+  limit?: number;
+  archived?: boolean;
+}
+
+export interface SessionSearchItem {
+  id: string;
+  title: string;
+  cwd: string;
+  updatedAt: number;
+}
+
+export interface SessionSearchResult {
+  items: SessionSearchItem[];
+  hasMore: boolean;
+  fullText: false;
+}
+
+export interface AttachmentUploadParams {
+  sessionId: string;
+  name: string;
+  data: string;
+  mimeType?: string;
+}
+
+export interface AttachmentUploadResult {
+  attachmentId: string;
+  name: string;
+  size: number;
+  mimeType: string;
+}
+
+export interface AttachmentReadParams {
+  sessionId: string;
+  attachmentId: string;
+  encoding?: 'base64' | 'text';
+}
+
+export interface AttachmentReadResult {
+  attachmentId: string;
+  name: string;
+  size: number;
+  mimeType: string;
+  encoding: 'base64' | 'text';
+  data: string;
 }
 declare module '@deepseek-ai/cordis' {
   interface Events {

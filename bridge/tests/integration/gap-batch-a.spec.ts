@@ -49,7 +49,7 @@ async function createSession(harness: DshTestHarness): Promise<string> {
 function waitForTurnEnd(harness: DshTestHarness, timeoutMs = 10_000): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>();
   const timer = setTimeout(() => resolve(), timeoutMs);
-  harness.transport.onNotification((method, params) => {
+  harness.onNotification((method, params) => {
     if (method === 'session.event') {
       const p = params as { event?: { type?: string } };
       if (p.event?.type === 'turn/end') {
@@ -68,7 +68,7 @@ describe('Gap batch A', { timeout: 60_000 }, () => {
       await initialize(harness);
       const sessionId = await createSession(harness);
       const titles: string[] = [];
-      harness.transport.onNotification((method, params) => {
+      harness.onNotification((method, params) => {
         if (method === 'session.title') {
           const p = params as { title?: string };
           if (p.title) titles.push(p.title);
@@ -207,7 +207,7 @@ describe('Gap batch A', { timeout: 60_000 }, () => {
       const sessionId = await createSession(harness);
       const inboxNotifications: QueueListResult[] = [];
       const started = Promise.withResolvers<void>();
-      harness.transport.onNotification((method, params) => {
+      harness.onNotification((method, params) => {
         if (method === 'session.inbox') {
           const p = params as { items?: QueueListResult['items'] };
           inboxNotifications.push({ items: p.items ?? [] });
