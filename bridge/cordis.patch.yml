@@ -1,6 +1,8 @@
 - insert:
     - id: tool-ask-user
       name: '@deepseek-ai/dsh-tool-ask-user'
+    - id: file-reference-local
+      name: '@deepseek-ai/dsh-file-reference-local'
     - id: bridge-credentials
       name: '@dsh-libadwaita/bridge/credentials'
     - id: bridge

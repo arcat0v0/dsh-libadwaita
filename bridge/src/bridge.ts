@@ -1,15 +1,30 @@
 import crypto from 'node:crypto';
 import { type Context, Service } from '@deepseek-ai/cordis';
+import { buildForkSeed } from '@deepseek-ai/dsh-session/fork';
 import type { BridgeCredentials } from './credentials.js';
 import { BridgeServer } from './server.js';
 import {
   type AssistantStreamFrame,
   BRIDGE_ERROR_CODES,
   BridgeError,
+  type CommandDescriptor,
+  type CommandExecuteParams,
+  type CommandExecuteResult,
+  type CommandListParams,
+  type CommandListResult,
   DSH_PINNED_VERSION,
   type ModelCatalogResult,
   type PluginListResult,
   type PluginToggleResult,
+  type QueueEditParams,
+  type QueueItem,
+  type QueueListParams,
+  type QueueListResult,
+  type QueueMutationResult,
+  type QueueRemoveParams,
+  type QueueSteerParams,
+  type ReferenceListParams,
+  type ReferenceListResult,
   type SdkPromptContentBlock,
   type SdkUserQuestionRequest,
   type SessionArchiveParams,
@@ -22,6 +37,8 @@ import {
   type SessionEvent,
   type SessionFollowParams,
   type SessionFollowResult,
+  type SessionForkParams,
+  type SessionForkResult,
   type SessionHeader,
   type SessionListItem,
   type SessionListParams,
@@ -34,6 +51,8 @@ import {
   type SessionProjectionsSnapshot,
   type SessionPromptParams,
   type SessionPromptResult,
+  type SessionRenameParams,
+  type SessionRenameResult,
   type SessionTitleSnapshot,
   type SessionWorkdirGetParams,
   type SessionWorkdirGetResult,
@@ -41,11 +60,77 @@ import {
   type SettingsGetResult,
   type SettingsMutateParams,
   type SettingsMutateResult,
+  type SkillListParams,
+  type SkillListResult,
   type StreamChunk,
   type TodoItem,
   type WorkspaceChangesParams,
   type WorkspaceChangesResult,
 } from './types.js';
+
+function latestCompletedPrefixBoundary(events: readonly SessionEvent[]): number | undefined {
+  const lastTurnEnd = events.findLast((event) => event.type === 'turn/end');
+  if (!lastTurnEnd) return undefined;
+  let boundary = lastTurnEnd.seq;
+  for (const next of events.slice(boundary + 1)) {
+    if (
+      next.type === 'turn/start' ||
+      (next.type === 'user/message' && next.surfaceOp === 'append') ||
+      next.type === 'agent/inbox/spliced'
+    ) {
+      break;
+    }
+    boundary = next.seq;
+  }
+  return boundary;
+}
+
+function incrementedTitle(title: string): string {
+  const ascii = /^(.*?)\((\d+)\)$/u.exec(title);
+  if (ascii) return `${ascii[1]}(${Number(ascii[2]) + 1})`;
+  const fullWidth = /^(.*?)（(\d+)）$/u.exec(title);
+  if (fullWidth) return `${fullWidth[1]}（${Number(fullWidth[2]) + 1}）`;
+  return `${title} (1)`;
+}
+
+function increasedForkTitle(title: string, taken: ReadonlySet<string>): string {
+  let candidate = incrementedTitle(title);
+  while (taken.has(candidate)) candidate = incrementedTitle(candidate);
+  return candidate;
+}
+
+interface PendingMessage {
+  id: string;
+  source?: { kind?: string };
+  content?: unknown[];
+  [key: string]: unknown;
+}
+
+interface SessionLike {
+  id: string;
+  header: SessionHeader;
+  snapshotEvents: () => SessionEvent[];
+}
+
+interface AgentLike {
+  id: string;
+  status: 'idle' | 'running';
+  session: SessionLike;
+  model?: {
+    current: () => { provider?: string; model?: string; reasoningEffort?: string } | undefined;
+    select: (options: object) => void;
+  };
+  inbox: {
+    nextTurn: readonly PendingMessage[];
+    nextStep: readonly PendingMessage[];
+    replace: (messageId: string, message: object) => boolean;
+    remove: (messageId: string) => boolean;
+    clear: () => void;
+  };
+  steer: (message: object) => void;
+  followup: (message: object) => void;
+  cancel: (cause: object, options?: object) => void;
+}
 
 export interface BridgeConfig {
   socketPath?: string;
@@ -141,6 +226,19 @@ export class BridgeService extends Service {
             title: titleData.title,
             source: titleData.source,
           });
+        }
+
+        if (ev.type === 'agent/inbox/spliced') {
+          const agents = this.ctx.get('agents') as unknown as {
+            get: (id: string) => AgentLike | undefined;
+          };
+          const agent = agents?.get(s.id);
+          if (agent) {
+            this.server.notify('session.inbox', {
+              sessionId: s.id,
+              items: this.buildQueueItems(agent),
+            });
+          }
         }
       }
     });
@@ -250,6 +348,26 @@ export class BridgeService extends Service {
         return this.handleSessionModelGet(params as unknown as SessionModelGetParams);
       case 'libadwaita/session/model/set':
         return this.handleSessionModelSet(params as unknown as SessionModelSetParams);
+      case 'libadwaita/session/rename':
+        return this.handleSessionRename(params as unknown as SessionRenameParams);
+      case 'libadwaita/session/fork':
+        return this.handleSessionFork(params as unknown as SessionForkParams);
+      case 'libadwaita/session/queue/list':
+        return this.handleQueueList(params as unknown as QueueListParams);
+      case 'libadwaita/session/queue/edit':
+        return this.handleQueueEdit(params as unknown as QueueEditParams);
+      case 'libadwaita/session/queue/remove':
+        return this.handleQueueRemove(params as unknown as QueueRemoveParams);
+      case 'libadwaita/session/queue/steer':
+        return this.handleQueueSteer(params as unknown as QueueSteerParams);
+      case 'libadwaita/command/list':
+        return this.handleCommandList(params as unknown as CommandListParams);
+      case 'libadwaita/command/execute':
+        return this.handleCommandExecute(params as unknown as CommandExecuteParams);
+      case 'libadwaita/skill/list':
+        return this.handleSkillList(params as unknown as SkillListParams);
+      case 'libadwaita/reference/list':
+        return this.handleReferenceList(params as unknown as ReferenceListParams);
       case 'libadwaita/model/catalog':
         return this.handleModelCatalog();
       case 'libadwaita/settings/get':
@@ -580,6 +698,392 @@ export class BridgeService extends Service {
     return {
       sessionId,
       archived: params.archived,
+    };
+  }
+
+  private async resolveSessionEntry(
+    sessionId: string,
+  ): Promise<{ session: SessionLike; agent?: AgentLike }> {
+    const sessionsService = this.ctx.get('sessions') as unknown as {
+      get: (id: string) => SessionLike | undefined;
+    };
+    const agentsService = this.ctx.get('agents') as unknown as {
+      get: (id: string) => AgentLike | undefined;
+      resume?: (options: object) => Promise<{ agent: AgentLike }>;
+    };
+    let session = sessionsService?.get(sessionId);
+    let agent = agentsService?.get(sessionId);
+    if (!session && agentsService?.resume) {
+      try {
+        const handle = await agentsService.resume({ resumeSessionId: sessionId });
+        session = handle.agent.session;
+        agent = handle.agent;
+      } catch {}
+    }
+    if (!session) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.SESSION_NOT_FOUND,
+        `session not found: ${sessionId}`,
+      );
+    }
+    return { session, agent };
+  }
+
+  private buildQueueItems(agent: AgentLike): QueueItem[] {
+    const items: QueueItem[] = [];
+    for (const message of agent.inbox.nextTurn) {
+      items.push({
+        id: message.id,
+        placement: 'queued',
+        content: Array.isArray(message.content) ? message.content : [],
+      });
+    }
+    for (const message of agent.inbox.nextStep) {
+      items.push({
+        id: message.id,
+        placement: message.source?.kind === 'user' ? 'steering' : 'context',
+        content: Array.isArray(message.content) ? message.content : [],
+      });
+    }
+    return items;
+  }
+
+  private async handleSessionRename(params: SessionRenameParams): Promise<SessionRenameResult> {
+    if (!params.sessionId || typeof params.title !== 'string') {
+      throw new BridgeError(-32602, 'session/rename requires sessionId and title');
+    }
+    const { session } = await this.resolveSessionEntry(params.sessionId);
+    const titleService = this.ctx.get('sessionTitle') as unknown as {
+      rename: (session: SessionLike, title: string) => SessionTitleSnapshot;
+    };
+    if (!titleService?.rename) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.INTERNAL_ERROR,
+        'session title service not available',
+      );
+    }
+    try {
+      const snapshot = titleService.rename(session, params.title);
+      return {
+        sessionId: params.sessionId,
+        title: snapshot.title,
+        source: snapshot.source,
+      };
+    } catch (error) {
+      if (error instanceof Error && error.name === 'SessionTitleInvalidError') {
+        throw new BridgeError(BRIDGE_ERROR_CODES.TITLE_INVALID, error.message);
+      }
+      throw error;
+    }
+  }
+
+  private async handleSessionFork(params: SessionForkParams): Promise<SessionForkResult> {
+    const { session } = await this.resolveSessionEntry(params.sessionId);
+    const events = session.snapshotEvents();
+    const atSeq = params.atSeq;
+    if (atSeq !== undefined && (!Number.isSafeInteger(atSeq) || atSeq < 0)) {
+      throw new BridgeError(-32602, 'atSeq must be a non-negative safe integer');
+    }
+    const boundary = atSeq ?? latestCompletedPrefixBoundary(events);
+    if (boundary === undefined || boundary < 0 || events[boundary]?.seq !== boundary) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.FORK_UNAVAILABLE,
+        atSeq === undefined
+          ? `session "${params.sessionId}" has no completed turn to fork from`
+          : `event ${String(atSeq)} does not exist in session "${params.sessionId}"`,
+        { sessionId: params.sessionId },
+      );
+    }
+    const seed = buildForkSeed(events as never, boundary as never);
+    const childId = `sess-${crypto.randomUUID()}`;
+    const agentsService = this.ctx.get('agents') as unknown as {
+      create: (options: object) => Promise<{ agent: AgentLike }>;
+    };
+    const defaults = this.ctx.get('agentDefaultModel') as unknown as {
+      currentSelection?: () => { provider?: string; model?: string; reasoningEffort?: string };
+    };
+    const selection = defaults?.currentSelection?.() ?? {
+      provider: 'deepseek-official',
+      model: 'deepseek-chat',
+    };
+    let handle: { agent: AgentLike };
+    try {
+      handle = await agentsService.create({
+        sessionId: childId,
+        seed,
+        inheritedEventCount: boundary + 1,
+        meta: {
+          ...(session.header.cwd === undefined ? {} : { cwd: session.header.cwd }),
+          isSeeded: true,
+        },
+        agentOptions: selection,
+      });
+    } catch (error) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.FORK_UNAVAILABLE,
+        error instanceof Error ? error.message : String(error),
+        { sessionId: params.sessionId },
+      );
+    }
+    if (params.increaseTitle) {
+      const titleService = this.ctx.get('sessionTitle') as unknown as {
+        get: (session: SessionLike) => SessionTitleSnapshot | undefined;
+        rename: (session: SessionLike, title: string) => SessionTitleSnapshot;
+      };
+      const sourceTitle = titleService?.get?.(session)?.title;
+      if (sourceTitle && titleService?.rename) {
+        const sessionsService = this.ctx.get('sessions') as unknown as {
+          list: () => SessionLike[];
+        };
+        const taken = new Set<string>();
+        for (const candidate of sessionsService?.list() ?? []) {
+          const title = titleService.get?.(candidate)?.title;
+          if (title) taken.add(title);
+        }
+        try {
+          titleService.rename(handle.agent.session, increasedForkTitle(sourceTitle, taken));
+        } catch {}
+      }
+    }
+    return {
+      sessionId: childId,
+      header: handle.agent.session.header,
+    };
+  }
+
+  private async handleQueueList(params: QueueListParams): Promise<QueueListResult> {
+    const { agent } = await this.resolveSessionEntry(params.sessionId);
+    if (!agent) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.SESSION_NOT_FOUND,
+        `session not found: ${params.sessionId}`,
+      );
+    }
+    return { items: this.buildQueueItems(agent) };
+  }
+
+  private async handleQueueEdit(params: QueueEditParams): Promise<QueueMutationResult> {
+    if (!Array.isArray(params.content) || params.content.some((block) => block.type !== 'text')) {
+      throw new BridgeError(-32602, 'queue edits accept text content only');
+    }
+    const text = params.content.map((block) => block.text).join('');
+    if (text.trim().length === 0) {
+      throw new BridgeError(-32602, 'queue edit content must include non-whitespace text');
+    }
+    const { agent } = await this.resolveSessionEntry(params.sessionId);
+    if (!agent) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.SESSION_NOT_FOUND,
+        `session not found: ${params.sessionId}`,
+      );
+    }
+    const message = [...agent.inbox.nextTurn, ...agent.inbox.nextStep].find(
+      (candidate) => candidate.id === params.itemId,
+    );
+    if (!message) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.QUEUE_ITEM_NOT_FOUND,
+        'queued item is no longer pending',
+        { itemId: params.itemId },
+      );
+    }
+    const replaced = agent.inbox.replace(params.itemId, {
+      ...message,
+      content: params.content,
+    });
+    if (!replaced) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.QUEUE_ITEM_NOT_FOUND,
+        'queued item is no longer pending',
+        { itemId: params.itemId },
+      );
+    }
+    return { accepted: true };
+  }
+
+  private async handleQueueRemove(params: QueueRemoveParams): Promise<QueueMutationResult> {
+    const { agent } = await this.resolveSessionEntry(params.sessionId);
+    if (!agent) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.SESSION_NOT_FOUND,
+        `session not found: ${params.sessionId}`,
+      );
+    }
+    if (!agent.inbox.remove(params.itemId)) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.QUEUE_ITEM_NOT_FOUND,
+        'queued item is no longer pending',
+        { itemId: params.itemId },
+      );
+    }
+    return { accepted: true };
+  }
+
+  private async handleQueueSteer(params: QueueSteerParams): Promise<QueueMutationResult> {
+    const { agent } = await this.resolveSessionEntry(params.sessionId);
+    if (!agent) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.SESSION_NOT_FOUND,
+        `session not found: ${params.sessionId}`,
+      );
+    }
+    const message = agent.inbox.nextTurn.find((candidate) => candidate.id === params.itemId);
+    if (!message || agent.status !== 'running') {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.QUEUE_STEER_UNAVAILABLE,
+        'current turn no longer accepts steering',
+        { itemId: params.itemId },
+      );
+    }
+    agent.inbox.remove(params.itemId);
+    agent.steer(message);
+    return { accepted: true };
+  }
+
+  private async handleCommandList(params: CommandListParams): Promise<CommandListResult> {
+    const { agent } = await this.resolveSessionEntry(params.sessionId);
+    const commands = this.ctx.get('commands') as unknown as {
+      list: (agent: AgentLike) => readonly CommandDescriptor[];
+    };
+    if (!commands?.list) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.COMMANDS_UNAVAILABLE,
+        'commands service not available',
+      );
+    }
+    if (!agent) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.SESSION_NOT_FOUND,
+        `session not found: ${params.sessionId}`,
+      );
+    }
+    return {
+      commands: commands.list(agent).map((command) => ({
+        name: command.name,
+        description: command.description,
+        ...(command.input
+          ? {
+              input: {
+                hint: command.input.hint,
+                ...(command.input.attachments === undefined
+                  ? {}
+                  : { attachments: command.input.attachments }),
+              },
+            }
+          : {}),
+      })),
+    };
+  }
+
+  private async handleCommandExecute(params: CommandExecuteParams): Promise<CommandExecuteResult> {
+    const { agent } = await this.resolveSessionEntry(params.sessionId);
+    const commands = this.ctx.get('commands') as unknown as {
+      execute: (
+        agent: AgentLike,
+        line: string,
+        attachments: readonly object[],
+        signal: AbortSignal,
+      ) => Promise<
+        | {
+            commandId: string;
+            result: { kind: 'success' | 'error'; text?: string; sourceEventSeq?: number };
+          }
+        | undefined
+      >;
+    };
+    if (!commands?.execute) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.COMMANDS_UNAVAILABLE,
+        'commands service not available',
+      );
+    }
+    if (!agent) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.SESSION_NOT_FOUND,
+        `session not found: ${params.sessionId}`,
+      );
+    }
+    const command = params.command.startsWith('/') ? params.command.slice(1) : params.command;
+    const line = params.args ? `/${command} ${params.args}` : `/${command}`;
+    const execution = await commands.execute(agent, line, [], new AbortController().signal);
+    if (!execution) {
+      throw new BridgeError(BRIDGE_ERROR_CODES.COMMAND_NOT_FOUND, `unknown command: ${line}`);
+    }
+    return {
+      commandId: execution.commandId,
+      kind: execution.result.kind,
+      ...(execution.result.text === undefined ? {} : { text: execution.result.text }),
+      ...(execution.result.sourceEventSeq === undefined
+        ? {}
+        : { sourceEventSeq: execution.result.sourceEventSeq }),
+    };
+  }
+
+  private async handleSkillList(params: SkillListParams): Promise<SkillListResult> {
+    const skills = this.ctx.get('skills') as unknown as {
+      snapshot: (options: object) => Promise<{
+        skills: Array<{
+          name: string;
+          description: string;
+          whenToUse?: string;
+          path?: string;
+          source: string;
+          provider: string;
+          invocation: { modelInvocable: boolean; userInvocable: boolean };
+        }>;
+        complete: boolean;
+      }>;
+    };
+    if (!skills?.snapshot) {
+      throw new BridgeError(BRIDGE_ERROR_CODES.SKILLS_UNAVAILABLE, 'skills service not available');
+    }
+    let cwd = params.cwd;
+    if (cwd === undefined && params.sessionId) {
+      const { session } = await this.resolveSessionEntry(params.sessionId);
+      cwd = session.header.cwd;
+    }
+    const snapshot = await skills.snapshot(cwd === undefined ? {} : { cwd });
+    return {
+      skills: snapshot.skills.map((skill) => ({
+        name: skill.name,
+        description: skill.description,
+        ...(skill.whenToUse === undefined ? {} : { whenToUse: skill.whenToUse }),
+        ...(skill.path === undefined ? {} : { path: skill.path }),
+        source: skill.source,
+        provider: skill.provider,
+        invocation: skill.invocation,
+      })),
+      complete: snapshot.complete,
+    };
+  }
+
+  private async handleReferenceList(params: ReferenceListParams): Promise<ReferenceListResult> {
+    const { agent } = await this.resolveSessionEntry(params.sessionId);
+    const references = this.ctx.get('fileReferences') as unknown as {
+      list: (
+        agent: AgentLike,
+        query: string,
+        signal: AbortSignal,
+      ) => Promise<Array<{ path: string; kind: 'file' | 'directory' }>>;
+    };
+    if (!references?.list) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.REFERENCES_UNAVAILABLE,
+        'file reference service not available',
+      );
+    }
+    if (!agent) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.SESSION_NOT_FOUND,
+        `session not found: ${params.sessionId}`,
+      );
+    }
+    const candidates = await references.list(agent, params.query, new AbortController().signal);
+    return {
+      candidates: candidates.map((candidate) => ({
+        path: candidate.path,
+        kind: candidate.kind,
+      })),
     };
   }
 

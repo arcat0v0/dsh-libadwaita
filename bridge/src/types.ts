@@ -14,6 +14,14 @@ export const BRIDGE_ERROR_CODES = {
   SEQUENCE_GAP_UNRECOVERABLE: -32009,
   RESTART_REQUIRED: -32010,
   WORKDIR_UNAVAILABLE: -32011,
+  TITLE_INVALID: -32012,
+  QUEUE_ITEM_NOT_FOUND: -32013,
+  QUEUE_STEER_UNAVAILABLE: -32014,
+  COMMANDS_UNAVAILABLE: -32015,
+  COMMAND_NOT_FOUND: -32016,
+  SKILLS_UNAVAILABLE: -32017,
+  REFERENCES_UNAVAILABLE: -32018,
+  FORK_UNAVAILABLE: -32019,
 } as const;
 
 export class BridgeError extends Error {
@@ -181,7 +189,7 @@ export type SdkPromptContentBlock =
 export interface SessionPromptParams {
   sessionId: string;
   contentBlocks: SdkPromptContentBlock[];
-  mode?: 'prompt' | 'steer';
+  mode?: 'queue' | 'steer' | 'prompt';
 }
 
 export interface SessionPromptResult {
@@ -396,6 +404,137 @@ export interface AssistantStreamFrame {
   attemptId: string;
   revision: number;
   [key: string]: unknown;
+}
+
+export interface SessionRenameParams {
+  sessionId: string;
+  title: string;
+}
+
+export interface SessionRenameResult {
+  sessionId: string;
+  title: string;
+  source: {
+    kind: string;
+    provider?: string;
+  };
+}
+
+export interface SessionForkParams {
+  sessionId: string;
+  atSeq?: number;
+  increaseTitle?: boolean;
+}
+
+export interface SessionForkResult {
+  sessionId: string;
+  header: SessionHeader;
+}
+
+export type QueuePlacement = 'queued' | 'steering' | 'context';
+
+export interface QueueItem {
+  id: string;
+  placement: QueuePlacement;
+  content: unknown[];
+}
+
+export interface QueueListParams {
+  sessionId: string;
+}
+
+export interface QueueListResult {
+  items: QueueItem[];
+}
+
+export interface QueueEditParams {
+  sessionId: string;
+  itemId: string;
+  content: TextContentBlock[];
+}
+
+export interface QueueRemoveParams {
+  sessionId: string;
+  itemId: string;
+}
+
+export interface QueueSteerParams {
+  sessionId: string;
+  itemId: string;
+}
+
+export interface QueueMutationResult {
+  accepted: true;
+}
+
+export interface CommandListParams {
+  sessionId: string;
+}
+
+export interface CommandDescriptor {
+  name: string;
+  description: string;
+  input?: {
+    hint: string;
+    attachments?: boolean;
+  };
+}
+
+export interface CommandListResult {
+  commands: CommandDescriptor[];
+}
+
+export interface CommandExecuteParams {
+  sessionId: string;
+  command: string;
+  args?: string;
+}
+
+export interface CommandExecuteResult {
+  commandId?: string;
+  kind: 'success' | 'error';
+  text?: string;
+  sourceEventSeq?: number;
+}
+
+export interface SkillListParams {
+  sessionId?: string;
+  cwd?: string;
+}
+
+export interface SkillSummaryItem {
+  name: string;
+  description: string;
+  whenToUse?: string;
+  path?: string;
+  source: string;
+  provider: string;
+  invocation: {
+    modelInvocable: boolean;
+    userInvocable: boolean;
+  };
+}
+
+export interface SkillListResult {
+  skills: SkillSummaryItem[];
+  complete: boolean;
+}
+
+export interface ReferenceListParams {
+  sessionId: string;
+  query: string;
+}
+
+export interface ReferenceListResult {
+  candidates: Array<{
+    path: string;
+    kind: 'file' | 'directory';
+  }>;
+}
+
+export interface SessionInboxNotification {
+  sessionId: string;
+  items: QueueItem[];
 }
 
 declare module '@deepseek-ai/cordis' {

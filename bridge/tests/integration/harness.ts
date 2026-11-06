@@ -130,8 +130,13 @@ export interface DshTestHarness {
   cleanup: () => Promise<void>;
 }
 
+export interface DshHarnessOptions {
+  prepareHome?: (homeDir: string, workspaceDir: string) => void;
+}
+
 export async function createDshHarness(
   customResponder?: MockSseResponder,
+  options: DshHarnessOptions = {},
 ): Promise<DshTestHarness> {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-it-'));
   const homeDir = path.join(tmpRoot, 'dsh-home');
@@ -142,6 +147,7 @@ export async function createDshHarness(
   fs.mkdirSync(homeDir, { recursive: true });
   fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
   fs.mkdirSync(workspaceDir, { recursive: true });
+  options.prepareHome?.(homeDir, workspaceDir);
 
   const mockServer = new MockLlmServer();
   if (customResponder) {

@@ -17,6 +17,9 @@ importers:
       '@deepseek-ai/dsh-sdk-protocol':
         specifier: 0.2.2-rc.1
         version: 0.2.2-rc.1(585c778bc92c3b96ab6c0e018865dd11)
+      '@deepseek-ai/dsh-session':
+        specifier: 0.2.2-rc.1
+        version: 0.2.2-rc.1(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-scope@0.2.2-rc.1(@deepseek-ai/cordis@4.1.0))
     devDependencies:
       '@biomejs/biome':
         specifier: 2.6.5

@@ -198,10 +198,16 @@ GUI 连接 Socket 后的第一个请求必须为 `libadwaita/initialize`。在�
 | `libadwaita/session/list` | 列出已存储的历史会话列表 | `ctx.sessions.list` |
 | `libadwaita/session/follow` | 追踪会话并获取开场快照 | `ctx.sessions` + `ctx.agents` |
 | `libadwaita/session/page` | 分页拉取历史事件 / 缺口修复 | `ctx.sessions.get(id).slice` |
-| `libadwaita/session/prompt` | 向会话投递新的用户提示词 | `agent.inbox.push` / `session.prompt` |
+| `libadwaita/session/prompt` | 向会话投递新的用户提示词 | `agent.followup` / `agent.steer` |
+| `libadwaita/session/queue/list` | 读取当前 inbox 队列快照 | `agent.inbox.nextTurn/nextStep` |
+| `libadwaita/session/queue/edit` | 就地替换待发送队列项的文本 | `agent.inbox.replace` |
+| `libadwaita/session/queue/remove` | 移除一个待发送队列项 | `agent.inbox.remove` |
+| `libadwaita/session/queue/steer` | 将排队项转为当前 turn 的 steer | `agent.inbox.remove` + `agent.steer` |
 | `libadwaita/session/cancel` | 停止当前正在运行的 turn | `agent.cancel({ kind: 'user' })` |
 | `libadwaita/session/release` | GUI 本地关闭视图，释放追踪 | bridge 内存释放 |
 | `libadwaita/session/archive` | 归档会话（清理队列，标记归档） | `agent.cancel` + 归档标记 |
+| `libadwaita/session/rename` | 手动重命名会话并 pin 用户标题 | `ctx.sessionTitle.rename(session, title)` |
+| `libadwaita/session/fork` | 从指定事件边界分支新会话 | `buildForkSeed` + `ctx.agents.create` |
 | `libadwaita/session/workdir/get` | 读取会话当前生效的工作目录 | `ctx.workingDirectory.get` |
 | `libadwaita/session/model/get` | 读取会话当前使用的模型路由 | `agent.model` / `request/context` |
 | `libadwaita/session/model/set` | 切换会话模型路由配置 | `agent.model.select` |
@@ -216,6 +222,10 @@ GUI 连接 Socket 后的第一个请求必须为 `libadwaita/initialize`。在�
 | `libadwaita/credentials/rotate` | 轮换内存中现有凭据 | 自定义内存 Provider（Spike 已验证） |
 | `libadwaita/credentials/remove` | 从内存中移除指定 Provider 凭据 | 自定义内存 Provider（Spike 已验证） |
 | `libadwaita/workspace/changes` | 查询工作区变更文件摘要与 diff 块 | `@deepseek-ai/dsh-workspace-changes` |
+| `libadwaita/command/list` | 列出当前会话可用的 slash 命令 | `ctx.commands.list(agent)` |
+| `libadwaita/command/execute` | 执行 slash 命令（如 `/plan off`） | `ctx.commands.execute` |
+| `libadwaita/skill/list` | 列出当前工作区可用的 skill 目录 | `ctx.skills.snapshot` |
+| `libadwaita/reference/list` | 列出 `@` 文件引用候选 | `ctx.fileReferences.list` |
 
 ---
 
@@ -286,6 +296,41 @@ GUI 连接 Socket 后的第一个请求必须为 `libadwaita/initialize`。在�
 - **请求参数**：`{ "sessionId": string, "archived": boolean }`
 - **响应结果**：`{ "sessionId": string, "archived": boolean }`
 
+#### `libadwaita/session/rename`
+
+- **说明**：手动重命名会话。调用上游 `ctx.sessionTitle.rename(session, title)`，追加 `session/title` 且 `source.kind = 'user'`，从而 pin 用户标题并停止后续自动标题生成。成功后同时发出 `session.title` 通知。
+- **上游实现事实**：`SessionTitleService.rename` 接收 live `Session` 对象，而非 sessionId；bridge 负责先解析（必要时 resume）会话。标题为空或全空白时抛出 `SessionTitleInvalidError`。
+- **请求参数（`SessionRenameParams`）**：
+  | 字段 | 类型 | 必选 | 说明 |
+  |---|---|---|---|
+  | `sessionId` | `string` | 是 | 目标会话标识符 |
+  | `title` | `string` | 是 | 用户输入的原始标题；服务端会规范化并截断到 `maxTitleBytes` |
+- **响应结果（`SessionRenameResult`）**：
+  | 字段 | 类型 | 必选 | 说明 |
+  |---|---|---|---|
+  | `sessionId` | `string` | 是 | 会话标识符 |
+  | `title` | `string` | 是 | 规范化后实际写入的标题 |
+  | `source` | `object` | 是 | 标题来源，重命名后固定为 `{ "kind": "user" }` |
+- **错误**：未知会话 `-32002 SESSION_NOT_FOUND`；空标题 `-32012 TITLE_INVALID`。
+
+#### `libadwaita/session/fork`
+
+- **说明**：从源会话的指定事件边界分支出一个全新会话。使用上游 `buildForkSeed(events, boundary)` 复制闭区间前缀并追加 `session/end-seed` 与未闭合 turn/step 的 `forked` 收尾事件，再调用 `ctx.agents.create` 创建带 seed 的 live 子会话。子会话拥有独立日志与 Agent，不与源会话共享后续写入。
+- **边界语义**：`atSeq` 为包含式事件序号；缺省时取最近一个 `turn/end` 之后、下一 `turn/start`/用户消息/inbox 变更之前的稳定前缀。无效边界返回 `-32019 FORK_UNAVAILABLE`。
+- **标题递增**：`increaseTitle` 仅由 bridge 消费。若源会话存在持久化标题，子会话在创建后被重命名为尾部 `(N)` / `（N）` 递增、并跳过已占用标题的形式；源会话无标题时跳过。
+- **请求参数（`SessionForkParams`）**：
+  | 字段 | 类型 | 必选 | 说明 |
+  |---|---|---|---|
+  | `sessionId` | `string` | 是 | 源会话标识符 |
+  | `atSeq` | `number` | 否 | 包含式源事件序号；缺省取最近完成 turn 的稳定前缀 |
+  | `increaseTitle` | `boolean` | 否 | 是否递增源标题作为子会话标题，默认 `false` |
+- **响应结果（`SessionForkResult`）**：
+  | 字段 | 类型 | 必选 | 说明 |
+  |---|---|---|---|
+  | `sessionId` | `string` | 是 | 新建子会话标识符 |
+  | `header` | `SessionHeader` | 是 | 子会话头部；`isSeeded` 为 `true`，`cwd` 继承源会话 |
+- **使用流程**：成功后 GUI 立即调用 `libadwaita/session/follow` 获取子会话开场快照并切换主视图。
+
 ### 6.2 工作目录（CWD）与工作区切换语义
 
 #### `libadwaita/session/workdir/get`
@@ -305,7 +350,7 @@ GUI 连接 Socket 后的第一个请求必须为 `libadwaita/initialize`。在�
   |---|---|---|---|
   | `sessionId` | `string` | 是 | 会话标识符 |
   | `contentBlocks` | `SdkPromptContentBlock[]` | 是 | 提交的输入块序列 |
-  | `mode` | `'prompt' \| 'steer'` | 否 | 投递模式：`prompt` 正常排队；`steer` 抢占插入活跃 turn 的下一步。默认 `prompt` |
+  | `mode` | `'queue' \| 'steer' \| 'prompt'` | 否 | 投递模式：`queue`（旧名 `prompt`）追加为下一 turn；`steer` 插入活跃 turn 的下一步。默认 `queue` |
 
 `SdkPromptContentBlock` 联合类型定义（引用自 `@deepseek-ai/dsh-sdk-protocol/types`）：
 1. 文本块：`{ "type": "text", "text": string }`
@@ -322,6 +367,51 @@ GUI 连接 Socket 后的第一个请求必须为 `libadwaita/initialize`。在�
   | 字段 | 类型 | 必选 | 说明 |
   |---|---|---|---|
   | `messageId` | `string` | 是 | 成功写入队列的消息 ID。GUI 据此将本地乐观草稿替换为正式气泡 |
+
+#### 队列快照与变更
+
+Bridge 直接投影上游 `agent.inbox`：`nextTurn` 为等待独立 turn 的排队项（`placement: 'queued'`），`nextStep` 为等待下一步的插话/上下文项（用户来源为 `steering`，其余为 `context`）。任何 `agent/inbox/spliced` 事件都会触发 `session.inbox` 通知，携带完整快照；GUI 以快照整体替换本地队列，不做增量拼接。
+
+#### `libadwaita/session/queue/list`
+
+- **请求参数**：`{ "sessionId": string }`
+- **响应结果（`QueueListResult`）**：
+  | 字段 | 类型 | 必选 | 说明 |
+  |---|---|---|---|
+  | `items` | `QueueItem[]` | 是 | 按 `nextTurn` 后 `nextStep` 顺序排列的完整快照 |
+
+`QueueItem` 结构：
+| 字段 | 类型 | 必选 | 说明 |
+|---|---|---|---|
+| `id` | `string` | 是 | 待发送消息的 `messageId`，与 prompt 响应一致 |
+| `placement` | `'queued' \| 'steering' \| 'context'` | 是 | 队列位置分类 |
+| `content` | `unknown[]` | 是 | 上游消息 content 数组（文本/图片等） |
+
+#### `libadwaita/session/queue/edit`
+
+- **说明**：就地替换一个仍待发送的队列项文本。与上游 `session/updateQueue` 一致：仅接受 `text` 块，且必须包含非空白文本；消息 id 保持不变。
+- **请求参数（`QueueEditParams`）**：
+  | 字段 | 类型 | 必选 | 说明 |
+  |---|---|---|---|
+  | `sessionId` | `string` | 是 | 会话标识符 |
+  | `itemId` | `string` | 是 | 目标队列项的消息 id |
+  | `content` | `TextContentBlock[]` | 是 | 替换后的纯文本内容 |
+- **响应结果**：`{ "accepted": true }`
+- **错误**：项已不在队列 `-32013 QUEUE_ITEM_NOT_FOUND`。
+
+#### `libadwaita/session/queue/remove`
+
+- **说明**：移除一个仍待发送的队列项。
+- **请求参数**：`{ "sessionId": string, "itemId": string }`
+- **响应结果**：`{ "accepted": true }`
+- **错误**：项已不在队列 `-32013 QUEUE_ITEM_NOT_FOUND`。
+
+#### `libadwaita/session/queue/steer`
+
+- **说明**：把一个 `nextTurn` 排队项转为当前活跃 turn 的 steer。与上游一致：仅当 agent 处于 `running` 且项位于 `nextTurn` 时可用；bridge 先 `agent.inbox.remove` 再 `agent.steer(message)`。
+- **请求参数**：`{ "sessionId": string, "itemId": string }`
+- **响应结果**：`{ "accepted": true }`
+- **错误**：当前 turn 不再接受插话或项不在 `nextTurn` 时返回 `-32014 QUEUE_STEER_UNAVAILABLE`。
 
 ### 6.4 模型管理与模型目录
 
@@ -481,6 +571,83 @@ GUI 连接 Socket 后的第一个请求必须为 `libadwaita/initialize`。在�
   | `summary` | `WorkspaceChangesSummary` | 是 | 改动文件列表及行增删统计 |
   | `diff` | `WorkspaceFileDiff` | 否 | 当请求了 `fileIndex` 且计算可用时的比对详情 |
 
+
+### 6.9 命令、技能与文件引用
+
+#### `libadwaita/command/list`
+
+- **说明**：列出指定会话当前生效的 slash 命令描述符。直接调用上游 `ctx.commands.list(agent)`，返回按名称排序的命令。
+- **请求参数**：`{ "sessionId": string }`
+- **响应结果（`CommandListResult`）**：
+  | 字段 | 类型 | 必选 | 说明 |
+  |---|---|---|---|
+  | `commands` | `CommandDescriptor[]` | 是 | 命令描述符 |
+
+`CommandDescriptor` 结构：
+| 字段 | 类型 | 必选 | 说明 |
+|---|---|---|---|
+| `name` | `string` | 是 | 不带前导 `/` 的命令名（如 `plan`） |
+| `description` | `string` | 是 | 人类可读摘要 |
+| `input` | `object` | 否 | 可选自由输入描述：`{ hint: string, attachments?: boolean }` |
+- **错误**：`commands` 服务未挂载时返回 `-32015 COMMANDS_UNAVAILABLE`。
+
+#### `libadwaita/command/execute`
+
+- **说明**：执行一条 slash 命令，不发送给模型。Bridge 拼接 `/<command> [args]` 后调用上游 `ctx.commands.execute(agent, line, [], signal)`；上游负责记录 `command/run` / `command/done` 事件。
+- **请求参数（`CommandExecuteParams`）**：
+  | 字段 | 类型 | 必选 | 说明 |
+  |---|---|---|---|
+  | `sessionId` | `string` | 是 | 会话标识符 |
+  | `command` | `string` | 是 | 命令名，可带或不带前导 `/` |
+  | `args` | `string` | 否 | 命令原始参数文本 |
+- **响应结果（`CommandExecuteResult`）**：
+  | 字段 | 类型 | 必选 | 说明 |
+  |---|---|---|---|
+  | `commandId` | `string` | 否 | 本次执行的生命周期配对 id |
+  | `kind` | `'success' \| 'error'` | 是 | 命令处理器归一化结果 |
+  | `text` | `string` | 否 | 处理器返回的展示文本 |
+  | `sourceEventSeq` | `number` | 否 | 更丰富展示所引用的权威事件序号 |
+- **错误**：未知命令 `-32016 COMMAND_NOT_FOUND`；服务未挂载 `-32015 COMMANDS_UNAVAILABLE`。
+
+#### `libadwaita/skill/list`
+
+- **说明**：列出当前工作区可用的 skill 摘要。调用上游 `ctx.skills.snapshot({ cwd? })`；`sessionId` 用于从会话头部补全 `cwd`。
+- **请求参数（`SkillListParams`）**：
+  | 字段 | 类型 | 必选 | 说明 |
+  |---|---|---|---|
+  | `sessionId` | `string` | 否 | 提供则从该会话读取 cwd |
+  | `cwd` | `string` | 否 | 显式工作目录，优先于会话 cwd |
+- **响应结果（`SkillListResult`）**：
+  | 字段 | 类型 | 必选 | 说明 |
+  |---|---|---|---|
+  | `skills` | `SkillSummaryItem[]` | 是 | 合并去重后的 skill 摘要 |
+  | `complete` | `boolean` | 是 | 所有 provider 是否在稳定目录版本内完成发现 |
+
+`SkillSummaryItem` 结构：
+| 字段 | 类型 | 必选 | 说明 |
+|---|---|---|---|
+| `name` | `string` | 是 | kebab-case 标识符 |
+| `description` | `string` | 是 | 路由描述 |
+| `whenToUse` | `string` | 否 | 额外使用指引 |
+| `path` | `string` | 否 | 绝对指令文件路径；虚拟 skill 无 |
+| `source` | `string` | 是 | 发现来源（`bundled`/`project`/`user`/`runtime` 等） |
+| `provider` | `string` | 是 | 拥有正文的 provider 名 |
+| `invocation` | `object` | 是 | `{ modelInvocable: boolean, userInvocable: boolean }` |
+- **错误**：`skills` 服务未挂载时返回 `-32017 SKILLS_UNAVAILABLE`。
+
+#### `libadwaita/reference/list`
+
+- **说明**：列出 `@` 文件引用候选。调用上游 `ctx.fileReferences.list(agent, query, signal)`。Bridge bundle 显式挂载 `@deepseek-ai/dsh-file-reference-local`，使该服务在 base 组合中可用；协议不伪造候选。
+- **请求参数（`ReferenceListParams`）**：
+  | 字段 | 类型 | 必选 | 说明 |
+  |---|---|---|---|
+  | `sessionId` | `string` | 是 | 提供 cwd 上下文的会话 |
+  | `query` | `string` | 是 | `@` 后或 `@"` 后的路径文本 |
+- **响应结果（`ReferenceListResult`）**：
+  | 字段 | 类型 | 必选 | 说明 |
+  |---|---|---|---|
+  | `candidates` | `Array<{ path: string, kind: 'file' \| 'directory' }>` | 是 | 确定性路径候选；目录保持补全打开 |
+- **错误**：服务未挂载时返回 `-32018 REFERENCES_UNAVAILABLE`。
 ---
 
 ## 7. 服务端推流通知（Server-to-Client Notifications）
@@ -652,6 +819,29 @@ GUI 连接 Socket 后的第一个请求必须为 `libadwaita/initialize`。在�
 }
 ```
 
+### 7.6 `session.inbox`：队列快照通知
+
+当已 follow 的会话发生 `agent/inbox/spliced` 事件时推送当前完整 inbox 快照。GUI 以该快照整体替换本地队列；不得据此推断未包含的增量。
+
+#### 载荷（`SessionInboxNotification`）
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "session.inbox",
+  "params": {
+    "sessionId": "sess-uuid",
+    "items": [
+      {
+        "id": "msg-queued-1",
+        "placement": "queued",
+        "content": [{ "type": "text", "text": "下一条消息" }]
+      }
+    ]
+  }
+}
+```
+- `items` 与 `libadwaita/session/queue/list` 的返回结构完全一致。
+
 ---
 
 ## 8. 双向交互请求（Server-to-Client Requests）与 Fail-Closed 语义
@@ -801,6 +991,14 @@ GUI 连接 Socket 后的第一个请求必须为 `libadwaita/initialize`。在�
 | `-32009` | `SEQUENCE_GAP_UNRECOVERABLE`| 事件序号断档且缺口超出修复窗口，GUI 必须重置基线（Rebaseline） |
 | `-32010` | `RESTART_REQUIRED` | 插件配置已变更，由于 HMR 禁用，需要重启 dsh 才能生效 |
 | `-32011` | `WORKDIR_UNAVAILABLE` | 请求的工作目录不存在、非目录或当前进程无权访问 |
+| `-32012` | `TITLE_INVALID` | 重命名标题规范化后为空或全空白 |
+| `-32013` | `QUEUE_ITEM_NOT_FOUND` | 队列项已被消费或移除，无法编辑/删除 |
+| `-32014` | `QUEUE_STEER_UNAVAILABLE` | 当前 turn 已不接受 steer，或项不在 `nextTurn` |
+| `-32015` | `COMMANDS_UNAVAILABLE` | `commands` 服务未在当前组合中挂载 |
+| `-32016` | `COMMAND_NOT_FOUND` | slash 命令名无法解析 |
+| `-32017` | `SKILLS_UNAVAILABLE` | `skills` 服务未在当前组合中挂载 |
+| `-32018` | `REFERENCES_UNAVAILABLE` | `fileReferences` 服务未在当前组合中挂载 |
+| `-32019` | `FORK_UNAVAILABLE` | 指定边界不存在、无已完成 turn 或创建子会话失败 |
 
 ---
 
@@ -928,3 +1126,9 @@ GUI 连接 Socket 后的第一个请求必须为 `libadwaita/initialize`。在�
 | **客户端流组装** | `packages/client/ui-conversation/src/client/conversation/assembly.ts` | 连续 `seq` 校验、`assistantBaseline` 替换规则与装配策略 |
 | **会话传输控制器** | `packages/api/session-controller/src/client/transport.ts` | `SessionJournalPage`, `assistantStream`, `session/follow` 开场快照范型 |
 | **凭据提供方接口** | `packages/credentials/credentials/src/types.ts` | `CredentialProvider`, `CredentialDescriptor` |
+| **会话重命名** | `packages/session/session-title/src/index.ts` | `SessionTitleService.rename`, `SessionTitleInvalidError` |
+| **会话分支** | `packages/core/session/src/fork.ts`; `packages/api/session-controller/src/commands.ts` | `buildForkSeed`, `latestCompletedPrefixBoundary`, `incrementedTitle` |
+| **Inbox 队列** | `packages/core/agent/src/runtime-types.ts`; `packages/api/session-controller/src/commands.ts` | `Inbox.nextTurn/nextStep/replace/remove`, `agent.steer`, `updateQueue` |
+| **Slash 命令** | `packages/interaction/commands/src/index.ts`; `packages/interaction/commands/src/types.ts` | `CommandsService.list/execute`, `CommandDescriptor`, `CommandExecution` |
+| **Skill 目录** | `packages/skill/skill/src/index.ts`; `packages/skill/skill-filesystem/src/index.ts` | `skills.snapshot/list`, `SkillSummary`, `SkillInvocationPolicy` |
+| **文件引用候选** | `packages/context/file-reference/src/index.ts`; `packages/context/file-reference-local/src/index.ts` | `FileReferenceService.list`, `FileReferenceCandidate` |
