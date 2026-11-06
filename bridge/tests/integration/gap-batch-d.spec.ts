@@ -162,6 +162,76 @@ describe('Gap batch D', { timeout: 90_000 }, () => {
     }
   });
 
+  it('creates, lists, reads history, and deletes a schedule', async () => {
+    const harness = await createDshHarness();
+    try {
+      await initialize(harness);
+      const sessionId = await createSession(harness);
+      const changed: unknown[] = [];
+      harness.onNotification((method, params) => {
+        if (method === 'schedule.changed') changed.push(params);
+      });
+      const created = (await harness.transport.request('libadwaita/schedule/create', {
+        title: 'fixture schedule',
+        prompt: 'do work',
+        timing: { kind: 'after', after_seconds: 3600 },
+        target: { kind: 'session', sessionId },
+      })) as { result: { id: string } };
+      assert.ok(created.result.id);
+      const catalog = (await harness.transport.request('libadwaita/schedule/catalog', {})) as {
+        result: Array<{ id: string }>;
+      };
+      assert.ok(catalog.result.some((entry) => entry.id === created.result.id));
+      const history = (await harness.transport.request('libadwaita/schedule/history', {
+        id: created.result.id,
+        limit: 10,
+      })) as { result: { records: unknown[] } };
+      assert.deepEqual(history.result.records, []);
+      const deleted = (await harness.transport.request('libadwaita/schedule/delete', {
+        id: created.result.id,
+      })) as { result: { deleted?: boolean } };
+      assert.equal(deleted.result.deleted, true);
+      assert.ok(changed.length > 0);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it('spawns a PTY shell, runs echo hi, reads output, and closes it', async () => {
+    const harness = await createDshHarness();
+    try {
+      await initialize(harness);
+      const sessionId = await createSession(harness);
+      const created = (await harness.transport.request('libadwaita/terminal/create', {
+        sessionId,
+      })) as { terminalId: string };
+      assert.ok(created.terminalId);
+      const input = (await harness.transport.request('libadwaita/terminal/input', {
+        sessionId,
+        terminalId: created.terminalId,
+        data: 'echo hi\n',
+      })) as { result: unknown };
+      assert.ok(input.result !== undefined);
+      const output = (await harness.transport.request('libadwaita/terminal/output', {
+        sessionId,
+        terminalId: created.terminalId,
+        count: 100,
+      })) as { text: string };
+      assert.ok(output.text.includes('hi'));
+      const listed = (await harness.transport.request('libadwaita/terminal/list', {
+        sessionId,
+      })) as { terminals: Array<{ terminalId: string }> };
+      assert.ok(listed.terminals.some((terminal) => terminal.terminalId === created.terminalId));
+      const closed = (await harness.transport.request('libadwaita/terminal/close', {
+        sessionId,
+        terminalId: created.terminalId,
+      })) as { closed: boolean };
+      assert.equal(closed.closed, true);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
   it('reads the base account state', async () => {
     const harness = await createDshHarness();
     try {

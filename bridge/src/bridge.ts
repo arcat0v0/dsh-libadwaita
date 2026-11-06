@@ -95,6 +95,12 @@ import {
   type QueueSteerParams,
   type ReferenceListParams,
   type ReferenceListResult,
+  type ScheduleChangedNotification,
+  type ScheduleCreateParams,
+  type ScheduleEditParams,
+  type ScheduleHistoryParams,
+  type ScheduleOperationResult,
+  type ScheduleRunParams,
   type SdkPromptContentBlock,
   type SdkUserQuestionRequest,
   type SessionArchiveParams,
@@ -155,6 +161,14 @@ import {
   type TeamGetResult,
   type TeamSetParams,
   type TeamSetResult,
+  type TerminalCloseParams,
+  type TerminalCreateParams,
+  type TerminalCreateResult,
+  type TerminalInputParams,
+  type TerminalListParams,
+  type TerminalListResult,
+  type TerminalOutputParams,
+  type TerminalOutputResult,
   type TodoItem,
   type ToolResultUpdatedNotification,
   type ToolResultWatchParams,
@@ -492,6 +506,11 @@ export class BridgeService extends Service {
       this.server.notify('plugin.install-log', notification);
     });
 
+    this.ctx.on('schedule/changed', () => {
+      const notification: ScheduleChangedNotification = { changed: true };
+      this.server.notify('schedule.changed', notification);
+    });
+
     this.ctx.on('settings/document-updated', (namespace: string, revision: number) => {
       const notification: SettingsUpdatedNotification = { namespace, revision };
       this.server.notify('settings.updated', notification);
@@ -778,6 +797,28 @@ export class BridgeService extends Service {
         return this.handleAccountBalance();
       case 'libadwaita/account/sign-out':
         return this.handleAccountSignOut();
+      case 'libadwaita/schedule/catalog':
+        return this.handleScheduleCatalog();
+      case 'libadwaita/schedule/create':
+        return this.handleScheduleCreate(params as unknown as ScheduleCreateParams);
+      case 'libadwaita/schedule/edit':
+        return this.handleScheduleEdit(params as unknown as ScheduleEditParams);
+      case 'libadwaita/schedule/run':
+        return this.handleScheduleRun(params as unknown as ScheduleRunParams);
+      case 'libadwaita/schedule/history':
+        return this.handleScheduleHistory(params as unknown as ScheduleHistoryParams);
+      case 'libadwaita/schedule/delete':
+        return this.handleScheduleDelete(params as unknown as ScheduleEditParams);
+      case 'libadwaita/terminal/create':
+        return this.handleTerminalCreate(params as unknown as TerminalCreateParams);
+      case 'libadwaita/terminal/list':
+        return this.handleTerminalList(params as unknown as TerminalListParams);
+      case 'libadwaita/terminal/input':
+        return this.handleTerminalInput(params as unknown as TerminalInputParams);
+      case 'libadwaita/terminal/output':
+        return this.handleTerminalOutput(params as unknown as TerminalOutputParams);
+      case 'libadwaita/terminal/close':
+        return this.handleTerminalClose(params as unknown as TerminalCloseParams);
       case 'libadwaita/credentials/status':
         return this.handleCredentialsStatus();
       case 'libadwaita/credentials/inject':
@@ -3154,6 +3195,288 @@ export class BridgeService extends Service {
       );
     }
     return { state: await account.signOut(this.accountClient()) };
+  }
+
+  private async scheduleService(): Promise<
+    | {
+        catalog: () => Promise<unknown>;
+        list: (request: object) => Promise<unknown>;
+        create: (
+          request: object,
+          actorSessionId?: string,
+          signal?: AbortSignal,
+        ) => Promise<unknown>;
+        edit: (request: object, actorSessionId?: string, signal?: AbortSignal) => Promise<unknown>;
+        run: (request: object, signal?: AbortSignal) => Promise<unknown>;
+        history: (request: object) => Promise<unknown>;
+      }
+    | undefined
+  > {
+    return this.waitForService('schedule');
+  }
+
+  private async handleScheduleCatalog(): Promise<ScheduleOperationResult> {
+    const schedule = await this.scheduleService();
+    if (!schedule) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.SCHEDULE_UNAVAILABLE,
+        'schedule service is not available',
+      );
+    }
+    return { result: await schedule.catalog() };
+  }
+
+  private async handleScheduleCreate(
+    params: ScheduleCreateParams,
+  ): Promise<ScheduleOperationResult> {
+    const schedule = await this.scheduleService();
+    if (!schedule) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.SCHEDULE_UNAVAILABLE,
+        'schedule service is not available',
+      );
+    }
+    return {
+      result: await schedule.create(
+        {
+          title: params.title,
+          prompt: params.prompt,
+          timing: params.timing,
+          ...(params.target === undefined ? {} : { target: params.target }),
+        },
+        undefined,
+        new AbortController().signal,
+      ),
+    };
+  }
+
+  private async handleScheduleEdit(params: ScheduleEditParams): Promise<ScheduleOperationResult> {
+    const schedule = await this.scheduleService();
+    if (!schedule) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.SCHEDULE_UNAVAILABLE,
+        'schedule service is not available',
+      );
+    }
+    return {
+      result: await schedule.edit(
+        {
+          id: params.id,
+          action: params.action,
+          ...(params.patch === undefined ? {} : { patch: params.patch }),
+          ...(params.expectedUpdatedAt === undefined
+            ? {}
+            : { expectedUpdatedAt: params.expectedUpdatedAt }),
+        },
+        undefined,
+        new AbortController().signal,
+      ),
+    };
+  }
+
+  private async handleScheduleRun(params: ScheduleRunParams): Promise<ScheduleOperationResult> {
+    const schedule = await this.scheduleService();
+    if (!schedule) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.SCHEDULE_UNAVAILABLE,
+        'schedule service is not available',
+      );
+    }
+    return {
+      result: await schedule.run({ id: params.id }, new AbortController().signal),
+    };
+  }
+
+  private async handleScheduleHistory(
+    params: ScheduleHistoryParams,
+  ): Promise<ScheduleOperationResult> {
+    const schedule = await this.scheduleService();
+    if (!schedule) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.SCHEDULE_UNAVAILABLE,
+        'schedule service is not available',
+      );
+    }
+    return {
+      result: await schedule.history({
+        id: params.id,
+        limit: Math.min(Math.max(params.limit ?? 50, 1), 100),
+        ...(params.before === undefined ? {} : { before: params.before }),
+      }),
+    };
+  }
+
+  private async handleScheduleDelete(params: ScheduleEditParams): Promise<ScheduleOperationResult> {
+    return this.handleScheduleEdit({
+      id: params.id,
+      action: 'delete',
+      ...(params.expectedUpdatedAt === undefined
+        ? {}
+        : { expectedUpdatedAt: params.expectedUpdatedAt }),
+    });
+  }
+
+  private async terminalService(): Promise<
+    | {
+        spawn: (
+          owner: AgentLike,
+          request: object,
+          signal?: AbortSignal,
+        ) => Promise<{
+          sessionId: string;
+          type: string;
+          pid?: number;
+          motd: string;
+        }>;
+        list: (owner: AgentLike) => Array<{
+          sessionId: string;
+          type: string;
+          pid?: number;
+          status: unknown;
+        }>;
+        startSend: (owner: AgentLike, id: string, request: object) => { done: Promise<unknown> };
+        read: (owner: AgentLike, id: string, request?: object) => unknown;
+        kill: (owner: AgentLike, id: string, reason?: string) => Promise<boolean>;
+      }
+    | undefined
+  > {
+    return this.waitForService('terminals');
+  }
+
+  private async terminalAgent(sessionId: string): Promise<AgentLike> {
+    const { agent } = await this.resolveSessionEntry(sessionId);
+    if (!agent) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.SESSION_NOT_FOUND,
+        `session not found: ${sessionId}`,
+      );
+    }
+    return agent;
+  }
+
+  private terminalCwd(session: SessionLike): string {
+    const workingDirectory = this.ctx.get('workingDirectory') as unknown as {
+      get: (session: SessionLike) => string;
+    };
+    return workingDirectory?.get(session) ?? session.header.cwd ?? process.cwd();
+  }
+
+  private async handleTerminalCreate(params: TerminalCreateParams): Promise<TerminalCreateResult> {
+    const terminals = await this.terminalService();
+    if (!terminals) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.TERMINAL_UNAVAILABLE,
+        'terminal service is not available',
+      );
+    }
+    const { session, agent } = await this.resolveSessionEntry(params.sessionId);
+    if (!agent) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.SESSION_NOT_FOUND,
+        `session not found: ${params.sessionId}`,
+      );
+    }
+    try {
+      const spawned = await terminals.spawn(
+        agent,
+        { type: 'shell', cwd: params.cwd ?? this.terminalCwd(session) },
+        new AbortController().signal,
+      );
+      return {
+        terminalId: spawned.sessionId,
+        sessionId: params.sessionId,
+        pid: spawned.pid ?? 0,
+        cwd: this.terminalCwd(session),
+      };
+    } catch (error) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.TERMINAL_UNAVAILABLE,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  private async handleTerminalList(params: TerminalListParams): Promise<TerminalListResult> {
+    const terminals = await this.terminalService();
+    if (!terminals) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.TERMINAL_UNAVAILABLE,
+        'terminal service is not available',
+      );
+    }
+    const agent = await this.terminalAgent(params.sessionId);
+    return {
+      terminals: terminals.list(agent).map((terminal) => ({
+        terminalId: terminal.sessionId,
+        pid: terminal.pid ?? 0,
+        cwd: this.terminalCwd(agent.session),
+        running: true,
+      })),
+    };
+  }
+
+  private async handleTerminalInput(params: TerminalInputParams): Promise<{ result: unknown }> {
+    const terminals = await this.terminalService();
+    if (!terminals) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.TERMINAL_UNAVAILABLE,
+        'terminal service is not available',
+      );
+    }
+    const agent = await this.terminalAgent(params.sessionId);
+    try {
+      const operation = terminals.startSend(agent, params.terminalId, {
+        text: params.data,
+        submit: params.data.endsWith('\n'),
+      });
+      return { result: await operation.done };
+    } catch (error) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.TERMINAL_NOT_FOUND,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  private async handleTerminalOutput(params: TerminalOutputParams): Promise<TerminalOutputResult> {
+    const terminals = await this.terminalService();
+    if (!terminals) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.TERMINAL_UNAVAILABLE,
+        'terminal service is not available',
+      );
+    }
+    const agent = await this.terminalAgent(params.sessionId);
+    try {
+      return terminals.read(agent, params.terminalId, {
+        ...(params.offset === undefined ? {} : { offset: params.offset }),
+        ...(params.count === undefined ? {} : { count: params.count }),
+      }) as TerminalOutputResult;
+    } catch (error) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.TERMINAL_NOT_FOUND,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  private async handleTerminalClose(params: TerminalCloseParams): Promise<{ closed: boolean }> {
+    const terminals = await this.terminalService();
+    if (!terminals) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.TERMINAL_UNAVAILABLE,
+        'terminal service is not available',
+      );
+    }
+    const agent = await this.terminalAgent(params.sessionId);
+    try {
+      return { closed: await terminals.kill(agent, params.terminalId) };
+    } catch (error) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.TERMINAL_NOT_FOUND,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
   }
   private async handlePluginList(): Promise<PluginListResult> {
     const pm = this.ctx.get('pluginManager') as unknown as {

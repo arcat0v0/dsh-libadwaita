@@ -9,6 +9,14 @@
       name: '@deepseek-ai/dsh-message-feedback'
       config:
         maxNoteBytes: 8192
+    - id: schedule
+      name: '@deepseek-ai/dsh-schedule'
+    - id: terminal
+      name: '@deepseek-ai/dsh-terminal'
+    - id: terminal-bash
+      name: '@deepseek-ai/dsh-terminal-bash'
+      config:
+        backendType: shell
     - id: bridge-credentials
       name: '@dsh-libadwaita/bridge/credentials'
     - id: bridge

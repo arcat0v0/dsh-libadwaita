@@ -1181,6 +1181,21 @@ export interface CredentialRecordItem {
   writable: boolean;
 }
 
+export interface TerminalOutputParams {
+  sessionId: string;
+  terminalId: string;
+  offset?: number;
+  count?: number;
+}
+
+export interface TerminalOutputResult {
+  text: string;
+  totalLines: number;
+  lineBegin: number;
+  lineEnd: number;
+  truncated: boolean;
+}
+
 export interface CredentialRecordsListResult {
   records: CredentialRecordItem[];
 }
@@ -1230,6 +1245,39 @@ export interface AccountBalanceResult {
 export interface AccountSignOutResult {
   state: unknown;
 }
+
+export interface ScheduleCreateParams {
+  title: string;
+  prompt: string;
+  timing: Record<string, unknown>;
+  target?: Record<string, unknown>;
+}
+
+export interface ScheduleEditParams {
+  id: string;
+  action: 'update' | 'delete';
+  patch?: Record<string, unknown>;
+  expectedUpdatedAt?: string | null;
+}
+
+export interface ScheduleRunParams {
+  id: string;
+}
+
+export interface ScheduleHistoryParams {
+  id: string;
+  limit?: number;
+  before?: string;
+}
+
+export interface ScheduleOperationResult {
+  result: unknown;
+}
+
+export interface ScheduleChangedNotification {
+  changed: true;
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Events {
     'approval/request'(req: unknown, next: () => Promise<unknown>): Promise<unknown>;
@@ -1241,5 +1289,6 @@ declare module '@deepseek-ai/cordis' {
     'goal/activation-changed'(payload: unknown): void;
     'plugin-manager/install-state'(payload: unknown): void;
     'plugin-manager/install-log'(payload: unknown): void;
+    'schedule/changed'(): void;
   }
 }

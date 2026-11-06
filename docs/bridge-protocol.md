@@ -244,6 +244,17 @@ GUI 连接 Socket 后的第一个请求必须为 `libadwaita/initialize`。在�
 | `libadwaita/job/kill` | 请求停止 job | `ctx.jobs.kill` |
 | `libadwaita/attachment/upload` | 上传会话附件（base64，限 16 MiB） | bridge 本地会话附件存储 |
 | `libadwaita/attachment/read` | 读取会话附件 | bridge 本地会话附件存储 |
+| `libadwaita/schedule/catalog` | 列出计划任务 | `ctx.schedule.catalog` |
+| `libadwaita/schedule/create` | 创建计划任务 | `ctx.schedule.create` |
+| `libadwaita/schedule/edit` | 编辑计划任务 | `ctx.schedule.edit` |
+| `libadwaita/schedule/run` | 立即运行任务 | `ctx.schedule.run` |
+| `libadwaita/schedule/history` | 读取投递历史 | `ctx.schedule.history` |
+| `libadwaita/schedule/delete` | 删除任务 | `ctx.schedule.edit({action:'delete'})` |
+| `libadwaita/terminal/create` | 创建会话 PTY | `ctx.terminals.spawn` |
+| `libadwaita/terminal/list` | 列出会话 PTY | `ctx.terminals.list` |
+| `libadwaita/terminal/input` | 写入 PTY 并等待就绪 | `ctx.terminals.startSend` |
+| `libadwaita/terminal/output` | 读取 PTY 回滚缓冲 | `ctx.terminals.read` |
+| `libadwaita/terminal/close` | 关闭 PTY | `ctx.terminals.kill` |
 | `libadwaita/plugin/list` | 查询已安装与已启用的插件 | `ctx.pluginManager.list` |
 | `libadwaita/plugin/enable` | 启用插件（返回 restart-required） | `ctx.pluginManager.setPluginEnabled` |
 | `libadwaita/plugin/disable` | 禁用插件（返回 restart-required） | `ctx.pluginManager.setPluginEnabled` |
@@ -996,6 +1007,30 @@ Bridge 直接投影上游 `agent.inbox`：`nextTurn` 为等待独立 turn 的排
 
 `account/status` 返回 `{state}`，`account/profile` / `account/balance` 返回只读资料/余额，`account/sign-out` 返回 `{state}`。均调用 base 的 `ctx.deepseekAccount`；浏览器 OAuth 登录流程依赖 Host webServer 回调，不在本协议内实现（见 §11）。
 
+### 6.13 计划任务与交互终端
+
+#### 计划任务
+
+Bridge bundle patch 挂载 `@deepseek-ai/dsh-schedule`；服务名 `ctx.schedule`，真实 dsh 集成测试已验证创建/列表/历史/删除。
+
+- `schedule/catalog` 无参数 → `{result: ScheduleCatalogEntry[]}`。
+- `schedule/create` `{title, prompt, timing, target?}` → `{result: ScheduleCatalogEntry}`。`timing` 为上游 `ScheduleTiming`（`after`/`at`/`every`/`daily`/`weekly`/`cron`/`rrule`），`target` 为 `{kind:'session',sessionId}`、`{kind:'new_once'}` 或 `{kind:'new'}`。
+- `schedule/edit` `{id, action:'update'|'delete', patch?, expectedUpdatedAt?}` → `{result}`。
+- `schedule/run` `{id}` → `{result}`；`schedule/history` `{id, limit?, before?}` → `{result: {records,...}}`。
+- `schedule/delete` `{id, expectedUpdatedAt?}` → `{result:{deleted:true}}`（等价 edit delete）。
+- 任务变更发出 `schedule.changed`（§7.14）。
+
+#### 交互终端
+
+Bridge patch 挂载 `@deepseek-ai/dsh-terminal` 与 `@deepseek-ai/dsh-terminal-bash`（`backendType: shell`）；真实 dsh 集成测试已验证创建、输入 `echo hi`、读取输出与关闭。
+
+- `terminal/create` `{sessionId, cwd?}` → `{terminalId, sessionId, pid, cwd}`；cwd 默认取会话当前工作目录，服务端按 owner Agent 授权。
+- `terminal/list` `{sessionId}` → `{terminals:[{terminalId,pid,cwd,running}]}`。
+- `terminal/input` `{sessionId, terminalId, data}` → `{result: TerminalSendResult}`；`submit` 由末尾换行推导。
+- `terminal/output` `{sessionId, terminalId, offset?, count?}` → `{text,totalLines,lineBegin,lineEnd,truncated}`（有界回滚缓冲）。
+- `terminal/close` `{sessionId, terminalId}` → `{closed:boolean}`。
+- **限制**：上游终端服务无独立 resize RPC；恢复视图通过 `terminal/list` + `terminal/output` 重建。终端随 Agent/session 释放由上游 owner cleanup 终止。
+
 ## 7. 服务端推流通知（Server-to-Client Notifications）
 
 通知一律无 `id` 字段。客户端被动接收并更新本地领域模型。
@@ -1316,6 +1351,14 @@ Bridge 直接投影上游 `agent.inbox`：`nextTurn` 为等待独立 turn 的排
 {"jsonrpc":"2.0","method":"plugin.install-log","params":{"requestId":"req-1","jobId":"job-1","argv":["pnpm","add","file:/tmp/plugin"],"cwd":"/home/u/.local/share/dsh-libadwaita/profiles/libadwaita","stream":"stdout","text":"Progress: resolved 1","exitCode":0}}
 ```
 
+### 7.14 `schedule.changed`：计划任务变更通知
+
+上游 `schedule/changed` 事件转发，载荷 `{changed:true}`；GUI 收到后重新调用 `schedule/catalog`。
+```json
+{"jsonrpc":"2.0","method":"schedule.changed","params":{"changed":true}}
+```
+
+
 ## 8. 双向交互请求（Server-to-Client Requests）与 Fail-Closed 语义
 
 此类消息由 bridge 主动发起，GUI 作为响应端。GUI 处理完毕后必须回传具有相同 `id` 的响应帧。
@@ -1607,7 +1650,7 @@ Bridge 直接投影上游 `agent.inbox`：`nextTurn` 为等待独立 turn 的排
 
 6. **G20 Agent Preset 目录暂为 base 阻塞缺口**：上游 `AgentPresetRegistry`（`packages/preset/agent-preset-registry`）仅在 `packages/bundle/web-app` 挂载（`cordis.patch.yml` 第 598 行）；其 preset 声明（`packages/bundle/web-app/presets/standard.patch.yml`）会再次挂载 bash/fs/skill/goal 等工具插件，与 base 已全局挂载的行冲突。为遵守"不伪造、不重复挂载"原则，本协议暂不定义 `libadwaita/agent-preset/*`，GUI 的 Agent Preset 卡（映射表 S16）标记为缺失，直至上游提供 base 安全的注册表组合。
 
-7. **G26 Schedule 计划任务为 base 阻塞缺口**：上游 `ScheduleService`（`packages/schedule/schedule/src/index.ts`）只在 `packages/bundle/web-app/cordis.patch.yml` 挂载（第 135–136 行），base 组合不提供 `ctx.schedule`。协议不定义 `libadwaita/schedule/*`；GUI 的自动化任务页标记缺失，直至上游提供经 base 兼容验证的组合。
+7. **G26 Schedule 已通过 bridge bundle patch 挂载**：`@deepseek-ai/dsh-schedule` 插入 `bridge/cordis.patch.yml`，真实 dsh 集成测试验证 catalog/create/history/delete 与 `schedule.changed`。上游服务本身 base 兼容，无需 webServer。
 
 8. **G12 中 `turnOutline` / `sessionStats` 为 base 省略字段**：`packages/session/session-stats` 与 `session-turn-outline` 仅由 `packages/bundle/web-app/cordis.patch.yml` 第 98–104 行挂载；协议只允许省略这些字段，不允许桥侧合成。
 
@@ -1615,7 +1658,7 @@ Bridge 直接投影上游 `agent.inbox`：`nextTurn` 为等待独立 turn 的排
 
 10. **G28 中 `remainingMs` 不伪造**：上游 `attachWait` 是异步流（`packages/interaction/user-questions/src/index.ts`），bridge 以原请求快照支持 `question/reopen`，不承诺静态剩余毫秒值。
 
-11. **G05 Terminal 为 base 阻塞缺口**：交互终端核心 `@deepseek-ai/dsh-terminal` 与 `@deepseek-ai/dsh-terminal-bash` 未在 `packages/bundle/base/cordis.patch.yml` 挂载；仅 `packages/bundle/web-app` 与 `packages/api/terminal-controller` 组合使用。本版未启用 bridge-local PTY，`terminal/*` 方法未定义，GUI 右栏终端标记缺失。
+11. **G05 Terminal 已通过 bridge bundle patch 挂载**：插入 `@deepseek-ai/dsh-terminal` + `@deepseek-ai/dsh-terminal-bash`（backendType shell），真实 dsh 测试验证 spawn/input/output/close；上游无独立 resize RPC，恢复通过 list+output。
 
 12. **G07 Office→PDF 为 base 阻塞缺口**：`ctx.officeToPdf` 属于 `packages/bundle/web-app` 的文档预览组合（`packages/api/remotes` 的 officeToPdf Remote、web-app e2e 测试）；base 不提供该服务。GUI 回退为系统默认应用打开。
 
