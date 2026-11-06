@@ -6,11 +6,11 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixStream;
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 
 pub const DEFAULT_MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -275,19 +275,11 @@ impl BridgeConnection {
     }
 
     pub fn set_approval_responder<R: ApprovalResponder + 'static>(&self, responder: R) {
-        let responder_arc = Arc::new(responder);
-        let inner = self.inner.clone();
-        tokio::spawn(async move {
-            *inner.approval_responder.write().await = Some(responder_arc);
-        });
+        *self.inner.approval_responder.write().unwrap() = Some(Arc::new(responder));
     }
 
     pub fn set_user_question_responder<R: UserQuestionResponder + 'static>(&self, responder: R) {
-        let responder_arc = Arc::new(responder);
-        let inner = self.inner.clone();
-        tokio::spawn(async move {
-            *inner.user_question_responder.write().await = Some(responder_arc);
-        });
+        *self.inner.user_question_responder.write().unwrap() = Some(Arc::new(responder));
     }
 
     pub fn subscribe_notifications(&self) -> broadcast::Receiver<IncomingNotification> {
@@ -473,7 +465,7 @@ impl BridgeConnection {
             METHOD_APPROVAL_REQUEST => {
                 let outcome = match params.and_then(|p| serde_json::from_value::<ApprovalRequestParams>(p).ok()) {
                     Some(req_params) => {
-                        let responder = { inner.approval_responder.read().await.clone() };
+                        let responder = { inner.approval_responder.read().unwrap().clone() };
                         if let Some(resp) = responder {
                             match tokio::time::timeout(inner.default_timeout, resp.respond(req_params)).await {
                                 Ok(out) => out,
@@ -499,7 +491,7 @@ impl BridgeConnection {
             METHOD_USER_QUESTION_ASK => {
                 let result = match params.and_then(|p| serde_json::from_value::<SdkUserQuestionRequest>(p).ok()) {
                     Some(req_params) => {
-                        let responder = { inner.user_question_responder.read().await.clone() };
+                        let responder = { inner.user_question_responder.read().unwrap().clone() };
                         if let Some(resp) = responder {
                             match tokio::time::timeout(inner.default_timeout, resp.respond(req_params)).await {
                                 Ok(res) => res,

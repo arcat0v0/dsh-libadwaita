@@ -2,7 +2,7 @@ use crate::connection::{ApprovalResponder, BridgeConnection, IncomingNotificatio
 use crate::credentials::{should_show_onboarding, CredentialStore, DEFAULT_PROVIDER};
 use crate::protocol::*;
 use crate::session::{SessionModel, SessionStatus};
-use crate::supervisor::HarnessSupervisor;
+use crate::supervisor::{resolve_bridge_bundle_path, HarnessSupervisor, SupervisorConfig};
 use crate::ui::approval_dialog::{show_approval_dialog, show_user_question_dialog};
 use crate::ui::conversation::ConversationView;
 use crate::ui::desktop::{
@@ -52,6 +52,11 @@ pub enum UiMessage {
     ShowOnboarding,
     PluginRestartRequired,
     SupervisorRestarted(BridgeConnection),
+    SupervisorStarted {
+        supervisor: Arc<HarnessSupervisor>,
+        connection: BridgeConnection,
+    },
+    SupervisorStartFailed(String),
 }
 
 struct ApprovalHandler {
@@ -99,6 +104,7 @@ pub struct SessionController {
     toast_overlay: adw::ToastOverlay,
     ui_sender: UnboundedSender<UiMessage>,
     credential_store: CredentialStore,
+    startup_banner: adw::Banner,
     running_sessions: Rc<RefCell<HashSet<String>>>,
     turn_start_times: Rc<RefCell<HashMap<String, Instant>>>,
     background_hold: Rc<RefCell<Option<gtk4::gio::ApplicationHoldGuard>>>,
@@ -113,6 +119,8 @@ impl SessionController {
     ) -> Rc<Self> {
         let (ui_sender, ui_receiver) = unbounded_channel();
         let credential_store = CredentialStore::new();
+        let startup_banner = main_window.startup_banner().clone();
+        let banner_for_retry = startup_banner.clone();
 
         let controller = Rc::new(Self {
             connection: Arc::new(RwLock::new(None)),
@@ -131,6 +139,7 @@ impl SessionController {
                 .unwrap(),
             ui_sender,
             credential_store,
+            startup_banner,
             running_sessions: Rc::new(RefCell::new(HashSet::new())),
             turn_start_times: Rc::new(RefCell::new(HashMap::new())),
             background_hold: Rc::new(RefCell::new(None)),
@@ -141,11 +150,48 @@ impl SessionController {
         controller.setup_composer();
         controller.setup_double_esc();
 
+        let ctrl_weak_banner = Rc::downgrade(&controller);
+        banner_for_retry.connect_button_clicked(move |banner| {
+            banner.set_revealed(false);
+            if let Some(ctrl) = ctrl_weak_banner.upgrade() {
+                ctrl.bootstrap_supervisor();
+            }
+        });
+
         controller
     }
 
     pub fn credential_store(&self) -> &CredentialStore {
         &self.credential_store
+    }
+
+    pub fn bootstrap_supervisor(&self) {
+        let ui_sender = self.ui_sender.clone();
+
+        tokio_runtime().spawn(async move {
+            let mut config = SupervisorConfig::default();
+            config.dsh_bin = std::env::var("DSH_BIN").unwrap_or_else(|_| "dsh".to_string());
+            config.profile_config.bridge_bundle_path_or_url = resolve_bridge_bundle_path();
+
+            let supervisor = Arc::new(HarnessSupervisor::new(config));
+            match supervisor.start().await {
+                Ok(_) => {
+                    if let Some(connection) = supervisor.connection().await {
+                        let _ = ui_sender.send(UiMessage::SupervisorStarted {
+                            supervisor,
+                            connection,
+                        });
+                    } else {
+                        let _ = ui_sender.send(UiMessage::SupervisorStartFailed(
+                            "dsh started without a connection".to_string(),
+                        ));
+                    }
+                }
+                Err(err) => {
+                    let _ = ui_sender.send(UiMessage::SupervisorStartFailed(err.to_string()));
+                }
+            }
+        });
     }
 
     pub fn running_session_info(&self) -> Option<(String, String)> {
@@ -838,6 +884,23 @@ impl SessionController {
                         }
                         toast_overlay.add_toast(adw::Toast::new("dsh restarted successfully"));
                     }
+                    UiMessage::SupervisorStarted {
+                        supervisor,
+                        connection,
+                    } => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.startup_banner.set_revealed(false);
+                            ctrl.set_supervisor(supervisor);
+                            ctrl.set_connection(connection);
+                        }
+                    }
+                    UiMessage::SupervisorStartFailed(message) => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.startup_banner
+                                .set_title(&format!("dsh failed to start: {}", message));
+                            ctrl.startup_banner.set_revealed(true);
+                        }
+                    }
                 }
             }
         });
@@ -964,6 +1027,7 @@ impl SessionController {
             toast_overlay: self.toast_overlay.clone(),
             ui_sender: self.ui_sender.clone(),
             credential_store: self.credential_store.clone(),
+            startup_banner: self.startup_banner.clone(),
             running_sessions: self.running_sessions.clone(),
             turn_start_times: self.turn_start_times.clone(),
             background_hold: self.background_hold.clone(),

@@ -20,6 +20,7 @@ pub struct MainWindow {
     model_btn: gtk4::Button,
     controller: RefCell<Option<Rc<SessionController>>>,
     shortcuts_window: Rc<RefCell<Option<gtk4::ShortcutsWindow>>>,
+    startup_banner: adw::Banner,
 }
 
 impl MainWindow {
@@ -77,8 +78,15 @@ impl MainWindow {
             .build();
         header_bar.pack_end(&model_btn);
 
+        let startup_banner = adw::Banner::builder()
+            .title("dsh failed to start")
+            .button_label("Retry")
+            .revealed(false)
+            .build();
+
         let toolbar_view = adw::ToolbarView::new();
         toolbar_view.add_top_bar(&header_bar);
+        toolbar_view.add_top_bar(&startup_banner);
         toolbar_view.set_content(Some(&split_view));
 
         let toast_overlay = adw::ToastOverlay::new();
@@ -156,6 +164,7 @@ impl MainWindow {
             model_btn,
             controller: RefCell::new(None),
             shortcuts_window,
+            startup_banner,
         }
     }
 
@@ -260,5 +269,9 @@ impl MainWindow {
 
     pub fn shortcuts_window(&self) -> &Rc<RefCell<Option<gtk4::ShortcutsWindow>>> {
         &self.shortcuts_window
+    }
+
+    pub fn startup_banner(&self) -> &adw::Banner {
+        &self.startup_banner
     }
 }

@@ -180,6 +180,27 @@ impl Default for ProfileTemplateConfig {
     }
 }
 
+pub fn resolve_bridge_bundle_path() -> String {
+    if let Ok(value) = std::env::var("DSH_BRIDGE_BUNDLE") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    let system_path = Path::new("/usr/lib/dsh-libadwaita/bridge");
+    if system_path.exists() {
+        return system_path.display().to_string();
+    }
+
+    let dev_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bridge");
+    dev_path
+        .canonicalize()
+        .unwrap_or(dev_path)
+        .display()
+        .to_string()
+}
+
 pub fn generate_profile_package_json(config: &ProfileTemplateConfig) -> String {
     let bridge_dep = if config.bridge_bundle_path_or_url.starts_with("file:") {
         config.bridge_bundle_path_or_url.clone()
@@ -431,6 +452,15 @@ impl HarnessSupervisor {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
+
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
 
         let mut child = cmd.spawn().map_err(|e| {
             let _ = self.cleanup_lock();

@@ -67,8 +67,9 @@ fn main() -> adw::glib::ExitCode {
             main_window.sidebar().clone(),
             main_window.conversation_view_rc().clone(),
         );
-        main_window.set_controller(controller);
+        main_window.set_controller(controller.clone());
         main_window.present();
+        controller.bootstrap_supervisor();
         *main_window_store.borrow_mut() = Some(main_window);
     });
 
