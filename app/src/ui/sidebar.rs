@@ -1,4 +1,6 @@
 use crate::protocol::{SessionListItem, WorkspaceView};
+use crate::ui_prefs::ArchiveFilter;
+use std::collections::HashSet;
 use gtk4::prelude::*;
 use libadwaita::prelude::*;
 use libadwaita as adw;
@@ -9,6 +11,7 @@ pub struct Sidebar {
     workspace_list: gtk4::ListBox,
     subagent_list: gtk4::ListBox,
     search_entry: gtk4::SearchEntry,
+    filter_button: gtk4::MenuButton,
     new_session_btn: gtk4::Button,
 }
 
@@ -114,6 +117,36 @@ impl Sidebar {
             .hexpand(true)
             .build();
         search_box.append(&search_entry);
+        let filter_button = gtk4::MenuButton::builder()
+            .label("Active")
+            .css_classes(["flat"])
+            .build();
+        let filter_popover = gtk4::Popover::builder().build();
+        let filter_box = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Vertical)
+            .spacing(2)
+            .margin_start(4)
+            .margin_end(4)
+            .margin_top(4)
+            .margin_bottom(4)
+            .build();
+        for (label, action) in [
+            ("Active", "win.filter-active"),
+            ("Archived", "win.filter-archived"),
+            ("All", "win.filter-all"),
+        ] {
+            let button = gtk4::Button::builder()
+                .label(label)
+                .css_classes(["flat"])
+                .action_name(action)
+                .build();
+            let pop = filter_popover.clone();
+            button.connect_clicked(move |_| pop.popdown());
+            filter_box.append(&button);
+        }
+        filter_popover.set_child(Some(&filter_box));
+        filter_button.set_popover(Some(&filter_popover));
+        search_box.append(&filter_button);
         container.append(&search_box);
 
         let scroll = gtk4::ScrolledWindow::builder()
@@ -206,6 +239,7 @@ impl Sidebar {
             workspace_list,
             subagent_list,
             search_entry,
+            filter_button,
             new_session_btn,
         }
     }
@@ -354,12 +388,33 @@ impl Sidebar {
         }
     }
 
-    pub fn load_sessions(&self, sessions: &[SessionListItem]) {
+    pub fn set_filter_label(&self, label: &str) {
+        self.filter_button.set_label(label);
+    }
+
+    pub fn load_sessions(
+        &self,
+        sessions: &[SessionListItem],
+        pinned: &HashSet<String>,
+        filter: ArchiveFilter,
+        running: &HashSet<String>,
+        unread: &HashSet<String>,
+    ) {
         while let Some(child) = self.session_list.first_child() {
             self.session_list.remove(&child);
         }
 
-        for item in sessions {
+        let mut ordered: Vec<&SessionListItem> = sessions
+            .iter()
+            .filter(|item| match filter {
+                ArchiveFilter::Active => !item.is_archived,
+                ArchiveFilter::Archived => item.is_archived,
+                ArchiveFilter::All => true,
+            })
+            .collect();
+        ordered.sort_by_key(|item| !pinned.contains(&item.id));
+
+        for item in ordered {
             let row = adw::ActionRow::builder()
                 .title(&item.title)
                 .subtitle(&item.cwd)
@@ -367,6 +422,29 @@ impl Sidebar {
                 .action_name("win.select-session")
                 .build();
             row.set_action_target_value(Some(&item.id.to_variant()));
+            if unread.contains(&item.id) {
+                row.add_css_class("heading");
+            }
+            if pinned.contains(&item.id) {
+                row.add_prefix(&gtk4::Image::from_icon_name("view-pin-symbolic"));
+            }
+            if running.contains(&item.id) {
+                row.add_prefix(&gtk4::Image::from_icon_name("media-playback-start-symbolic"));
+            }
+
+            let pin_btn = gtk4::Button::builder()
+                .icon_name("view-pin-symbolic")
+                .tooltip_text(if pinned.contains(&item.id) {
+                    "Unpin"
+                } else {
+                    "Pin"
+                })
+                .action_name("win.pin-session")
+                .css_classes(["flat", "circular"])
+                .valign(gtk4::Align::Center)
+                .build();
+            pin_btn.set_action_target_value(Some(&item.id.to_variant()));
+            row.add_suffix(&pin_btn);
 
             let menu_btn = gtk4::MenuButton::builder()
                 .icon_name("view-more-symbolic")
@@ -390,9 +468,7 @@ impl Sidebar {
                 .build();
             rename_btn.set_action_target_value(Some(&item.id.to_variant()));
             let pop_clone_rename = popover.clone();
-            rename_btn.connect_clicked(move |_| {
-                pop_clone_rename.popdown();
-            });
+            rename_btn.connect_clicked(move |_| pop_clone_rename.popdown());
             pop_box.append(&rename_btn);
 
             let close_btn = gtk4::Button::builder()
@@ -402,31 +478,31 @@ impl Sidebar {
                 .build();
             close_btn.set_action_target_value(Some(&item.id.to_variant()));
             let pop_clone_close = popover.clone();
-            close_btn.connect_clicked(move |_| {
-                pop_clone_close.popdown();
-            });
+            close_btn.connect_clicked(move |_| pop_clone_close.popdown());
             pop_box.append(&close_btn);
 
+            let archive_action = if item.is_archived {
+                ("Unarchive", "win.unarchive-session")
+            } else {
+                ("Archive", "win.archive-session")
+            };
             let archive_btn = gtk4::Button::builder()
-                .label("Archive")
+                .label(archive_action.0)
                 .css_classes(["flat"])
-                .action_name("win.archive-session")
+                .action_name(archive_action.1)
                 .build();
             archive_btn.set_action_target_value(Some(&item.id.to_variant()));
-
             let pop_clone = popover.clone();
-            archive_btn.connect_clicked(move |_| {
-                pop_clone.popdown();
-            });
-
+            archive_btn.connect_clicked(move |_| pop_clone.popdown());
             pop_box.append(&archive_btn);
+
             popover.set_child(Some(&pop_box));
             menu_btn.set_popover(Some(&popover));
-
             row.add_suffix(&menu_btn);
             self.session_list.append(&row);
         }
     }
+
 }
 
 impl Default for Sidebar {

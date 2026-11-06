@@ -3,6 +3,7 @@ use crate::transcript::{ConversationTranscript, RenderBlock};
 use crate::ui::composer::Composer;
 use crate::ui::desktop::{open_path_in_default_app, open_terminal_in_dir};
 use crate::ui::message_renderer::{render_block, AssistantLiveHandle};
+use crate::ui::goal_bar::GoalBar;
 use crate::ui::queue_dock::QueueDock;
 use crate::ui::schedules::SchedulesPage;
 use crate::ui::todo_dock::TodoDock;
@@ -15,6 +16,7 @@ use std::rc::Rc;
 pub struct ConversationView {
     stack: gtk4::Stack,
     composer: Composer,
+    goal_bar: GoalBar,
     queue_dock: QueueDock,
     todo_dock: TodoDock,
     transcript_box: gtk4::Box,
@@ -34,6 +36,7 @@ pub struct ConversationView {
     on_load_older: Rc<RefCell<Option<Box<dyn Fn()>>>>,
     live_handle: RefCell<Option<AssistantLiveHandle>>,
     schedules_page: SchedulesPage,
+    trajectory_page: adw::ViewStackPage,
     rendered_count: Cell<usize>,
     active_cwd: Rc<RefCell<PathBuf>>,
     title_activate: Rc<RefCell<Option<Box<dyn Fn()>>>>,
@@ -267,6 +270,9 @@ impl ConversationView {
 
         conversation_box.append(&view_stack);
 
+        let goal_bar = GoalBar::new();
+        conversation_box.append(goal_bar.widget());
+
         let queue_dock = QueueDock::new();
         conversation_box.append(queue_dock.widget());
 
@@ -291,6 +297,7 @@ impl ConversationView {
         Self {
             stack,
             composer,
+            goal_bar,
             queue_dock,
             todo_dock,
             transcript_box,
@@ -310,6 +317,7 @@ impl ConversationView {
             on_load_older: load_slot_for_scroll,
             live_handle: RefCell::new(None),
             schedules_page,
+            trajectory_page: traj_page,
             rendered_count: Cell::new(0),
             active_cwd,
             title_activate,
@@ -318,6 +326,10 @@ impl ConversationView {
 
     pub fn widget(&self) -> &gtk4::Stack {
         &self.stack
+    }
+
+    pub fn set_trajectory_visible(&self, visible: bool) {
+        self.trajectory_page.set_visible(visible);
     }
 
     pub fn schedules_page(&self) -> &SchedulesPage {
@@ -360,6 +372,10 @@ impl ConversationView {
 
     pub fn set_cwd(&self, cwd: &str) {
         *self.active_cwd.borrow_mut() = PathBuf::from(cwd);
+    }
+
+    pub fn goal_bar(&self) -> &GoalBar {
+        &self.goal_bar
     }
 
     pub fn update_queue(&self, items: &[QueueItem]) {

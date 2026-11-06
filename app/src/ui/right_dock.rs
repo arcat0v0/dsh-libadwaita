@@ -92,6 +92,19 @@ impl RightDock {
         self.terminal_panel.restore(session_id, cwd);
     }
 
+    pub fn selected_index(&self) -> usize {
+        self.tab_view
+            .selected_page()
+            .map(|page| self.tab_view.page_position(&page).max(0) as usize)
+            .unwrap_or(0)
+    }
+
+    pub fn select_tab(&self, index: usize) {
+        let index = index.min(self.tab_view.n_pages().saturating_sub(1) as usize) as i32;
+        let page = self.tab_view.nth_page(index);
+        self.tab_view.set_selected_page(&page);
+    }
+
     pub fn show_files(&self) {
         let index = self.tab_view.n_pages().saturating_sub(2);
         if index >= 0 {

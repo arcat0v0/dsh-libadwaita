@@ -107,9 +107,12 @@ pub fn begin_background_continuation(
     app: &gtk4::Application,
     session_id: &str,
     title: &str,
+    notify: bool,
 ) -> gio::ApplicationHoldGuard {
     let hold = app.hold();
-    send_background_notification(app, session_id, title);
+    if notify {
+        send_background_notification(app, session_id, title);
+    }
     hold
 }
 

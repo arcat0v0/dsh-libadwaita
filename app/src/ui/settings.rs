@@ -18,6 +18,7 @@ pub struct SettingsDialogHandle {
     install_log: Rc<dyn Fn(Option<&str>, &str)>,
     inventory: Rc<dyn Fn(&PluginInventoryResult)>,
     operation: Rc<dyn Fn(&str, &serde_json::Value)>,
+    refresh_catalog: Rc<dyn Fn()>,
 }
 
 impl SettingsDialogHandle {
@@ -40,6 +41,22 @@ impl SettingsDialogHandle {
     pub fn plugin_operation(&self, label: &str, value: &serde_json::Value) {
         (self.operation)(label, value);
     }
+
+    pub fn refresh_model_catalog(&self) {
+        (self.refresh_catalog)();
+    }
+}
+
+enum FormWidget {
+    Bool(adw::SwitchRow),
+    Number(adw::SpinRow),
+    Text(adw::EntryRow),
+    Enum(adw::ComboRow, Vec<String>),
+}
+
+struct FormField {
+    key: String,
+    widget: FormWidget,
 }
 
 struct BridgeViewData {
@@ -72,6 +89,40 @@ where
     });
     receiver
 }
+fn persist_setting(
+    conn: Arc<RwLock<Option<BridgeConnection>>>,
+    namespace: String,
+    key: String,
+    value: serde_json::Value,
+    revision: u64,
+    status: gtk4::Label,
+) {
+    let mut patch = serde_json::Map::new();
+    patch.insert(key, value);
+    let params = SettingsMutateParams {
+        namespace: Some(namespace),
+        patch: serde_json::Value::Object(patch),
+        expected_revision: Some(revision),
+    };
+    let rx = rpc_receiver::<SettingsMutateParams, serde_json::Value>(
+        conn,
+        METHOD_SETTINGS_MUTATE,
+        params,
+        Duration::from_secs(15),
+    );
+    gtk4::glib::MainContext::default().spawn_local(async move {
+        let mut rx = rx;
+        match rx.recv().await {
+            Some(Ok(_)) => status.set_label("Preference saved to Host settings"),
+            Some(Err(err)) if err.contains("-32020") => {
+                status.set_label("Settings conflict; reload and retry")
+            }
+            Some(Err(err)) => status.set_label(&format!("Host setting unavailable: {}", err)),
+            None => status.set_label("Host setting unavailable"),
+        }
+    });
+}
+
 pub fn build_preferences_dialog(
     controller: Option<Rc<SessionController>>,
     store: Option<CredentialStore>,
@@ -83,10 +134,71 @@ pub fn build_preferences_dialog(
         .icon_name("preferences-other-symbolic")
         .build();
 
+    let prefs = controller
+        .as_ref()
+        .map(|ctrl| ctrl.prefs_snapshot())
+        .unwrap_or_default();
     let appearance_group = adw::PreferencesGroup::builder()
         .title("Appearance")
-        .description("Interface theme and color preferences")
+        .description("Theme, language, font size, and desktop notifications")
         .build();
+
+    let locale_model = gtk4::StringList::new(&[
+        "System",
+        "English",
+        "中文",
+        "Deutsch",
+        "Español",
+        "Français",
+        "日本語",
+        "Português",
+        "Русский",
+    ]);
+    let locale_row = adw::ComboRow::builder()
+        .title("Language")
+        .model(&locale_model)
+        .selected(0)
+        .sensitive(false)
+        .build();
+    let locale_config: Rc<RefCell<Option<(String, String, u64)>>> =
+        Rc::new(RefCell::new(None));
+    let locale_config_for_change = locale_config.clone();
+    let locale_status = gtk4::Label::builder()
+        .label("Checking locale support…")
+        .wrap(true)
+        .xalign(0.0)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    let locale_status_for_change = locale_status.clone();
+    let locale_controller = controller.clone();
+    locale_row.connect_selected_notify(move |row| {
+        let code = match row.selected() {
+            1 => "en",
+            2 => "zh",
+            3 => "de",
+            4 => "es",
+            5 => "fr",
+            6 => "ja",
+            7 => "pt",
+            8 => "ru",
+            _ => "system",
+        };
+        if let (Some(config), Some(ctrl)) = (
+            locale_config_for_change.borrow().clone(),
+            locale_controller.as_ref(),
+        ) {
+            persist_setting(
+                ctrl.connection_handle(),
+                config.0,
+                config.1,
+                serde_json::json!(code),
+                config.2,
+                locale_status_for_change.clone(),
+            );
+        }
+    });
+    appearance_group.add(&locale_row);
+    appearance_group.add(&locale_status);
 
     let theme_model = gtk4::StringList::new(&["System", "Light", "Dark"]);
     let theme_row = adw::ComboRow::builder()
@@ -94,26 +206,372 @@ pub fn build_preferences_dialog(
         .model(&theme_model)
         .selected(0)
         .build();
-
-    theme_row.connect_selected_notify(|row| {
-        let sm = adw::StyleManager::default();
-        match row.selected() {
-            0 => sm.set_color_scheme(adw::ColorScheme::Default),
-            1 => sm.set_color_scheme(adw::ColorScheme::ForceLight),
-            2 => sm.set_color_scheme(adw::ColorScheme::ForceDark),
-            _ => {}
+    let theme_status = gtk4::Label::builder()
+        .label("Theme and font preferences are stored locally.")
+        .wrap(true)
+        .xalign(0.0)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    let theme_config: Rc<RefCell<Option<(String, String, u64)>>> =
+        Rc::new(RefCell::new(None));
+    let theme_config_for_change = theme_config.clone();
+    let ctrl_theme = controller.clone();
+    let theme_status_for_change = theme_status.clone();
+    theme_row.connect_selected_notify(move |row| {
+        let value = match row.selected() {
+            1 => "light",
+            2 => "dark",
+            _ => "system",
+        };
+        if let Some(ctrl) = &ctrl_theme {
+            ctrl.set_theme_preference(value);
+            if let Some(config) = theme_config_for_change.borrow().clone() {
+                persist_setting(
+                    ctrl.connection_handle(),
+                    config.0,
+                    config.1,
+                    serde_json::json!(value),
+                    config.2,
+                    theme_status_for_change.clone(),
+                );
+            }
         }
     });
     appearance_group.add(&theme_row);
 
+    let font_adjustment = gtk4::Adjustment::new(
+        prefs.font_size.unwrap_or(100) as f64,
+        80.0,
+        160.0,
+        1.0,
+        10.0,
+        0.0,
+    );
+    let font_row = adw::SpinRow::builder()
+        .title("Font Size")
+        .subtitle("Applied to the current process")
+        .adjustment(&font_adjustment)
+        .digits(0)
+        .build();
+    let ctrl_font = controller.clone();
+    font_row.connect_changed(move |row| {
+        if let Some(ctrl) = &ctrl_font {
+            ctrl.set_font_size(row.value() as u32);
+        }
+    });
+    appearance_group.add(&font_row);
+
     let dev_tools_row = adw::SwitchRow::builder()
         .title("Developer Tools")
-        .subtitle("Enable trajectory view and execution traces")
-        .active(true)
+        .subtitle("Show trajectory view and execution traces")
+        .active(prefs.developer_tools)
         .build();
+    let ctrl_dev = controller.clone();
+    dev_tools_row.connect_active_notify(move |row| {
+        if let Some(ctrl) = &ctrl_dev {
+            ctrl.set_developer_tools(row.is_active());
+        }
+    });
     appearance_group.add(&dev_tools_row);
 
+    let notifications_row = adw::SwitchRow::builder()
+        .title("Desktop Notifications")
+        .subtitle("Notify when a background turn completes")
+        .active(prefs.notifications_enabled)
+        .build();
+    let ctrl_notifications = controller.clone();
+    notifications_row.connect_active_notify(move |row| {
+        if let Some(ctrl) = &ctrl_notifications {
+            ctrl.set_notifications_enabled(row.is_active());
+        }
+    });
+    appearance_group.add(&notifications_row);
+
+    appearance_group.add(&theme_status);
+
     general_page.add(&appearance_group);
+
+    let host_page = adw::PreferencesPage::builder()
+        .title("Host Settings")
+        .icon_name("preferences-system-symbolic")
+        .build();
+    let host_status = gtk4::Label::builder()
+        .label("Loading Host settings…")
+        .wrap(true)
+        .xalign(0.0)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    let host_status_group = adw::PreferencesGroup::builder().build();
+    host_status_group.add(&host_status);
+    host_page.add(&host_status_group);
+
+    let describe_controller = controller.clone();
+    let locale_row_for_schema = locale_row.clone();
+    let locale_status_for_schema = locale_status.clone();
+    let locale_config_for_schema = locale_config.clone();
+    let theme_config_for_schema = theme_config.clone();
+    let theme_row_for_schema = theme_row.clone();
+    let theme_status_for_schema = theme_status.clone();
+    let host_page_for_schema = host_page.clone();
+    let host_status_for_schema = host_status.clone();
+    let host_controller = controller.clone();
+    if let Some(ctrl) = describe_controller {
+        let rx = rpc_receiver::<serde_json::Value, SettingsDescribeResult>(
+            ctrl.connection_handle(),
+            METHOD_SETTINGS_DESCRIBE,
+            serde_json::json!({}),
+            Duration::from_secs(10),
+        );
+        gtk4::glib::MainContext::default().spawn_local(async move {
+            let mut rx = rx;
+            let Some(Ok(result)) = rx.recv().await else {
+                locale_status_for_schema.set_label("Locale settings unavailable");
+                theme_status_for_schema.set_label("Host settings unavailable; preferences stored locally");
+                host_status_for_schema.set_label("Host settings unavailable");
+                return;
+            };
+            if let Some(descriptor) = result
+                .namespaces
+                .iter()
+                .find(|descriptor| descriptor.ns == "locale")
+            {
+                if let Some(key) = crate::settings_model::find_key(
+                    &descriptor.schema,
+                    &["language", "locale", "lang"],
+                ) {
+                    if let Some(current) = descriptor.value.get(&key).and_then(|value| value.as_str()) {
+                        let index = match current {
+                            "en" => 1,
+                            "zh" => 2,
+                            "de" => 3,
+                            "es" => 4,
+                            "fr" => 5,
+                            "ja" => 6,
+                            "pt" => 7,
+                            "ru" => 8,
+                            _ => 0,
+                        };
+                        locale_row_for_schema.set_selected(index);
+                    }
+                    *locale_config_for_schema.borrow_mut() =
+                        Some((descriptor.ns.clone(), key, descriptor.revision));
+                    locale_row_for_schema.set_sensitive(true);
+                    locale_status_for_schema.set_label("Locale is stored in Host settings");
+                } else {
+                    locale_status_for_schema.set_label("Locale namespace has no language field");
+                }
+            } else {
+                locale_status_for_schema.set_label("Locale settings unavailable in this profile");
+            }
+            if let Some(descriptor) = result
+                .namespaces
+                .iter()
+                .find(|descriptor| descriptor.ns == "ui-theme")
+            {
+                if let Some(key) = crate::settings_model::find_key(
+                    &descriptor.schema,
+                    &["colorScheme", "theme", "mode"],
+                ) {
+                    if let Some(current) = descriptor.value.get(&key).and_then(|value| value.as_str()) {
+                        let index = match current {
+                            "light" => 1,
+                            "dark" => 2,
+                            _ => 0,
+                        };
+                        theme_row_for_schema.set_selected(index);
+                    }
+                    *theme_config_for_schema.borrow_mut() =
+                        Some((descriptor.ns.clone(), key, descriptor.revision));
+                    theme_status_for_schema.set_label("Theme is stored in Host settings");
+                }
+            }
+
+            let targets = [
+                "agent-loop",
+                "subagent",
+                "subagent-model-selection",
+                "web",
+                "web-search-deepseek",
+                "web-deepseek-api",
+                "bash-sandbox",
+                "pwsh-sandbox",
+                "shell",
+                "session-log-deepseek",
+                "ui-settings",
+            ];
+            let mut rendered = 0;
+            for target in targets {
+                let Some(descriptor) = result
+                    .namespaces
+                    .iter()
+                    .find(|descriptor| descriptor.ns == target)
+                else {
+                    continue;
+                };
+                let fields = crate::settings_model::fields_from_schema(
+                    &descriptor.schema,
+                    &descriptor.value,
+                );
+                if fields.is_empty() {
+                    continue;
+                }
+                let group = adw::PreferencesGroup::builder()
+                    .title(&descriptor.ns)
+                    .description(format!("revision {}", descriptor.revision))
+                    .build();
+                let mut form_fields = Vec::new();
+                for field in fields {
+                    let widget = match field.kind {
+                        crate::settings_model::FieldKind::Bool => {
+                            let row = adw::SwitchRow::builder()
+                                .title(&field.label)
+                                .active(field.value.as_bool().unwrap_or(false))
+                                .build();
+                            group.add(&row);
+                            FormWidget::Bool(row)
+                        }
+                        crate::settings_model::FieldKind::Number => {
+                            let value = field.value.as_f64().unwrap_or(0.0);
+                            let adjustment = gtk4::Adjustment::new(
+                                value,
+                                0.0,
+                                1_000_000.0,
+                                1.0,
+                                10.0,
+                                0.0,
+                            );
+                            let row = adw::SpinRow::builder()
+                                .title(&field.label)
+                                .adjustment(&adjustment)
+                                .digits(0)
+                                .build();
+                            group.add(&row);
+                            FormWidget::Number(row)
+                        }
+                        crate::settings_model::FieldKind::Text => {
+                            let row = adw::EntryRow::builder()
+                                .title(&field.label)
+                                .text(
+                                    field
+                                        .value
+                                        .as_str()
+                                        .unwrap_or_default(),
+                                )
+                                .build();
+                            group.add(&row);
+                            FormWidget::Text(row)
+                        }
+                        crate::settings_model::FieldKind::Enum(options) => {
+                            let model = gtk4::StringList::new(
+                                &options
+                                    .iter()
+                                    .map(String::as_str)
+                                    .collect::<Vec<_>>(),
+                            );
+                            let selected = field
+                                .value
+                                .as_str()
+                                .and_then(|value| {
+                                    options.iter().position(|option| option == value)
+                                })
+                                .unwrap_or(0) as u32;
+                            let row = adw::ComboRow::builder()
+                                .title(&field.label)
+                                .model(&model)
+                                .selected(selected)
+                                .build();
+                            group.add(&row);
+                            FormWidget::Enum(row, options)
+                        }
+                        crate::settings_model::FieldKind::Unavailable => continue,
+                    };
+                    form_fields.push(FormField {
+                        key: field.key,
+                        widget,
+                    });
+                }
+                let save_row = adw::ActionRow::builder().build();
+                let save_button = gtk4::Button::builder()
+                    .label("Save")
+                    .css_classes(["suggested-action"])
+                    .valign(gtk4::Align::Center)
+                    .build();
+                let status_label = gtk4::Label::builder()
+                    .label("")
+                    .xalign(0.0)
+                    .css_classes(["dimension", "caption"])
+                    .build();
+                group.add(&status_label);
+                let namespace = descriptor.ns.clone();
+                let revision = descriptor.revision;
+                let conn = host_controller
+                    .as_ref()
+                    .map(|ctrl| ctrl.connection_handle());
+                let form_fields = Rc::new(RefCell::new(form_fields));
+                let status_for_save = status_label.clone();
+                save_button.connect_clicked(move |_| {
+                    let Some(conn) = conn.clone() else {
+                        return;
+                    };
+                    let mut patch = serde_json::Map::new();
+                    for field in form_fields.borrow().iter() {
+                        let value = match &field.widget {
+                            FormWidget::Bool(row) => serde_json::json!(row.is_active()),
+                            FormWidget::Number(row) => {
+                                let value = row.value();
+                                if value.fract() == 0.0 {
+                                    serde_json::json!(value as i64)
+                                } else {
+                                    serde_json::json!(value)
+                                }
+                            }
+                            FormWidget::Text(row) => serde_json::json!(row.text().to_string()),
+                            FormWidget::Enum(row, options) => {
+                                let index = row.selected() as usize;
+                                serde_json::json!(options.get(index).cloned().unwrap_or_default())
+                            }
+                        };
+                        patch.insert(field.key.clone(), value);
+                    }
+                    let params = SettingsMutateParams {
+                        namespace: Some(namespace.clone()),
+                        patch: serde_json::Value::Object(patch),
+                        expected_revision: Some(revision),
+                    };
+                    let rx = rpc_receiver::<SettingsMutateParams, serde_json::Value>(
+                        conn.clone(),
+                        METHOD_SETTINGS_MUTATE,
+                        params,
+                        Duration::from_secs(15),
+                    );
+                    let status = status_for_save.clone();
+                    gtk4::glib::MainContext::default().spawn_local(async move {
+                        let mut rx = rx;
+                        match rx.recv().await {
+                            Some(Ok(_)) => status.set_label("Saved"),
+                            Some(Err(err)) if err.contains("-32020") => {
+                                status.set_label("Conflict; reload settings")
+                            }
+                            Some(Err(err)) => status.set_label(&format!("Save failed: {}", err)),
+                            None => status.set_label("Save failed"),
+                        }
+                    });
+                });
+                save_row.add_suffix(&save_button);
+                group.add(&save_row);
+                host_page_for_schema.add(&group);
+                rendered += 1;
+            }
+            if rendered == 0 {
+                host_status_for_schema.set_label("No typed Host settings namespaces available");
+            } else {
+                host_status_for_schema.set_label(&format!("{} namespaces available", rendered));
+            }
+        });
+    }
+    dialog.add(&host_page);
+
+
 
     let general_group = adw::PreferencesGroup::builder()
         .title("System & Version")
@@ -402,28 +860,154 @@ pub fn build_preferences_dialog(
 
     let catalog_group = adw::PreferencesGroup::builder()
         .title("Model Catalog")
-        .description("Supported models")
+        .description("Providers and models reported by the bridge")
         .build();
-
-    let chat_row = adw::ActionRow::builder()
-        .title("deepseek-chat")
-        .subtitle("General conversation and code assistance")
+    let catalog_list = gtk4::ListBox::builder()
+        .selection_mode(gtk4::SelectionMode::None)
+        .css_classes(["boxed-list"])
         .build();
-    catalog_group.add(&chat_row);
-
-    let coder_row = adw::ActionRow::builder()
-        .title("deepseek-coder")
-        .subtitle("Specialized code generation and refactoring")
+    catalog_group.add(&catalog_list);
+    let catalog_status = gtk4::Label::builder()
+        .label("Loading model catalog…")
+        .xalign(0.0)
+        .wrap(true)
+        .css_classes(["dim-label", "caption"])
         .build();
-    catalog_group.add(&coder_row);
-
-    let reasoner_row = adw::ActionRow::builder()
-        .title("deepseek-reasoner")
-        .subtitle("Reasoning and chain-of-thought model")
-        .build();
-    catalog_group.add(&reasoner_row);
-
+    catalog_group.add(&catalog_status);
+    let catalog_refresh = gtk4::Button::builder().label("Refresh catalog").build();
+    catalog_group.add(&catalog_refresh);
     models_page.add(&catalog_group);
+
+    let catalog_conn = controller.as_ref().map(|ctrl| ctrl.connection_handle());
+    let load_catalog = {
+        let conn = catalog_conn.clone();
+        let list = catalog_list.clone();
+        let status = catalog_status.clone();
+        Rc::new(move || {
+            let Some(conn) = conn.clone() else {
+                status.set_label("Not connected");
+                return;
+            };
+            let rx = rpc_receiver::<serde_json::Value, ModelCatalogResult>(
+                conn,
+                METHOD_MODEL_CATALOG,
+                serde_json::json!({}),
+                Duration::from_secs(10),
+            );
+            let list_for_ui = list.clone();
+            let status_for_ui = status.clone();
+            gtk4::glib::MainContext::default().spawn_local(async move {
+                let mut rx = rx;
+                let Some(Ok(catalog)) = rx.recv().await else {
+                    status_for_ui.set_label("Model catalog unavailable");
+                    return;
+                };
+                while let Some(child) = list_for_ui.first_child() {
+                    list_for_ui.remove(&child);
+                }
+                if catalog.providers.is_empty() {
+                    status_for_ui.set_label("No model providers configured");
+                    return;
+                }
+                status_for_ui.set_label(&format!(
+                    "default: {}/{}",
+                    catalog.default_provider, catalog.default_model
+                ));
+                for provider in catalog.providers {
+                    let row = adw::ActionRow::builder()
+                        .title(&provider.name)
+                        .subtitle(format!(
+                            "{} · {}",
+                            provider.id,
+                            if provider.configured {
+                                "configured"
+                            } else {
+                                "not configured"
+                            }
+                        ))
+                        .build();
+                    list_for_ui.append(&row);
+                    for model in provider.models {
+                        let model_row = adw::ActionRow::builder()
+                            .title(&model.display_name)
+                            .subtitle(format!(
+                                "{} · context {}",
+                                model.id,
+                                model
+                                    .context_window
+                                    .map(|value| value.to_string())
+                                    .unwrap_or_else(|| "?".to_string())
+                            ))
+                            .build();
+                        list_for_ui.append(&model_row);
+                    }
+                }
+            });
+        })
+    };
+    let load_for_button = load_catalog.clone();
+    catalog_refresh.connect_clicked(move |_| load_for_button());
+    load_catalog();
+
+
+    if let Some(ctrl) = controller.as_ref() {
+        let rx = rpc_receiver::<serde_json::Value, ModelCatalogResult>(
+            ctrl.connection_handle(),
+            METHOD_MODEL_CATALOG,
+            serde_json::json!({}),
+            Duration::from_secs(10),
+        );
+        let list_for_ui = catalog_list.clone();
+        let status_for_ui = catalog_status.clone();
+        gtk4::glib::MainContext::default().spawn_local(async move {
+            let mut rx = rx;
+            let Some(Ok(catalog)) = rx.recv().await else {
+                status_for_ui.set_label("Model catalog unavailable");
+                return;
+            };
+            while let Some(child) = list_for_ui.first_child() {
+                list_for_ui.remove(&child);
+            }
+            if catalog.providers.is_empty() {
+                status_for_ui.set_label("No model providers configured");
+                return;
+            }
+            status_for_ui.set_label(&format!(
+                "default: {}/{}",
+                catalog.default_provider, catalog.default_model
+            ));
+            for provider in catalog.providers {
+                let row = adw::ActionRow::builder()
+                    .title(&provider.name)
+                    .subtitle(format!(
+                        "{} · {}",
+                        provider.id,
+                        if provider.configured {
+                            "configured"
+                        } else {
+                            "not configured"
+                        }
+                    ))
+                    .build();
+                list_for_ui.append(&row);
+                for model in provider.models {
+                    let model_row = adw::ActionRow::builder()
+                        .title(&model.display_name)
+                        .subtitle(format!(
+                            "{} · context {}",
+                            model.id,
+                            model
+                                .context_window
+                                .map(|value| value.to_string())
+                                .unwrap_or_else(|| "?".to_string())
+                        ))
+                        .build();
+                    list_for_ui.append(&model_row);
+                }
+            }
+        });
+    }
+
     dialog.add(&models_page);
 
     let account_page = adw::PreferencesPage::builder()
@@ -1320,6 +1904,7 @@ pub fn build_preferences_dialog(
             install_log: log_cb,
             inventory: inventory_cb,
             operation: operation_cb,
+            refresh_catalog: load_catalog.clone(),
         },
     )
 }

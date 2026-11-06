@@ -6,6 +6,7 @@ use crate::credentials::{should_show_onboarding, CredentialStore, DEFAULT_PROVID
 use crate::protocol::*;
 use crate::session::{SessionModel, SessionStatus};
 use crate::session_state::{default_state_path, SessionState};
+use crate::ui_prefs::{default_ui_prefs_path, ArchiveFilter, UiPrefs};
 use crate::supervisor::{resolve_bridge_bundle_path, HarnessSupervisor, SupervisorConfig};
 use crate::ui::approval_dialog::{show_approval_dialog, show_user_question_dialog};
 use crate::ui::conversation::ConversationView;
@@ -154,6 +155,14 @@ pub enum UiMessage {
     FileAttached(String),
     SessionSearchLoaded(Vec<SessionSearchItem>),
     ProjectionsLoaded(SessionProjectionsResult),
+    SessionModelLoaded(SessionModelGetResult),
+    ModelSwitchFailed {
+        provider: String,
+        model: String,
+    },
+    GoalLoaded(Option<GoalView>),
+    SessionListRefresh,
+    RefreshModelCatalog,
 }
 
 #[derive(Clone)]
@@ -211,6 +220,9 @@ pub struct SessionController {
     permission_state: Rc<RefCell<Option<PermissionGetResult>>>,
     history_loading: Rc<Cell<bool>>,
     pending_images: Rc<RefCell<Vec<PendingImage>>>,
+    prefs: Rc<RefCell<UiPrefs>>,
+    prefs_path: PathBuf,
+    unread_sessions: Rc<RefCell<HashSet<String>>>,
     search_generation: Rc<Cell<u64>>,
     window_title: adw::WindowTitle,
     toast_overlay: adw::ToastOverlay,
@@ -263,6 +275,12 @@ impl SessionController {
             permission_state: Rc::new(RefCell::new(None)),
             history_loading: Rc::new(Cell::new(false)),
             pending_images: Rc::new(RefCell::new(Vec::new())),
+            prefs: {
+                let path = default_ui_prefs_path();
+                Rc::new(RefCell::new(UiPrefs::load(&path)))
+            },
+            prefs_path: default_ui_prefs_path(),
+            unread_sessions: Rc::new(RefCell::new(HashSet::new())),
             search_generation: Rc::new(Cell::new(0)),
             window_title: main_window.window_title().clone(),
             toast_overlay: main_window
@@ -379,6 +397,22 @@ impl SessionController {
         });
 
         crate::ui::message_renderer::set_controller(&controller);
+        controller
+            .conversation_view
+            .set_trajectory_visible(controller.prefs.borrow().developer_tools);
+        if let Some(theme) = controller.prefs.borrow().theme.clone() {
+            let manager = adw::StyleManager::default();
+            manager.set_color_scheme(match theme.as_str() {
+                "light" => adw::ColorScheme::ForceLight,
+                "dark" => adw::ColorScheme::ForceDark,
+                _ => adw::ColorScheme::Default,
+            });
+        }
+        if let Some(size) = controller.prefs.borrow().font_size {
+            if let Some(settings) = gtk4::Settings::default() {
+                settings.set_gtk_font_name(Some(&format!("Sans {}", size)));
+            }
+        }
         let weak_history = Rc::downgrade(&controller);
         controller.conversation_view.set_on_load_older(move || {
             if let Some(ctrl) = weak_history.upgrade() {
@@ -1304,6 +1338,7 @@ impl SessionController {
                     .borrow_mut()
                     .insert(session_id.to_string(), Instant::now());
             }
+            self.unread_sessions.borrow_mut().remove(session_id);
         } else {
             self.running_sessions.borrow_mut().remove(session_id);
             self.turn_start_times.borrow_mut().remove(session_id);
@@ -1324,6 +1359,7 @@ impl SessionController {
                     .borrow_mut()
                     .insert(session_id.to_string(), Instant::now());
             }
+            self.unread_sessions.borrow_mut().remove(session_id);
         } else {
             let was_running = self.running_sessions.borrow_mut().remove(session_id);
             let start = self.turn_start_times.borrow_mut().remove(session_id);
@@ -1331,7 +1367,14 @@ impl SessionController {
                 .map(|started| started.elapsed().as_millis() as u64)
                 .unwrap_or(0);
 
+            let active_id = self.active_session_id();
+            if was_running && active_id.as_deref() != Some(session_id) {
+                self.unread_sessions
+                    .borrow_mut()
+                    .insert(session_id.to_string());
+            }
             if was_running
+                && self.prefs.borrow().notifications_enabled
                 && should_notify_turn_completion(window_focused, duration_ms)
             {
                 if let Some(app) = app_opt.as_ref() {
@@ -1375,6 +1418,7 @@ impl SessionController {
                     .set_status(if status == "running" { "Running" } else { "Idle" });
             }
         }
+            self.refresh_sidebar_sessions();
     }
 
     pub fn set_supervisor(&self, sup: Arc<HarnessSupervisor>) {
@@ -1477,6 +1521,98 @@ impl SessionController {
         });
     }
 
+    pub fn load_goal(&self, session_id: &str) {
+        self.dispatch_call(
+            METHOD_GOAL_GET,
+            GoalGetParams {
+                session_id: session_id.to_string(),
+            },
+            Duration::from_secs(10),
+            |result: Result<GoalGetResult, ConnectionError>| match result {
+                Ok(goal) => UiMessage::GoalLoaded(goal.goal),
+                Err(err) => UiMessage::Toast(format!("Goal unavailable: {}", err)),
+            },
+        );
+    }
+
+    pub fn goal_edit_dialog(&self) {
+        let Some(goal) = self.conversation_view.goal_bar().goal() else {
+            return;
+        };
+        let weak = self.weak_self();
+        let goal_for_save = goal.clone();
+        crate::ui::goal_bar::goal_edit_dialog(&self.window, &goal, move |objective| {
+            if let Some(ctrl) = weak.upgrade() {
+                ctrl.goal_edit(&goal_for_save, &objective);
+            }
+        });
+    }
+
+    fn goal_edit(&self, goal: &GoalView, objective: &str) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        self.dispatch_call(
+            METHOD_GOAL_EDIT,
+            GoalEditParams {
+                session_id,
+                r#ref: GoalRef {
+                    id: goal.id.clone(),
+                    revision: goal.revision,
+                },
+                objective: Some(objective.to_string()),
+                max_goal_rounds: None,
+            },
+            Duration::from_secs(10),
+            |result: Result<GoalGetResult, ConnectionError>| match result {
+                Ok(goal) => UiMessage::GoalLoaded(goal.goal),
+                Err(err) => UiMessage::Toast(format!("Goal edit failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn goal_pause(&self) {
+        self.goal_action("pause");
+    }
+
+    pub fn goal_resume(&self) {
+        self.goal_action("resume");
+    }
+
+    pub fn goal_clear(&self) {
+        self.goal_action("clear");
+    }
+
+    fn goal_action(&self, action: &str) {
+        let Some(goal) = self.conversation_view.goal_bar().goal() else {
+            return;
+        };
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        let method = match action {
+            "pause" => METHOD_GOAL_PAUSE,
+            "resume" => METHOD_GOAL_RESUME,
+            _ => METHOD_GOAL_CLEAR,
+        };
+        let params = GoalActionParams {
+            session_id,
+            r#ref: GoalRef {
+                id: goal.id.clone(),
+                revision: goal.revision,
+            },
+        };
+        self.dispatch_call(
+            method,
+            params,
+            Duration::from_secs(10),
+            |result: Result<GoalGetResult, ConnectionError>| match result {
+                Ok(goal) => UiMessage::GoalLoaded(goal.goal),
+                Err(err) => UiMessage::Toast(format!("Goal action failed: {}", err)),
+            },
+        );
+    }
+
     pub fn load_projections(&self, session_id: &str) {
         self.dispatch_call(
             METHOD_SESSION_PROJECTIONS,
@@ -1506,6 +1642,140 @@ impl SessionController {
                 Err(err) => UiMessage::Toast(format!("Search failed: {}", err)),
             },
         );
+    }
+
+    fn save_prefs(&self) {
+        let _ = self.prefs.borrow().save(&self.prefs_path);
+    }
+
+    pub fn refresh_sidebar_sessions(&self) {
+        let sessions = self.sessions_cache.borrow().clone();
+        let prefs = self.prefs.borrow();
+        self.sidebar.load_sessions(
+            &sessions,
+            &prefs.pinned_set(),
+            prefs.archive_filter,
+            &self.running_sessions.borrow(),
+            &self.unread_sessions.borrow(),
+        );
+        self.sidebar.set_filter_label(match prefs.archive_filter {
+            ArchiveFilter::Active => "Active",
+            ArchiveFilter::Archived => "Archived",
+            ArchiveFilter::All => "All",
+        });
+    }
+
+    pub fn toggle_dock(&self) {
+        let visible = self.right_dock.widget().is_visible();
+        self.set_dock_visible(!visible);
+    }
+
+    pub fn set_dock_visible(&self, visible: bool) {
+        self.right_dock.widget().set_visible(visible);
+        if let Some(session_id) = self.active_session_id() {
+            self.prefs
+                .borrow_mut()
+                .set_dock_visible(&session_id, visible);
+            self.save_prefs();
+        }
+    }
+
+    pub fn restore_dock_for_session(&self, session_id: &str) {
+        let prefs = self.prefs.borrow();
+        let visible = prefs.dock_visible(session_id);
+        let tab = prefs.dock_tab(session_id).unwrap_or(0);
+        drop(prefs);
+        self.right_dock.widget().set_visible(visible);
+        self.right_dock.select_tab(tab);
+    }
+
+    pub fn remember_dock_for_session(&self, session_id: &str) {
+        let index = self.right_dock.selected_index();
+        self.prefs.borrow_mut().set_dock_tab(session_id, index);
+        let visible = self.right_dock.widget().is_visible();
+        self.prefs.borrow_mut().set_dock_visible(session_id, visible);
+        self.save_prefs();
+    }
+
+    pub fn prefs_snapshot(&self) -> UiPrefs {
+        self.prefs.borrow().clone()
+    }
+
+    pub fn set_developer_tools(&self, enabled: bool) {
+        self.prefs.borrow_mut().developer_tools = enabled;
+        self.save_prefs();
+        self.conversation_view.set_trajectory_visible(enabled);
+    }
+
+    pub fn set_notifications_enabled(&self, enabled: bool) {
+        self.prefs.borrow_mut().notifications_enabled = enabled;
+        self.save_prefs();
+    }
+
+    pub fn set_theme_preference(&self, theme: &str) {
+        self.prefs.borrow_mut().theme = Some(theme.to_string());
+        self.save_prefs();
+        let manager = adw::StyleManager::default();
+        manager.set_color_scheme(match theme {
+            "light" => adw::ColorScheme::ForceLight,
+            "dark" => adw::ColorScheme::ForceDark,
+            _ => adw::ColorScheme::Default,
+        });
+    }
+
+    pub fn set_font_size(&self, size: u32) {
+        self.prefs.borrow_mut().font_size = Some(size);
+        self.save_prefs();
+        if let Some(settings) = gtk4::Settings::default() {
+            settings.set_gtk_font_name(Some(&format!("Sans {}", size)));
+        }
+    }
+
+    pub fn toggle_pin_session(&self, session_id: &str) {
+        self.prefs.borrow_mut().toggle_pin(session_id);
+        self.save_prefs();
+        self.refresh_sidebar_sessions();
+    }
+
+    pub fn set_archive_filter(&self, filter: ArchiveFilter) {
+        self.prefs.borrow_mut().archive_filter = filter;
+        self.save_prefs();
+        self.refresh_sidebar_sessions();
+    }
+
+    pub fn unarchive_session(&self, session_id: &str) {
+        let sess_id = session_id.to_string();
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            let Some(conn) = conn_opt else {
+                return;
+            };
+            let params = SessionArchiveParams {
+                session_id: sess_id,
+                archived: false,
+            };
+            match conn
+                .call::<SessionArchiveParams, SessionArchiveResult>(
+                    METHOD_SESSION_ARCHIVE,
+                    params,
+                    Duration::from_secs(10),
+                )
+                .await
+            {
+                Ok(_) => {
+                    let _ = ui_sender.send(UiMessage::Toast("Session unarchived".to_string()));
+                    let _ = ui_sender.send(UiMessage::SessionListRefresh);
+                }
+                Err(err) => {
+                    let _ = ui_sender.send(UiMessage::Toast(format!(
+                        "Unarchive failed: {}",
+                        err
+                    )));
+                }
+            }
+        });
     }
 
     pub fn load_workspaces(&self) {
@@ -1880,6 +2150,68 @@ impl SessionController {
         }
     }
 
+    pub fn save_file_as(&self, path: &str) {
+        let dialog = gtk4::FileDialog::builder()
+            .title("Save File As")
+            .initial_name(
+                std::path::Path::new(path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "download".to_string()),
+            )
+            .build();
+        let weak = self.weak_self();
+        let path = path.to_string();
+        dialog.save(
+            Some(&self.window),
+            None::<&gtk4::gio::Cancellable>,
+            move |result| {
+                let Ok(file) = result else {
+                    return;
+                };
+                let Some(destination) = file.path() else {
+                    return;
+                };
+                let Some(ctrl) = weak.upgrade() else {
+                    return;
+                };
+                ctrl.download_file(&path, &destination);
+            },
+        );
+    }
+
+    fn download_file(&self, path: &str, destination: &std::path::Path) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        let params = FilesReadBytesParams {
+            session_id,
+            path: path.to_string(),
+            max_bytes: Some(8 * 1024 * 1024),
+        };
+        let destination = destination.to_path_buf();
+        let ui_sender = self.ui_sender.clone();
+        self.dispatch_call(
+            METHOD_FILES_READ_BYTES,
+            params,
+            Duration::from_secs(30),
+            move |result: Result<FilesReadBytesResult, ConnectionError>| match result {
+                Ok(read) => match crate::attachments::decode_base64(&read.data) {
+                    Some(bytes) => match std::fs::write(&destination, bytes) {
+                        Ok(_) => UiMessage::Toast(format!(
+                            "Saved {}",
+                            destination.display()
+                        )),
+                        Err(err) => UiMessage::Toast(format!("Save failed: {}", err)),
+                    },
+                    None => UiMessage::Toast("Invalid file data".to_string()),
+                },
+                Err(err) => UiMessage::Toast(format!("Read failed: {}", err)),
+            },
+        );
+        let _ = ui_sender;
+    }
+
     pub fn prompt_new_session_portal(&self) {
         let dialog = gtk4::FileDialog::builder()
             .title("Select Project Directory")
@@ -2032,44 +2364,63 @@ impl SessionController {
     }
 
     pub fn switch_model(&self, provider: &str, model: &str) {
+        let previous_provider = self.active_provider.borrow().clone();
+        let previous_model = self.active_model.borrow().clone();
         *self.active_model.borrow_mut() = model.to_string();
         *self.active_provider.borrow_mut() = provider.to_string();
-
-        let sess_id_opt = self
-            .active_session
-            .borrow()
-            .as_ref()
-            .map(|s| s.id.clone());
-
-        if let Some(sess_id) = sess_id_opt {
-            let conn_arc = self.connection.clone();
-            let prov = provider.to_string();
-            let mdl = model.to_string();
-
-            tokio_runtime().spawn(async move {
-                let conn_opt = conn_arc.read().await.clone();
-                if let Some(conn) = conn_opt {
-                    let params = SessionModelSetParams {
-                        session_id: sess_id,
-                        provider: prov,
-                        model: mdl,
-                        reasoning_effort: None,
-                    };
-                    let _ = conn
-                        .call::<SessionModelSetParams, serde_json::Value>(
-                            METHOD_SESSION_MODEL_SET,
-                            params,
-                            Duration::from_secs(5),
-                        )
-                        .await;
-                }
-            });
-        }
-
         self.conversation_view
             .composer()
             .model_button()
             .set_label(model);
+
+        let Some(sess_id) = self.active_session_id() else {
+            return;
+        };
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+        let prov = provider.to_string();
+        let mdl = model.to_string();
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            let Some(conn) = conn_opt else {
+                return;
+            };
+            let params = SessionModelSetParams {
+                session_id: sess_id,
+                provider: prov.clone(),
+                model: mdl.clone(),
+                reasoning_effort: None,
+            };
+            if conn
+                .call::<SessionModelSetParams, serde_json::Value>(
+                    METHOD_SESSION_MODEL_SET,
+                    params,
+                    Duration::from_secs(5),
+                )
+                .await
+                .is_err()
+            {
+                let _ = ui_sender.send(UiMessage::ModelSwitchFailed {
+                    provider: previous_provider,
+                    model: previous_model,
+                });
+            }
+        });
+    }
+
+    pub fn refresh_session_model(&self) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        self.dispatch_call(
+            METHOD_SESSION_MODEL_GET,
+            SessionModelGetParams { session_id },
+            Duration::from_secs(5),
+            |result: Result<SessionModelGetResult, ConnectionError>| match result {
+                Ok(model) => UiMessage::SessionModelLoaded(model),
+                Err(_) => UiMessage::Toast("Model state unavailable".to_string()),
+            },
+        );
     }
 
     pub fn open_model_picker(&self, anchor: &impl IsA<gtk4::Widget>) {
@@ -2082,38 +2433,88 @@ impl SessionController {
             .margin_top(6)
             .margin_bottom(6)
             .build();
-
-        let models = vec![
-            ("deepseek", "deepseek-chat"),
-            ("deepseek", "deepseek-coder"),
-            ("deepseek", "deepseek-reasoner"),
-        ];
-
-        let controller_weak = self.weak_self();
-
-        for (prov, mdl) in models {
-            let btn = gtk4::Button::builder()
-                .label(mdl)
-                .css_classes(["flat"])
-                .halign(gtk4::Align::Fill)
-                .build();
-
-            let pop_clone = popover.clone();
-            let ctrl_weak = controller_weak.clone();
-            let p_str = prov.to_string();
-            let m_str = mdl.to_string();
-            btn.connect_clicked(move |_| {
-                if let Some(c) = ctrl_weak.upgrade() {
-                    c.switch_model(&p_str, &m_str);
-                }
-                pop_clone.popdown();
-            });
-            box_widget.append(&btn);
-        }
-
+        let loading = gtk4::Label::builder()
+            .label("Loading model catalog…")
+            .css_classes(["dim-label", "caption"])
+            .build();
+        box_widget.append(&loading);
         popover.set_child(Some(&box_widget));
         popover.set_parent(anchor);
         popover.popup();
+
+        let conn_arc = self.connection.clone();
+        let weak = self.weak_self();
+        let (sender, mut receiver) =
+            tokio::sync::mpsc::unbounded_channel::<Result<ModelCatalogResult, String>>();
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            let Some(conn) = conn_opt else {
+                let _ = sender.send(Err("Not connected".to_string()));
+                return;
+            };
+            let result = conn
+                .call::<serde_json::Value, ModelCatalogResult>(
+                    METHOD_MODEL_CATALOG,
+                    serde_json::json!({}),
+                    Duration::from_secs(10),
+                )
+                .await
+                .map_err(|err| err.to_string());
+            let _ = sender.send(result);
+        });
+        let box_for_ui = box_widget.clone();
+        let popover_for_ui = popover.clone();
+        gtk4::glib::MainContext::default().spawn_local(async move {
+            let Some(result) = receiver.recv().await else {
+                return;
+            };
+            while let Some(child) = box_for_ui.first_child() {
+                box_for_ui.remove(&child);
+            }
+            match result {
+                Ok(catalog) => {
+                    for provider in catalog.providers {
+                        let provider_badge = if provider.configured {
+                            "configured"
+                        } else {
+                            "not configured"
+                        };
+                        let heading = gtk4::Label::builder()
+                            .label(&format!("{} · {}", provider.name, provider_badge))
+                            .css_classes(["heading"])
+                            .halign(gtk4::Align::Start)
+                            .build();
+                        box_for_ui.append(&heading);
+                        for model in provider.models {
+                            let btn = gtk4::Button::builder()
+                                .label(format!("{} ({})", model.display_name, model.id))
+                                .css_classes(["flat"])
+                                .halign(gtk4::Align::Fill)
+                                .build();
+                            let pop_clone = popover_for_ui.clone();
+                            let weak_clone = weak.clone();
+                            let provider_id = provider.id.clone();
+                            let model_id = model.id.clone();
+                            btn.connect_clicked(move |_| {
+                                if let Some(ctrl) = weak_clone.upgrade() {
+                                    ctrl.switch_model(&provider_id, &model_id);
+                                }
+                                pop_clone.popdown();
+                            });
+                            box_for_ui.append(&btn);
+                        }
+                    }
+                }
+                Err(err) => {
+                    let label = gtk4::Label::builder()
+                        .label(format!("Model catalog unavailable: {}", err))
+                        .wrap(true)
+                        .css_classes(["dimension", "caption"])
+                        .build();
+                    box_for_ui.append(&label);
+                }
+            }
+        });
     }
 
     pub fn refresh_permission(&self, session_id: &str) {
@@ -2290,14 +2691,18 @@ impl SessionController {
                     provider: prov.clone(),
                     key: k,
                 };
-                let _ = conn
+                let rotated = conn
                     .call::<CredentialsRotateParams, CredentialsInjectResult>(
                         METHOD_CREDENTIALS_ROTATE,
                         params,
                         Duration::from_secs(5),
                     )
-                    .await;
+                    .await
+                    .is_ok();
                 let _ = ui_sender.send(UiMessage::Toast(format!("{} rotated in memory", prov)));
+                if rotated {
+                    let _ = ui_sender.send(UiMessage::RefreshModelCatalog);
+                }
             }
         });
     }
@@ -2371,13 +2776,25 @@ impl SessionController {
                     UiMessage::UserQuestion { req, tx } => {
                         show_user_question_dialog(&win, req, tx);
                     }
+                    UiMessage::RefreshModelCatalog => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            if let Some(handle) = ctrl.settings_dialog.borrow().as_ref() {
+                                handle.refresh_model_catalog();
+                            }
+                        }
+                    }
+                    UiMessage::SessionListRefresh => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.load_session_list();
+                        }
+                    }
                     UiMessage::SessionListLoaded(sessions) => {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
                             ctrl.handle_session_list_loaded(&sessions);
                         }
-                        sidebar.load_sessions(&sessions);
                         if let Some(ctrl) = ctrl_weak.upgrade() {
                             *ctrl.sessions_cache.borrow_mut() = sessions.clone();
+                            ctrl.refresh_sidebar_sessions();
                             let workspaces = ctrl.workspaces.borrow().clone();
                             sidebar.load_workspaces(&workspaces, &sessions);
                         }
@@ -2421,6 +2838,10 @@ impl SessionController {
                         });
 
                         if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.unread_sessions.borrow_mut().remove(&session_id);
+                            if let Some(previous) = ctrl.active_session_id() {
+                                ctrl.remember_dock_for_session(&previous);
+                            }
                             ctrl.handle_follow_status(&session_id, &status);
                             ctrl.persist_session(&session_id, &cwd);
                             ctrl.refresh_queue(&session_id);
@@ -2438,7 +2859,10 @@ impl SessionController {
                             ctrl.refresh_permission(&session_id);
                             ctrl.update_continue_state();
                             ctrl.right_dock.on_session_followed(&session_id, &cwd);
+                            ctrl.restore_dock_for_session(&session_id);
                             ctrl.load_projections(&session_id);
+                            ctrl.refresh_session_model();
+                            ctrl.load_goal(&session_id);
                             ctrl.refresh_subagents();
                             ctrl.refresh_jobs();
                             ctrl.load_feedback();
@@ -2546,8 +2970,17 @@ impl SessionController {
                                     }
                                 }
                             }
-                            IncomingNotification::SettingsUpdated(_)
-                            | IncomingNotification::GoalUpdated(_) => {
+                            IncomingNotification::SettingsUpdated(_) => {
+                                if let Some(ctrl) = ctrl_weak.upgrade() {
+                                    if let Some(handle) = ctrl.settings_dialog.borrow().as_ref() {
+                                        handle.refresh();
+                                    }
+                                }
+                            }
+                            IncomingNotification::GoalUpdated(p) => {
+                                if matches_active_session(&active_sess, &p.session_id) {
+                                    conv_view.goal_bar().set_goal(p.goal);
+                                }
                                 if let Some(ctrl) = ctrl_weak.upgrade() {
                                     if let Some(handle) = ctrl.settings_dialog.borrow().as_ref() {
                                         handle.refresh();
@@ -2812,8 +3245,8 @@ impl SessionController {
                             .add_toast(adw::Toast::new(&format!("Image attached: {}", name)));
                     }
                     UiMessage::SessionSearchLoaded(items) => {
-                        sidebar.load_sessions(
-                            &items
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            let sessions = items
                                 .into_iter()
                                 .map(|item| SessionListItem {
                                     id: item.id,
@@ -2824,8 +3257,10 @@ impl SessionController {
                                     turn_count: 0,
                                     is_archived: false,
                                 })
-                                .collect::<Vec<_>>(),
-                        );
+                                .collect::<Vec<_>>();
+                            *ctrl.sessions_cache.borrow_mut() = sessions.clone();
+                            ctrl.refresh_sidebar_sessions();
+                        }
                     }
                     UiMessage::FileAttached(path) => {
                         if !path.is_empty() {
@@ -2867,6 +3302,29 @@ impl SessionController {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
                             ctrl.right_dock.terminal_panel().handle_output(&output);
                         }
+                    }
+                    UiMessage::GoalLoaded(goal) => {
+                        conv_view.goal_bar().set_goal(goal);
+                    }
+                    UiMessage::SessionModelLoaded(model) => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            *ctrl.active_provider.borrow_mut() = model.provider;
+                            *ctrl.active_model.borrow_mut() = model.model.clone();
+                            conv_view
+                                .composer()
+                                .model_button()
+                                .set_label(&model.model);
+                        }
+                    }
+                    UiMessage::ModelSwitchFailed { provider, model } => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            *ctrl.active_provider.borrow_mut() = provider;
+                            *ctrl.active_model.borrow_mut() = model.clone();
+                            conv_view.composer().model_button().set_label(&model);
+                        }
+                        toast_overlay.add_toast(adw::Toast::new(
+                            "Model switch failed; previous model restored",
+                        ));
                     }
                     UiMessage::ProjectionsLoaded(projections) => {
                         if let Some(usage) = projections.token_usage.as_ref() {

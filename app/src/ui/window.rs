@@ -74,6 +74,13 @@ impl MainWindow {
             .build();
         header_bar.pack_end(&new_session_btn);
 
+        let dock_btn = gtk4::Button::builder()
+            .icon_name("sidebar-show-right-symbolic")
+            .tooltip_text("Toggle Right Dock")
+            .action_name("win.toggle-dock")
+            .build();
+        header_bar.pack_end(&dock_btn);
+
         let model_btn = gtk4::Button::builder()
             .label("deepseek-chat")
             .css_classes(["flat"])
@@ -240,6 +247,108 @@ impl MainWindow {
             }
         });
         self.window.add_action(&remove_workspace_action);
+
+        let ctrl_goal_edit = Rc::downgrade(&controller);
+        let goal_edit = gtk4::gio::SimpleAction::new("goal-edit", None);
+        goal_edit.connect_activate(move |_, _| {
+            if let Some(c) = ctrl_goal_edit.upgrade() {
+                c.goal_edit_dialog();
+            }
+        });
+        self.window.add_action(&goal_edit);
+
+        let ctrl_goal_pause = Rc::downgrade(&controller);
+        let goal_pause = gtk4::gio::SimpleAction::new("goal-pause", None);
+        goal_pause.connect_activate(move |_, _| {
+            if let Some(c) = ctrl_goal_pause.upgrade() {
+                c.goal_pause();
+            }
+        });
+        self.window.add_action(&goal_pause);
+
+        let ctrl_goal_resume = Rc::downgrade(&controller);
+        let goal_resume = gtk4::gio::SimpleAction::new("goal-resume", None);
+        goal_resume.connect_activate(move |_, _| {
+            if let Some(c) = ctrl_goal_resume.upgrade() {
+                c.goal_resume();
+            }
+        });
+        self.window.add_action(&goal_resume);
+
+        let ctrl_goal_clear = Rc::downgrade(&controller);
+        let goal_clear = gtk4::gio::SimpleAction::new("goal-clear", None);
+        goal_clear.connect_activate(move |_, _| {
+            if let Some(c) = ctrl_goal_clear.upgrade() {
+                c.goal_clear();
+            }
+        });
+        self.window.add_action(&goal_clear);
+
+        let ctrl_pin = Rc::downgrade(&controller);
+        let pin_action = gtk4::gio::SimpleAction::new(
+            "pin-session",
+            Some(&gtk4::glib::VariantTy::STRING),
+        );
+        pin_action.connect_activate(move |_, param| {
+            if let (Some(c), Some(id)) = (
+                ctrl_pin.upgrade(),
+                param.and_then(|value| value.get::<String>()),
+            ) {
+                c.toggle_pin_session(&id);
+            }
+        });
+        self.window.add_action(&pin_action);
+
+        let ctrl_unarchive = Rc::downgrade(&controller);
+        let unarchive_action = gtk4::gio::SimpleAction::new(
+            "unarchive-session",
+            Some(&gtk4::glib::VariantTy::STRING),
+        );
+        unarchive_action.connect_activate(move |_, param| {
+            if let (Some(c), Some(id)) = (
+                ctrl_unarchive.upgrade(),
+                param.and_then(|value| value.get::<String>()),
+            ) {
+                c.unarchive_session(&id);
+            }
+        });
+        self.window.add_action(&unarchive_action);
+
+        let ctrl_filter = Rc::downgrade(&controller);
+        let filter_active = gtk4::gio::SimpleAction::new("filter-active", None);
+        filter_active.connect_activate(move |_, _| {
+            if let Some(c) = ctrl_filter.upgrade() {
+                c.set_archive_filter(crate::ui_prefs::ArchiveFilter::Active);
+            }
+        });
+        self.window.add_action(&filter_active);
+
+        let ctrl_filter = Rc::downgrade(&controller);
+        let filter_archived = gtk4::gio::SimpleAction::new("filter-archived", None);
+        filter_archived.connect_activate(move |_, _| {
+            if let Some(c) = ctrl_filter.upgrade() {
+                c.set_archive_filter(crate::ui_prefs::ArchiveFilter::Archived);
+            }
+        });
+        self.window.add_action(&filter_archived);
+
+        let ctrl_filter = Rc::downgrade(&controller);
+        let filter_all = gtk4::gio::SimpleAction::new("filter-all", None);
+        filter_all.connect_activate(move |_, _| {
+            if let Some(c) = ctrl_filter.upgrade() {
+                c.set_archive_filter(crate::ui_prefs::ArchiveFilter::All);
+            }
+        });
+        self.window.add_action(&filter_all);
+
+        let ctrl_dock = Rc::downgrade(&controller);
+        let toggle_dock = gtk4::gio::SimpleAction::new("toggle-dock", None);
+        toggle_dock.connect_activate(move |_, _| {
+            if let Some(c) = ctrl_dock.upgrade() {
+                c.toggle_dock();
+            }
+        });
+        self.window.add_action(&toggle_dock);
 
         let ctrl_open_child = Rc::downgrade(&controller);
         let open_child = gtk4::gio::SimpleAction::new(
@@ -421,8 +530,12 @@ impl MainWindow {
                 if c.any_session_running() {
                     if let Some((session_id, title)) = c.running_session_info() {
                         if let Some(app) = window_for_close.application() {
-                            let hold =
-                                begin_background_continuation(&app, &session_id, &title);
+                            let hold = begin_background_continuation(
+                                &app,
+                                &session_id,
+                                &title,
+                                c.prefs_snapshot().notifications_enabled,
+                            );
                             c.set_background_hold(hold, &session_id);
                         }
                     }

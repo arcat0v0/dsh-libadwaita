@@ -142,6 +142,12 @@ impl FilesPanel {
         self.status_label.set_label(&stat_label(stat));
     }
 
+    pub fn save_file(&self, path: &str) {
+        if let Some(controller) = self.controller.borrow().clone() {
+            controller.save_file_as(path);
+        }
+    }
+
     pub fn preview_panel(&self) -> Option<Rc<PreviewPanel>> {
         self.preview.borrow().clone()
     }
@@ -159,6 +165,17 @@ fn build_entry_row(entry: &FileEntry, panel: &Rc<FilesPanel>) -> gtk4::Widget {
         .activatable(true)
         .build();
     row.add_prefix(&gtk4::Image::from_icon_name(icon));
+
+    let save = gtk4::Button::builder()
+        .icon_name("document-save-symbolic")
+        .tooltip_text("Save As")
+        .css_classes(["flat", "circular"])
+        .valign(gtk4::Align::Center)
+        .build();
+    let save_panel = panel.clone();
+    let save_path = entry.path.clone();
+    save.connect_clicked(move |_| save_panel.save_file(&save_path));
+    row.add_suffix(&save);
 
     let panel = panel.clone();
     let path = entry.path.clone();
@@ -179,6 +196,10 @@ pub struct PreviewPanel {
     content: RefCell<Option<gtk4::Widget>>,
     status_label: gtk4::Label,
     pending_line: Cell<Option<u32>>,
+    copy_png: gtk4::Button,
+    open_external: gtk4::Button,
+    current_path: RefCell<String>,
+    texture: RefCell<Option<gtk4::gdk::Texture>>,
 }
 
 impl PreviewPanel {
@@ -198,14 +219,46 @@ impl PreviewPanel {
             .halign(gtk4::Align::Start)
             .wrap(true)
             .build();
+        let copy_png = gtk4::Button::builder()
+            .label("Copy PNG")
+            .css_classes(["flat"])
+            .visible(false)
+            .build();
+        let open_external = gtk4::Button::builder()
+            .label("Open Externally")
+            .css_classes(["flat"])
+            .visible(false)
+            .build();
         container.append(&status_label);
+        container.append(&copy_png);
+        container.append(&open_external);
 
-        Self {
+        let panel = Self {
             container,
             content: RefCell::new(None),
             status_label,
             pending_line: Cell::new(None),
-        }
+            copy_png,
+            open_external,
+            current_path: RefCell::new(String::new()),
+            texture: RefCell::new(None),
+        };
+        let texture_slot = panel.texture.clone();
+        panel.copy_png.connect_clicked(move |_| {
+            if let Some(texture) = texture_slot.borrow().as_ref() {
+                if let Some(display) = gtk4::gdk::Display::default() {
+                    display.clipboard().set_texture(texture);
+                }
+            }
+        });
+        let path_slot = panel.current_path.clone();
+        panel.open_external.connect_clicked(move |_| {
+            let path = path_slot.borrow().clone();
+            if !path.is_empty() {
+                crate::ui::desktop::open_path_in_default_app(std::path::Path::new(&path));
+            }
+        });
+        panel
     }
 
     pub fn widget(&self) -> &gtk4::Box {
@@ -217,6 +270,10 @@ impl PreviewPanel {
             self.container.remove(&widget);
         }
         self.status_label.set_label("Select a file to preview");
+        self.copy_png.set_visible(false);
+        self.open_external.set_visible(false);
+        self.current_path.borrow_mut().clear();
+        *self.texture.borrow_mut() = None;
     }
 
     pub fn show_unavailable(&self, reason: &str) {
@@ -229,6 +286,7 @@ impl PreviewPanel {
     }
     pub fn show_text(&self, path: &str, text: &str, truncated: bool) {
         self.clear();
+        self.copy_png.set_visible(false);
         let buffer = sourceview5::Buffer::new(None);
         if let Some(lang) = sourceview5::LanguageManager::default().language(language_for(path)) {
             buffer.set_language(Some(&lang));
@@ -250,6 +308,8 @@ impl PreviewPanel {
             .build();
         scroll.set_child(Some(&view));
 
+        *self.current_path.borrow_mut() = path.to_string();
+        self.open_external.set_visible(true);
         self.status_label.set_label(&format!(
             "{}{}",
             path,
@@ -287,8 +347,12 @@ impl PreviewPanel {
         scroll.set_child(Some(&picture));
 
         self.status_label.set_label(path);
+        *self.current_path.borrow_mut() = path.to_string();
+        self.open_external.set_visible(true);
         self.container.append(&scroll);
         *self.content.borrow_mut() = Some(scroll.upcast());
+        *self.texture.borrow_mut() = Some(texture);
+        self.copy_png.set_visible(true);
     }
 }
 
