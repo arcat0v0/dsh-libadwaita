@@ -15,7 +15,7 @@ pub struct MainWindow {
     split_view: adw::OverlaySplitView,
     sidebar: Rc<Sidebar>,
     conversation_view: Rc<ConversationView>,
-    right_dock: RightDock,
+    right_dock: Rc<RightDock>,
     window_title: adw::WindowTitle,
     model_btn: gtk4::Button,
     controller: RefCell<Option<Rc<SessionController>>>,
@@ -29,7 +29,7 @@ impl MainWindow {
     pub fn new(app: &adw::Application) -> Self {
         let sidebar = Rc::new(Sidebar::new());
         let conversation_view = Rc::new(ConversationView::new());
-        let right_dock = RightDock::new();
+        let right_dock = Rc::new(RightDock::new());
 
         let split_view = adw::OverlaySplitView::new();
         split_view.set_sidebar(Some(sidebar.widget()));
@@ -146,6 +146,7 @@ impl MainWindow {
         });
         window.add_action(&show_schedules_action);
 
+
         let shortcuts_window = Rc::new(RefCell::new(None));
         let shortcuts_store = shortcuts_window.clone();
         let help_window_weak = window.downgrade();
@@ -167,7 +168,7 @@ impl MainWindow {
         let show_account_action = gtk4::gio::SimpleAction::new("show-account", None);
         show_account_action.connect_activate(move |_, _| {
             if let Some(w) = window_weak.upgrade() {
-                show_settings_dialog(&w, None, None);
+                let _ = show_settings_dialog(&w, None, None);
             }
         });
         window.add_action(&show_account_action);
@@ -191,6 +192,53 @@ impl MainWindow {
     }
 
     pub fn set_controller(&self, controller: Rc<SessionController>) {
+        let ctrl_new_workspace = Rc::downgrade(&controller);
+        let new_workspace_action = gtk4::gio::SimpleAction::new("new-workspace", None);
+        new_workspace_action.connect_activate(move |_, _| {
+            if let Some(c) = ctrl_new_workspace.upgrade() {
+                c.prompt_new_workspace();
+            }
+        });
+        self.window.add_action(&new_workspace_action);
+
+        let ctrl_select_workspace = Rc::downgrade(&controller);
+        let select_workspace_action = gtk4::gio::SimpleAction::new(
+            "select-workspace",
+            Some(&gtk4::glib::VariantTy::STRING),
+        );
+        select_workspace_action.connect_activate(move |_, param| {
+            let id = param.and_then(|p| p.get::<String>());
+            if let (Some(c), Some(id)) = (ctrl_select_workspace.upgrade(), id) {
+                c.switch_workspace(&id);
+            }
+        });
+        self.window.add_action(&select_workspace_action);
+
+        let ctrl_rename_workspace = Rc::downgrade(&controller);
+        let rename_workspace_action = gtk4::gio::SimpleAction::new(
+            "rename-workspace",
+            Some(&gtk4::glib::VariantTy::STRING),
+        );
+        rename_workspace_action.connect_activate(move |_, param| {
+            let id = param.and_then(|p| p.get::<String>());
+            if let (Some(c), Some(id)) = (ctrl_rename_workspace.upgrade(), id) {
+                c.rename_workspace(&id);
+            }
+        });
+        self.window.add_action(&rename_workspace_action);
+
+        let ctrl_remove_workspace = Rc::downgrade(&controller);
+        let remove_workspace_action = gtk4::gio::SimpleAction::new(
+            "remove-workspace",
+            Some(&gtk4::glib::VariantTy::STRING),
+        );
+        remove_workspace_action.connect_activate(move |_, param| {
+            let id = param.and_then(|p| p.get::<String>());
+            if let (Some(c), Some(id)) = (ctrl_remove_workspace.upgrade(), id) {
+                c.remove_workspace(&id);
+            }
+        });
+        self.window.add_action(&remove_workspace_action);
         let ctrl_new = Rc::downgrade(&controller);
         let new_session_action = gtk4::gio::SimpleAction::new("new-session", None);
         new_session_action.connect_activate(move |_, _| {
@@ -277,6 +325,14 @@ impl MainWindow {
             }
         });
 
+        let ctrl_settings = Rc::downgrade(&controller);
+        let show_settings_action = gtk4::gio::SimpleAction::new("show-account", None);
+        show_settings_action.connect_activate(move |_, _| {
+            if let Some(c) = ctrl_settings.upgrade() {
+                c.open_settings();
+            }
+        });
+        self.window.add_action(&show_settings_action);
 
         let ctrl_close = Rc::downgrade(&controller);
         let window_for_close = self.window.clone();
@@ -319,7 +375,7 @@ impl MainWindow {
         &self.conversation_view
     }
 
-    pub fn right_dock(&self) -> &RightDock {
+    pub fn right_dock(&self) -> &Rc<RightDock> {
         &self.right_dock
     }
 

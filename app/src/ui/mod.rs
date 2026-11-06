@@ -4,6 +4,7 @@ pub mod composer;
 pub mod controller;
 pub mod conversation;
 pub mod desktop;
+pub mod files_panel;
 pub mod message_renderer;
 pub mod onboarding;
 pub mod queue_dock;

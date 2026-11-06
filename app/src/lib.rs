@@ -3,6 +3,7 @@ pub const APP_NAME: &str = "dsh";
 
 pub mod connection;
 pub mod credentials;
+pub mod drafts;
 pub mod protocol;
 pub mod session;
 pub mod session_state;

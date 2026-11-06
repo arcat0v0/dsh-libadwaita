@@ -1,4 +1,4 @@
-use crate::protocol::SessionListItem;
+use crate::protocol::{SessionListItem, WorkspaceView};
 use gtk4::prelude::*;
 use libadwaita::prelude::*;
 use libadwaita as adw;
@@ -6,6 +6,7 @@ use libadwaita as adw;
 pub struct Sidebar {
     container: gtk4::Box,
     session_list: gtk4::ListBox,
+    workspace_list: gtk4::ListBox,
     search_entry: gtk4::SearchEntry,
     new_session_btn: gtk4::Button,
 }
@@ -42,8 +43,40 @@ impl Sidebar {
             .css_classes(["flat"])
             .build();
         brand_box.append(&new_session_btn);
-
         container.append(&brand_box);
+
+        let workspace_header = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Horizontal)
+            .spacing(8)
+            .margin_start(12)
+            .margin_end(12)
+            .margin_top(4)
+            .margin_bottom(4)
+            .build();
+        let workspace_title = gtk4::Label::builder()
+            .label("Workspaces")
+            .css_classes(["dim-label", "caption"])
+            .hexpand(true)
+            .halign(gtk4::Align::Start)
+            .build();
+        workspace_header.append(&workspace_title);
+        let new_workspace_btn = gtk4::Button::builder()
+            .icon_name("folder-new-symbolic")
+            .tooltip_text("Create workspace")
+            .action_name("win.new-workspace")
+            .css_classes(["flat", "circular"])
+            .build();
+        workspace_header.append(&new_workspace_btn);
+        container.append(&workspace_header);
+
+        let workspace_list = gtk4::ListBox::builder()
+            .selection_mode(gtk4::SelectionMode::Single)
+            .css_classes(["boxed-list"])
+            .margin_start(8)
+            .margin_end(8)
+            .margin_bottom(8)
+            .build();
+        container.append(&workspace_list);
 
         let search_box = gtk4::Box::builder()
             .margin_start(8)
@@ -144,6 +177,7 @@ impl Sidebar {
         Self {
             container,
             session_list,
+            workspace_list,
             search_entry,
             new_session_btn,
         }
@@ -163,6 +197,87 @@ impl Sidebar {
 
     pub fn new_session_button(&self) -> &gtk4::Button {
         &self.new_session_btn
+    }
+
+    pub fn workspace_list(&self) -> &gtk4::ListBox {
+        &self.workspace_list
+    }
+
+    pub fn load_workspaces(&self, workspaces: &[WorkspaceView], sessions: &[SessionListItem]) {
+        while let Some(child) = self.workspace_list.first_child() {
+            self.workspace_list.remove(&child);
+        }
+
+        for workspace in workspaces {
+            let header = adw::ActionRow::builder()
+                .title(&workspace.title)
+                .subtitle(&workspace.path)
+                .activatable(true)
+                .action_name("win.select-workspace")
+                .build();
+            header.set_action_target_value(Some(&workspace.id.to_variant()));
+
+            let menu_btn = gtk4::MenuButton::builder()
+                .icon_name("view-more-symbolic")
+                .css_classes(["flat", "circular"])
+                .valign(gtk4::Align::Center)
+                .build();
+            let popover = gtk4::Popover::builder().build();
+            let pop_box = gtk4::Box::builder()
+                .orientation(gtk4::Orientation::Vertical)
+                .margin_start(4)
+                .margin_end(4)
+                .margin_top(4)
+                .margin_bottom(4)
+                .build();
+
+            let rename_btn = gtk4::Button::builder()
+                .label("Rename")
+                .css_classes(["flat"])
+                .action_name("win.rename-workspace")
+                .build();
+            rename_btn.set_action_target_value(Some(&workspace.id.to_variant()));
+            let pop_rename = popover.clone();
+            rename_btn.connect_clicked(move |_| pop_rename.popdown());
+            pop_box.append(&rename_btn);
+
+            let remove_btn = gtk4::Button::builder()
+                .label("Remove")
+                .css_classes(["flat", "destructive-action"])
+                .action_name("win.remove-workspace")
+                .build();
+            remove_btn.set_action_target_value(Some(&workspace.id.to_variant()));
+            let pop_remove = popover.clone();
+            remove_btn.connect_clicked(move |_| pop_remove.popdown());
+            pop_box.append(&remove_btn);
+
+            popover.set_child(Some(&pop_box));
+            menu_btn.set_popover(Some(&popover));
+            header.add_suffix(&menu_btn);
+
+            let expander = gtk4::Expander::builder().child(&header).build();
+            let sessions_box = gtk4::Box::builder()
+                .orientation(gtk4::Orientation::Vertical)
+                .margin_start(16)
+                .build();
+
+            for session_id in &workspace.session_ids {
+                if let Some(session) = sessions.iter().find(|s| &s.id == session_id) {
+                    let row = adw::ActionRow::builder()
+                        .title(&session.title)
+                        .subtitle(&session.cwd)
+                        .activatable(true)
+                        .action_name("win.select-session")
+                        .build();
+                    row.set_action_target_value(Some(&session.id.to_variant()));
+                    sessions_box.append(&row);
+                }
+            }
+            if sessions_box.first_child().is_some() {
+                expander.set_child(Some(&sessions_box));
+            }
+            self.workspace_list.append(&expander);
+        }
     }
 
     pub fn load_sessions(&self, sessions: &[SessionListItem]) {

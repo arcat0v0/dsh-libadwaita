@@ -268,3 +268,82 @@ fn test_error_code_mapping() {
     assert_eq!(BridgeErrorCode::from_code(-99999), BridgeErrorCode::Unknown(-99999));
     assert_eq!(BridgeErrorCode::ApprovalFailClosed.to_code(), -32006);
 }
+
+#[test]
+fn test_batch_b_protocol_roundtrips() {
+    let workspace = WorkspaceView {
+        id: "ws-1".to_string(),
+        path: "/tmp/project".to_string(),
+        title: "project".to_string(),
+        created_at: "2026-11-06T00:00:00Z".to_string(),
+        updated_at: "2026-11-06T00:01:00Z".to_string(),
+        session_ids: vec!["s-1".to_string()],
+        status: Some("ready".to_string()),
+    };
+    let list = WorkspaceListResult {
+        workspaces: vec![workspace],
+    };
+    let json = serde_json::to_string(&list).unwrap();
+    let decoded: WorkspaceListResult = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded, list);
+
+    let permission = PermissionGetResult {
+        current_value: "auto".to_string(),
+        catalog: PermissionCatalogResult {
+            options: vec![PresetOptionItem {
+                value: "auto".to_string(),
+                name: "Auto".to_string(),
+                description: Some("Approve safe tools".to_string()),
+            }],
+            default_options: vec![],
+            default_preset: "default".to_string(),
+        },
+    };
+    assert_eq!(
+        dsh_libadwaita::ui::controller::permission_display_label(&permission),
+        "Auto"
+    );
+
+    let file_text = FilesReadResult {
+        kind: "text".to_string(),
+        path: "src/lib.rs".to_string(),
+        text: Some("pub fn ok() {}\n".to_string()),
+        size: 15,
+        truncated: Some(false),
+    };
+    assert_eq!(
+        dsh_libadwaita::ui::files_panel::read_text_result(&file_text),
+        Some(("pub fn ok() {}\n".to_string(), false))
+    );
+    let binary_text = FilesReadResult {
+        kind: "binary".to_string(),
+        path: "bin".to_string(),
+        text: None,
+        size: 128,
+        truncated: None,
+    };
+    assert_eq!(dsh_libadwaita::ui::files_panel::read_text_result(&binary_text), None);
+    assert!(dsh_libadwaita::ui::files_panel::is_image_path("diagram.svg"));
+    assert!(!dsh_libadwaita::ui::files_panel::is_image_path("notes.rs"));
+
+    let goal_notif = GoalUpdatedNotificationParams {
+        session_id: "s-1".to_string(),
+        goal: Some(GoalView {
+            id: "g-1".to_string(),
+            revision: 3,
+            objective: "Ship".to_string(),
+            phase: "active".to_string(),
+            blocked_reason: None,
+            max_goal_rounds: 8,
+            rounds_started: 2,
+            created_at: 100,
+            updated_at: 120,
+            activation: "manual".to_string(),
+        }),
+    };
+    let raw = serde_json::to_value(&goal_notif).unwrap();
+    assert_eq!(
+        dsh_libadwaita::connection::IncomingNotification::from_raw(NOTIFICATION_GOAL_UPDATED, raw),
+        dsh_libadwaita::connection::IncomingNotification::GoalUpdated(goal_notif)
+    );
+}

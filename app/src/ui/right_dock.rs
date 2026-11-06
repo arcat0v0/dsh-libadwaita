@@ -1,10 +1,15 @@
+use crate::ui::controller::SessionController;
+use crate::ui::files_panel::{FilesPanel, PreviewPanel};
 use gtk4::prelude::*;
 use libadwaita as adw;
+use std::rc::Rc;
 
 pub struct RightDock {
     container: gtk4::Box,
     tab_view: adw::TabView,
     tab_bar: adw::TabBar,
+    files_panel: Rc<FilesPanel>,
+    preview_panel: Rc<PreviewPanel>,
 }
 
 impl RightDock {
@@ -23,7 +28,7 @@ impl RightDock {
 
         let terminal_page = adw::StatusPage::builder()
             .title("Terminal")
-            .description("Embedded terminal for workspace commands")
+            .description("Embedded terminal is not available in this build")
             .icon_name("utilities-terminal-symbolic")
             .build();
         let page1 = tab_view.append(&terminal_page);
@@ -32,21 +37,15 @@ impl RightDock {
             "utilities-terminal-symbolic",
         )));
 
-        let files_page = adw::StatusPage::builder()
-            .title("Files")
-            .description("Workspace changes and git diff viewer")
-            .icon_name("folder-symbolic")
-            .build();
-        let page2 = tab_view.append(&files_page);
+        let files_panel = FilesPanel::new();
+        let preview_panel = Rc::new(PreviewPanel::new());
+        files_panel.set_preview(preview_panel.clone());
+
+        let page2 = tab_view.append(files_panel.widget());
         page2.set_title("Files");
         page2.set_icon(Some(&gtk4::gio::ThemedIcon::new("folder-symbolic")));
 
-        let preview_page = adw::StatusPage::builder()
-            .title("Preview")
-            .description("Artifact and rendered document preview")
-            .icon_name("view-reveal-symbolic")
-            .build();
-        let page3 = tab_view.append(&preview_page);
+        let page3 = tab_view.append(preview_panel.widget());
         page3.set_title("Preview");
         page3.set_icon(Some(&gtk4::gio::ThemedIcon::new("view-reveal-symbolic")));
 
@@ -56,6 +55,8 @@ impl RightDock {
             container,
             tab_view,
             tab_bar,
+            files_panel,
+            preview_panel,
         }
     }
 
@@ -69,6 +70,34 @@ impl RightDock {
 
     pub fn tab_bar(&self) -> &adw::TabBar {
         &self.tab_bar
+    }
+
+    pub fn files_panel(&self) -> &Rc<FilesPanel> {
+        &self.files_panel
+    }
+
+    pub fn preview_panel(&self) -> &Rc<PreviewPanel> {
+        &self.preview_panel
+    }
+
+    pub fn set_controller(&self, controller: Rc<SessionController>) {
+        self.files_panel.set_controller(controller.clone());
+    }
+
+    pub fn show_files(&self) {
+        let index = self.tab_view.n_pages().saturating_sub(2);
+        if index >= 0 {
+            let page = self.tab_view.nth_page(index);
+            self.tab_view.set_selected_page(&page);
+        }
+    }
+
+    pub fn show_preview(&self) {
+        let index = self.tab_view.n_pages().saturating_sub(1);
+        if index >= 0 {
+            let page = self.tab_view.nth_page(index);
+            self.tab_view.set_selected_page(&page);
+        }
     }
 }
 

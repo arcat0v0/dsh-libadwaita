@@ -26,6 +26,7 @@ pub const METHOD_SESSION_MODEL_SET: &str = "libadwaita/session/model/set";
 pub const METHOD_MODEL_CATALOG: &str = "libadwaita/model/catalog";
 pub const METHOD_SETTINGS_GET: &str = "libadwaita/settings/get";
 pub const METHOD_SETTINGS_MUTATE: &str = "libadwaita/settings/mutate";
+pub const METHOD_SETTINGS_DESCRIBE: &str = "libadwaita/settings/describe";
 pub const METHOD_COMMAND_LIST: &str = "libadwaita/command/list";
 pub const METHOD_COMMAND_EXECUTE: &str = "libadwaita/command/execute";
 pub const METHOD_SKILL_LIST: &str = "libadwaita/skill/list";
@@ -38,7 +39,22 @@ pub const METHOD_CREDENTIALS_INJECT: &str = "libadwaita/credentials/inject";
 pub const METHOD_CREDENTIALS_ROTATE: &str = "libadwaita/credentials/rotate";
 pub const METHOD_CREDENTIALS_REMOVE: &str = "libadwaita/credentials/remove";
 pub const METHOD_WORKSPACE_CHANGES: &str = "libadwaita/workspace/changes";
-
+pub const METHOD_WORKSPACE_LIST: &str = "libadwaita/workspace/list";
+pub const METHOD_WORKSPACE_CREATE: &str = "libadwaita/workspace/create";
+pub const METHOD_WORKSPACE_RENAME: &str = "libadwaita/workspace/rename";
+pub const METHOD_WORKSPACE_REMOVE: &str = "libadwaita/workspace/remove";
+pub const METHOD_PERMISSION_CATALOG: &str = "libadwaita/permission/catalog";
+pub const METHOD_PERMISSION_GET: &str = "libadwaita/permission/get";
+pub const METHOD_PERMISSION_SET: &str = "libadwaita/permission/set";
+pub const METHOD_GOAL_GET: &str = "libadwaita/goal/get";
+pub const METHOD_GOAL_EDIT: &str = "libadwaita/goal/edit";
+pub const METHOD_GOAL_PAUSE: &str = "libadwaita/goal/pause";
+pub const METHOD_GOAL_RESUME: &str = "libadwaita/goal/resume";
+pub const METHOD_GOAL_CLEAR: &str = "libadwaita/goal/clear";
+pub const METHOD_FILES_LIST: &str = "libadwaita/files/list";
+pub const METHOD_FILES_STAT: &str = "libadwaita/files/stat";
+pub const METHOD_FILES_READ: &str = "libadwaita/files/read";
+pub const METHOD_FILES_READ_BYTES: &str = "libadwaita/files/readBytes";
 pub const METHOD_APPROVAL_REQUEST: &str = "approval/request";
 pub const METHOD_USER_QUESTION_ASK: &str = "user-question/ask";
 
@@ -48,6 +64,9 @@ pub const NOTIFICATION_SESSION_STATUS: &str = "session.status";
 pub const NOTIFICATION_SESSION_TITLE: &str = "session.title";
 pub const NOTIFICATION_USER_QUESTION_CANCELLED: &str = "user-question.cancelled";
 pub const NOTIFICATION_SESSION_INBOX: &str = "session.inbox";
+pub const NOTIFICATION_SETTINGS_UPDATED: &str = "settings.updated";
+pub const NOTIFICATION_PERMISSION_UPDATED: &str = "permission.updated";
+pub const NOTIFICATION_GOAL_UPDATED: &str = "goal.updated";
 
 pub const ERR_PARSE_ERROR: i64 = -32700;
 pub const ERR_INVALID_REQUEST: i64 = -32600;
@@ -75,7 +94,16 @@ pub const ERR_COMMAND_NOT_FOUND: i64 = -32016;
 pub const ERR_SKILLS_UNAVAILABLE: i64 = -32017;
 pub const ERR_REFERENCES_UNAVAILABLE: i64 = -32018;
 pub const ERR_FORK_UNAVAILABLE: i64 = -32019;
-
+pub const ERR_SETTINGS_CONFLICT: i64 = -32020;
+pub const ERR_WORKSPACE_NOT_FOUND: i64 = -32021;
+pub const ERR_WORKSPACE_NAME_CONFLICT: i64 = -32022;
+pub const ERR_WORKSPACE_UNAVAILABLE: i64 = -32023;
+pub const ERR_PERMISSIONS_UNAVAILABLE: i64 = -32024;
+pub const ERR_GOAL_UNAVAILABLE: i64 = -32025;
+pub const ERR_GOAL_INVALID: i64 = -32026;
+pub const ERR_FILE_NOT_FOUND: i64 = -32027;
+pub const ERR_FILE_ACCESS_DENIED: i64 = -32028;
+pub const ERR_FILE_TOO_LARGE: i64 = -32029;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BridgeErrorCode {
     ParseError,
@@ -103,6 +131,16 @@ pub enum BridgeErrorCode {
     SkillsUnavailable,
     ReferencesUnavailable,
     ForkUnavailable,
+    SettingsConflict,
+    WorkspaceNotFound,
+    WorkspaceNameConflict,
+    WorkspaceUnavailable,
+    PermissionsUnavailable,
+    GoalUnavailable,
+    GoalInvalid,
+    FileNotFound,
+    FileAccessDenied,
+    FileTooLarge,
     Unknown(i64),
 }
 
@@ -134,6 +172,16 @@ impl BridgeErrorCode {
             ERR_SKILLS_UNAVAILABLE => Self::SkillsUnavailable,
             ERR_REFERENCES_UNAVAILABLE => Self::ReferencesUnavailable,
             ERR_FORK_UNAVAILABLE => Self::ForkUnavailable,
+            ERR_SETTINGS_CONFLICT => Self::SettingsConflict,
+            ERR_WORKSPACE_NOT_FOUND => Self::WorkspaceNotFound,
+            ERR_WORKSPACE_NAME_CONFLICT => Self::WorkspaceNameConflict,
+            ERR_WORKSPACE_UNAVAILABLE => Self::WorkspaceUnavailable,
+            ERR_PERMISSIONS_UNAVAILABLE => Self::PermissionsUnavailable,
+            ERR_GOAL_UNAVAILABLE => Self::GoalUnavailable,
+            ERR_GOAL_INVALID => Self::GoalInvalid,
+            ERR_FILE_NOT_FOUND => Self::FileNotFound,
+            ERR_FILE_ACCESS_DENIED => Self::FileAccessDenied,
+            ERR_FILE_TOO_LARGE => Self::FileTooLarge,
             other => Self::Unknown(other),
         }
     }
@@ -165,6 +213,16 @@ impl BridgeErrorCode {
             Self::SkillsUnavailable => ERR_SKILLS_UNAVAILABLE,
             Self::ReferencesUnavailable => ERR_REFERENCES_UNAVAILABLE,
             Self::ForkUnavailable => ERR_FORK_UNAVAILABLE,
+            Self::SettingsConflict => ERR_SETTINGS_CONFLICT,
+            Self::WorkspaceNotFound => ERR_WORKSPACE_NOT_FOUND,
+            Self::WorkspaceNameConflict => ERR_WORKSPACE_NAME_CONFLICT,
+            Self::WorkspaceUnavailable => ERR_WORKSPACE_UNAVAILABLE,
+            Self::PermissionsUnavailable => ERR_PERMISSIONS_UNAVAILABLE,
+            Self::GoalUnavailable => ERR_GOAL_UNAVAILABLE,
+            Self::GoalInvalid => ERR_GOAL_INVALID,
+            Self::FileNotFound => ERR_FILE_NOT_FOUND,
+            Self::FileAccessDenied => ERR_FILE_ACCESS_DENIED,
+            Self::FileTooLarge => ERR_FILE_TOO_LARGE,
             Self::Unknown(code) => code,
         }
     }
@@ -1152,7 +1210,273 @@ pub struct SettingsResult {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SettingsMutateParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
     pub patch: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SettingsDescriptor {
+    pub ns: String,
+    pub auto_generate: bool,
+    pub schema: serde_json::Value,
+    pub value: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<serde_json::Value>,
+    pub revision: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SettingsDescribeResult {
+    pub namespaces: Vec<SettingsDescriptor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceView {
+    pub id: String,
+    pub path: String,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub session_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceListResult {
+    pub workspaces: Vec<WorkspaceView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceCreateParams {
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceCreateResult {
+    pub workspace: WorkspaceView,
+    pub created: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceRenameParams {
+    #[serde(rename = "workspaceId")]
+    pub workspace_id: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceRenameResult {
+    pub workspace: WorkspaceView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceRemoveParams {
+    #[serde(rename = "workspaceId")]
+    pub workspace_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceRemoveResult {
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PresetOptionItem {
+    pub value: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionCatalogResult {
+    pub options: Vec<PresetOptionItem>,
+    pub default_options: Vec<PresetOptionItem>,
+    pub default_preset: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionGetParams {
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionGetResult {
+    pub current_value: String,
+    pub catalog: PermissionCatalogResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionSetParams {
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+    pub preset: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionSetResult {
+    pub current_value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalRef {
+    pub id: String,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalView {
+    pub id: String,
+    pub revision: u64,
+    pub objective: String,
+    pub phase: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<serde_json::Value>,
+    pub max_goal_rounds: u64,
+    pub rounds_started: u64,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub activation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalGetParams {
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalGetResult {
+    pub goal: Option<GoalView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalEditParams {
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+    pub r#ref: GoalRef,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub objective: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_goal_rounds: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalActionParams {
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+    pub r#ref: GoalRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalActionResult {
+    pub goal: Option<GoalView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileEntry {
+    pub name: String,
+    pub path: String,
+    pub kind: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FilesListParams {
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FilesListResult {
+    pub path: String,
+    pub entries: Vec<FileEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FilesStatParams {
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FilesStatResult {
+    pub path: String,
+    pub kind: String,
+    pub size: u64,
+    pub mtime: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FilesReadParams {
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FilesReadResult {
+    pub kind: String,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    pub size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FilesReadBytesParams {
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FilesReadBytesResult {
+    pub path: String,
+    pub data: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingsUpdatedNotificationParams {
+    pub namespace: String,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionUpdatedNotificationParams {
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+    pub current_value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalUpdatedNotificationParams {
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+    pub goal: Option<GoalView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

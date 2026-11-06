@@ -66,6 +66,7 @@ fn main() -> adw::glib::ExitCode {
             &main_window,
             main_window.sidebar().clone(),
             main_window.conversation_view_rc().clone(),
+            main_window.right_dock().clone(),
         );
         main_window.set_controller(controller.clone());
         main_window.present();

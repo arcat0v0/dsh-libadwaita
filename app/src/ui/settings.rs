@@ -1,14 +1,31 @@
 use crate::credentials::{CredentialStore, DEFAULT_PROVIDER};
-use crate::ui::controller::SessionController;
+use crate::protocol::{GoalGetResult, SettingsDescribeResult, SettingsResult};
+use crate::ui::controller::{tokio_runtime, SessionController};
 use adw::prelude::*;
 use gtk4::prelude::*;
 use libadwaita as adw;
 use std::rc::Rc;
 
+#[derive(Clone)]
+pub struct SettingsDialogHandle {
+    refresh: Rc<dyn Fn()>,
+}
+
+impl SettingsDialogHandle {
+    pub fn refresh(&self) {
+        (self.refresh)();
+    }
+}
+
+struct BridgeViewData {
+    settings: Result<SettingsResult, String>,
+    descriptors: Result<SettingsDescribeResult, String>,
+    goal: Result<GoalGetResult, String>,
+}
 pub fn build_preferences_dialog(
     controller: Option<Rc<SessionController>>,
     store: Option<CredentialStore>,
-) -> adw::PreferencesDialog {
+) -> (adw::PreferencesDialog, SettingsDialogHandle) {
     let dialog = adw::PreferencesDialog::builder().title("Settings").build();
 
     let general_page = adw::PreferencesPage::builder()
@@ -264,7 +281,7 @@ pub fn build_preferences_dialog(
         .active(false)
         .build();
 
-    let ctrl_p2 = controller;
+    let ctrl_p2 = controller.clone();
     let b_p2 = banner;
     manager_plugin.connect_active_notify(move |row| {
         b_p2.set_revealed(true);
@@ -277,14 +294,207 @@ pub fn build_preferences_dialog(
     plugins_page.add(&optional_group);
     dialog.add(&plugins_page);
 
-    dialog
+    let bridge_page = adw::PreferencesPage::builder()
+        .title("Bridge")
+        .icon_name("network-workgroup-symbolic")
+        .build();
+
+    let settings_group = adw::PreferencesGroup::builder()
+        .title("Bridge Settings")
+        .description("Read-only values and schema descriptors from dsh")
+        .build();
+    let settings_values_label = gtk4::Label::builder()
+        .label("Loading settings…")
+        .wrap(true)
+        .selectable(true)
+        .xalign(0.0)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    settings_group.add(&settings_values_label);
+    let descriptors_label = gtk4::Label::builder()
+        .label("Loading descriptors…")
+        .wrap(true)
+        .selectable(true)
+        .xalign(0.0)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    settings_group.add(&descriptors_label);
+    bridge_page.add(&settings_group);
+
+    let goal_group = adw::PreferencesGroup::builder()
+        .title("Goal Activity")
+        .description("Read-only active goal for the current session")
+        .build();
+    let goal_title_label = gtk4::Label::builder()
+        .label("Loading goal…")
+        .wrap(true)
+        .xalign(0.0)
+        .css_classes(["heading"])
+        .build();
+    goal_group.add(&goal_title_label);
+    let goal_detail_label = gtk4::Label::builder()
+        .label("")
+        .wrap(true)
+        .selectable(true)
+        .xalign(0.0)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    goal_group.add(&goal_detail_label);
+    bridge_page.add(&goal_group);
+
+    let refresh_row = adw::ActionRow::builder().title("Live bridge views").build();
+    let refresh_button = gtk4::Button::builder()
+        .label("Refresh")
+        .valign(gtk4::Align::Center)
+        .build();
+    refresh_row.add_suffix(&refresh_button);
+    settings_group.add(&refresh_row);
+    dialog.add(&bridge_page);
+
+    let refresh_controller = controller.clone();
+    let values_for_refresh = settings_values_label.clone();
+    let descriptors_for_refresh = descriptors_label.clone();
+    let goal_title_for_refresh = goal_title_label.clone();
+    let goal_detail_for_refresh = goal_detail_label.clone();
+    let refresh: Rc<dyn Fn()> = Rc::new(move || {
+        values_for_refresh.set_label("Loading settings…");
+        descriptors_for_refresh.set_label("Loading descriptors…");
+        goal_title_for_refresh.set_label("Loading goal…");
+        goal_detail_for_refresh.set_label("");
+
+        let Some(ctrl) = refresh_controller.as_ref() else {
+            values_for_refresh.set_label("Not connected");
+            descriptors_for_refresh.set_label("Not connected");
+            goal_title_for_refresh.set_label("Not connected");
+            return;
+        };
+        let conn_arc = ctrl.connection_handle();
+        let session_id = ctrl.active_session_id();
+        let values_label = values_for_refresh.clone();
+        let descriptors_label = descriptors_for_refresh.clone();
+        let goal_title = goal_title_for_refresh.clone();
+        let goal_detail = goal_detail_for_refresh.clone();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<BridgeViewData>();
+
+        gtk4::glib::MainContext::default().spawn_local(async move {
+            if let Some(data) = receiver.recv().await {
+                match data.settings {
+                    Ok(result) => {
+                        let text = serde_json::to_string_pretty(&result.settings)
+                            .unwrap_or_else(|_| "{}".to_string());
+                        values_label.set_label(&text);
+                    }
+                    Err(err) => values_label.set_label(&format!("settings/get failed: {}", err)),
+                }
+                match data.descriptors {
+                    Ok(result) => {
+                        let text = result
+                            .namespaces
+                            .iter()
+                            .map(|ns| format!("{} · revision {}", ns.ns, ns.revision))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        descriptors_label.set_label(if text.is_empty() {
+                            "No descriptors"
+                        } else {
+                            &text
+                        });
+                    }
+                    Err(err) => {
+                        descriptors_label.set_label(&format!("settings/describe failed: {}", err))
+                    }
+                }
+                match data.goal {
+                    Ok(result) => match result.goal {
+                        Some(goal) => {
+                            goal_title.set_label(&format!(
+                                "{} · {} · rev {}",
+                                goal.id, goal.phase, goal.revision
+                            ));
+                            goal_detail.set_label(&format!(
+                                "Objective: {}\nRounds: {}/{}\nActivation: {}\nCreated: {}\nUpdated: {}",
+                                goal.objective,
+                                goal.rounds_started,
+                                goal.max_goal_rounds,
+                                goal.activation,
+                                goal.created_at,
+                                goal.updated_at
+                            ));
+                        }
+                        None => {
+                            goal_title.set_label("No active goal");
+                            goal_detail.set_label("The current session has no goal.");
+                        }
+                    },
+                    Err(err) => {
+                        goal_title.set_label("Goal unavailable");
+                        goal_detail.set_label(&format!("goal/get failed: {}", err));
+                    }
+                }
+            }
+        });
+
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            let Some(conn) = conn_opt else {
+                let _ = sender.send(BridgeViewData {
+                    settings: Err("Not connected".to_string()),
+                    descriptors: Err("Not connected".to_string()),
+                    goal: Err("Not connected".to_string()),
+                });
+                return;
+            };
+            let settings = conn
+                .call::<crate::protocol::SettingsGetParams, SettingsResult>(
+                    crate::protocol::METHOD_SETTINGS_GET,
+                    crate::protocol::SettingsGetParams { keys: None },
+                    std::time::Duration::from_secs(5),
+                )
+                .await
+                .map_err(|err| err.to_string());
+            let descriptors = conn
+                .call::<serde_json::Value, SettingsDescribeResult>(
+                    crate::protocol::METHOD_SETTINGS_DESCRIBE,
+                    serde_json::json!({}),
+                    std::time::Duration::from_secs(5),
+                )
+                .await
+                .map_err(|err| err.to_string());
+            let goal = match session_id {
+                Some(session_id) => conn
+                    .call::<crate::protocol::GoalGetParams, GoalGetResult>(
+                        crate::protocol::METHOD_GOAL_GET,
+                        crate::protocol::GoalGetParams { session_id },
+                        std::time::Duration::from_secs(5),
+                    )
+                    .await
+                    .map_err(|err| err.to_string()),
+                None => Ok(GoalGetResult { goal: None }),
+            };
+            let _ = sender.send(BridgeViewData {
+                settings,
+                descriptors,
+                goal,
+            });
+        });
+    });
+
+    let refresh_for_button = refresh.clone();
+    refresh_button.connect_clicked(move |_| refresh_for_button());
+    refresh();
+
+    (
+        dialog,
+        SettingsDialogHandle { refresh },
+    )
 }
 
 pub fn show_settings_dialog(
     parent: &impl IsA<gtk4::Widget>,
     controller: Option<Rc<SessionController>>,
     store: Option<CredentialStore>,
-) {
-    let dialog = build_preferences_dialog(controller, store);
+) -> SettingsDialogHandle {
+    let (dialog, handle) = build_preferences_dialog(controller, store);
     dialog.present(Some(parent));
+    handle
 }

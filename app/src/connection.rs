@@ -115,6 +115,9 @@ pub enum IncomingNotification {
     SessionTitle(SessionTitleNotificationParams),
     UserQuestionCancelled(UserQuestionCancelledParams),
     SessionInbox(SessionInboxNotificationParams),
+    SettingsUpdated(SettingsUpdatedNotificationParams),
+    PermissionUpdated(PermissionUpdatedNotificationParams),
+    GoalUpdated(GoalUpdatedNotificationParams),
     Unknown {
         method: String,
         params: serde_json::Value,
@@ -177,6 +180,36 @@ impl IncomingNotification {
             NOTIFICATION_SESSION_INBOX => {
                 if let Ok(parsed) = serde_json::from_value(params.clone()) {
                     Self::SessionInbox(parsed)
+                } else {
+                    Self::Unknown {
+                        method: method.to_string(),
+                        params,
+                    }
+                }
+            }
+            NOTIFICATION_SETTINGS_UPDATED => {
+                if let Ok(parsed) = serde_json::from_value(params.clone()) {
+                    Self::SettingsUpdated(parsed)
+                } else {
+                    Self::Unknown {
+                        method: method.to_string(),
+                        params,
+                    }
+                }
+            }
+            NOTIFICATION_PERMISSION_UPDATED => {
+                if let Ok(parsed) = serde_json::from_value(params.clone()) {
+                    Self::PermissionUpdated(parsed)
+                } else {
+                    Self::Unknown {
+                        method: method.to_string(),
+                        params,
+                    }
+                }
+            }
+            NOTIFICATION_GOAL_UPDATED => {
+                if let Ok(parsed) = serde_json::from_value(params.clone()) {
+                    Self::GoalUpdated(parsed)
                 } else {
                     Self::Unknown {
                         method: method.to_string(),

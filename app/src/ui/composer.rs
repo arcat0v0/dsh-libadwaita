@@ -5,6 +5,7 @@ pub struct Composer {
     text_view: gtk4::TextView,
     send_button: gtk4::Button,
     model_button: gtk4::Button,
+    permission_button: gtk4::Button,
     status_label: gtk4::Label,
 }
 
@@ -69,6 +70,13 @@ impl Composer {
             .build();
         action_bar.append(&model_button);
 
+        let permission_button = gtk4::Button::builder()
+            .label("default")
+            .tooltip_text("Permission preset")
+            .css_classes(["flat"])
+            .build();
+        action_bar.append(&permission_button);
+
         let status_label = gtk4::Label::builder()
             .label("Ready")
             .hexpand(true)
@@ -93,6 +101,7 @@ impl Composer {
             text_view,
             send_button,
             model_button,
+            permission_button,
             status_label,
         }
     }
@@ -111,6 +120,14 @@ impl Composer {
 
     pub fn model_button(&self) -> &gtk4::Button {
         &self.model_button
+    }
+
+    pub fn permission_button(&self) -> &gtk4::Button {
+        &self.permission_button
+    }
+
+    pub fn set_permission_label(&self, label: &str) {
+        self.permission_button.set_label(label);
     }
 
     pub fn set_is_running(&self, running: bool) {

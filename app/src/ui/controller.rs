@@ -11,7 +11,9 @@ use crate::ui::desktop::{
     withdraw_notification,
 };
 use crate::ui::onboarding::show_onboarding_dialog;
+use crate::ui::right_dock::RightDock;
 use crate::ui::session_dialogs::{show_fork_dialog, show_rename_dialog};
+use crate::ui::settings::{show_settings_dialog, SettingsDialogHandle};
 use crate::ui::sidebar::Sidebar;
 use crate::ui::trigger_popup::{show_trigger_popup, TriggerOption};
 use crate::ui::window::MainWindow;
@@ -50,6 +52,9 @@ pub enum UiMessage {
         tx: oneshot::Sender<SdkUserQuestionResult>,
     },
     SessionListLoaded(Vec<SessionListItem>),
+    WorkspacesLoaded(Vec<WorkspaceView>),
+    WorkspaceCreated(String),
+    WorkspaceChanged,
     SessionFollowed(SessionFollowResult),
     Notification(IncomingNotification),
     Toast(String),
@@ -75,6 +80,27 @@ pub enum UiMessage {
     CommandsLoaded(Vec<CommandDescriptor>),
     ReferencesLoaded(Vec<ReferenceCandidate>),
     SkillsLoaded(Vec<SkillSummaryItem>),
+    FilesListed {
+        path: String,
+        workdir: String,
+        entries: Vec<FileEntry>,
+    },
+    FileStat(FilesStatResult),
+    FilePreviewText {
+        path: String,
+        text: String,
+        truncated: bool,
+    },
+    FilePreviewImage {
+        path: String,
+        bytes: Vec<u8>,
+    },
+    FilePreviewUnavailable(String),
+    PermissionLoaded(PermissionGetResult),
+    PermissionValueUpdated {
+        session_id: String,
+        current_value: String,
+    },
 }
 
 struct ApprovalHandler {
@@ -118,6 +144,11 @@ pub struct SessionController {
     window: gtk4::Window,
     sidebar: Rc<Sidebar>,
     conversation_view: Rc<ConversationView>,
+    right_dock: Rc<RightDock>,
+    workspaces: Rc<RefCell<Vec<WorkspaceView>>>,
+    sessions_cache: Rc<RefCell<Vec<SessionListItem>>>,
+    settings_dialog: Rc<RefCell<Option<SettingsDialogHandle>>>,
+    permission_state: Rc<RefCell<Option<PermissionGetResult>>>,
     window_title: adw::WindowTitle,
     toast_overlay: adw::ToastOverlay,
     ui_sender: UnboundedSender<UiMessage>,
@@ -141,6 +172,7 @@ impl SessionController {
         main_window: &MainWindow,
         sidebar: Rc<Sidebar>,
         conversation_view: Rc<ConversationView>,
+        right_dock: Rc<RightDock>,
     ) -> Rc<Self> {
         let (ui_sender, ui_receiver) = unbounded_channel();
         let credential_store = CredentialStore::new();
@@ -161,6 +193,11 @@ impl SessionController {
             window: main_window.window().clone().upcast(),
             sidebar,
             conversation_view,
+            right_dock: right_dock.clone(),
+            workspaces: Rc::new(RefCell::new(Vec::new())),
+            sessions_cache: Rc::new(RefCell::new(Vec::new())),
+            settings_dialog: Rc::new(RefCell::new(None)),
+            permission_state: Rc::new(RefCell::new(None)),
             window_title: main_window.window_title().clone(),
             toast_overlay: main_window
                 .window()
@@ -186,6 +223,7 @@ impl SessionController {
 
         *controller.self_weak.borrow_mut() = Rc::downgrade(&controller);
 
+        controller.right_dock.set_controller(controller.clone());
         controller.setup_ui_receiver(ui_receiver, Rc::downgrade(&controller));
         controller.setup_composer();
         controller.setup_double_esc();
@@ -251,6 +289,19 @@ impl SessionController {
         &self.credential_store
     }
 
+    pub fn connection_handle(&self) -> Arc<RwLock<Option<BridgeConnection>>> {
+        self.connection.clone()
+    }
+
+    pub fn open_settings(self: &Rc<Self>) {
+        let handle = show_settings_dialog(
+            &self.window,
+            Some(self.clone()),
+            Some(self.credential_store.clone()),
+        );
+        *self.settings_dialog.borrow_mut() = Some(handle);
+    }
+
     pub fn bootstrap_supervisor(&self) {
         let ui_sender = self.ui_sender.clone();
         let supervisor_store = self.supervisor.clone();
@@ -293,11 +344,15 @@ impl SessionController {
         self.self_weak.borrow().clone()
     }
 
-    fn active_session_id(&self) -> Option<String> {
+    pub fn active_session_id(&self) -> Option<String> {
         self.active_session
             .borrow()
             .as_ref()
             .map(|session| session.id.clone())
+    }
+
+    pub async fn connection(&self) -> Option<BridgeConnection> {
+        self.connection.read().await.clone()
     }
 
     fn show_ready(&self) {
@@ -1038,6 +1093,7 @@ impl SessionController {
         });
 
         self.load_session_list();
+        self.load_workspaces();
     }
 
     pub fn load_session_list(&self) {
@@ -1057,6 +1113,347 @@ impl SessionController {
                     .await
                 {
                     let _ = ui_sender.send(UiMessage::SessionListLoaded(res.sessions));
+                }
+            }
+        });
+    }
+
+    pub fn load_workspaces(&self) {
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            let Some(conn) = conn_opt else {
+                return;
+            };
+            if let Ok(result) = conn
+                .call::<serde_json::Value, WorkspaceListResult>(
+                    METHOD_WORKSPACE_LIST,
+                    serde_json::json!({}),
+                    Duration::from_secs(5),
+                )
+                .await
+            {
+                let _ = ui_sender.send(UiMessage::WorkspacesLoaded(result.workspaces));
+            }
+        });
+    }
+
+    pub fn prompt_new_workspace(&self) {
+        let dialog = gtk4::FileDialog::builder()
+            .title("Select Workspace Directory")
+            .build();
+        let weak = self.weak_self();
+        dialog.select_folder(
+            Some(&self.window),
+            None::<&gtk4::gio::Cancellable>,
+            move |result| {
+                let Ok(folder) = result else {
+                    return;
+                };
+                let Some(path) = folder.path() else {
+                    return;
+                };
+                let Some(ctrl) = weak.upgrade() else {
+                    return;
+                };
+                let path_string = path.display().to_string();
+                let title = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path_string.clone());
+                ctrl.create_workspace(&path_string, &title);
+            },
+        );
+    }
+
+    pub fn create_workspace(&self, path: &str, title: &str) {
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+        let path = path.to_string();
+        let title = title.to_string();
+        let _ = &title;
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            let Some(conn) = conn_opt else {
+                return;
+            };
+            let params = WorkspaceCreateParams {
+                path: path.clone(),
+                title: Some(title),
+            };
+            match conn
+                .call::<WorkspaceCreateParams, WorkspaceCreateResult>(
+                    METHOD_WORKSPACE_CREATE,
+                    params,
+                    Duration::from_secs(5),
+                )
+                .await
+            {
+                Ok(_) => {
+                    let _ = ui_sender.send(UiMessage::WorkspaceCreated(path));
+                }
+                Err(err) => {
+                    let _ = ui_sender.send(UiMessage::Toast(format!("Create workspace failed: {}", err)));
+                }
+            }
+        });
+    }
+
+    pub fn switch_workspace(&self, id: &str) {
+        let workspace = self.workspaces.borrow().iter().find(|ws| ws.id == id).cloned();
+        let Some(workspace) = workspace else {
+            return;
+        };
+        self.switch_to_workspace_path(&workspace.path);
+    }
+
+    fn switch_to_workspace_path(&self, path: &str) {
+        if let Some(active) = self.active_session_id() {
+            self.close_session(&active);
+        }
+        self.create_session(path);
+    }
+
+    pub fn rename_workspace(&self, id: &str) {
+        let Some(workspace) = self.workspaces.borrow().iter().find(|ws| ws.id == id).cloned()
+        else {
+            return;
+        };
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+        let _ = &workspace;
+        let id = id.to_string();
+        show_rename_dialog(&self.window, &workspace.title, move |title| {
+            let conn_arc = conn_arc.clone();
+            let ui_sender = ui_sender.clone();
+            let id = id.clone();
+            let _ = &id;
+            tokio_runtime().spawn(async move {
+                let conn_opt = conn_arc.read().await.clone();
+                let Some(conn) = conn_opt else {
+                    return;
+                };
+                match conn
+                    .call::<WorkspaceRenameParams, WorkspaceRenameResult>(
+                        METHOD_WORKSPACE_RENAME,
+                        WorkspaceRenameParams { workspace_id: id, title },
+                        Duration::from_secs(5),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        let _ = ui_sender.send(UiMessage::WorkspaceChanged);
+                    }
+                    Err(err) => {
+                        let _ = ui_sender.send(UiMessage::Toast(format!("Rename failed: {}", err)));
+                    }
+                }
+            });
+        });
+    }
+
+    pub fn remove_workspace(&self, id: &str) {
+        let Some(workspace) = self.workspaces.borrow().iter().find(|ws| ws.id == id).cloned()
+        else {
+            return;
+        };
+        let dialog = adw::AlertDialog::builder()
+            .heading("Remove workspace?")
+            .body(format!(
+                "Remove “{}” from workspaces? Sessions are not deleted.",
+                workspace.title
+            ))
+            .build();
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("remove", "Remove");
+        dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+        let _ = &workspace;
+        let id = id.to_string();
+        dialog.choose(
+            Some(&self.window),
+            None::<&gtk4::gio::Cancellable>,
+            move |response| {
+                if response != "remove" {
+                    return;
+                }
+                let conn_arc = conn_arc.clone();
+                let ui_sender = ui_sender.clone();
+                let _ = &id;
+                let id = id.clone();
+                tokio_runtime().spawn(async move {
+                    let conn_opt = conn_arc.read().await.clone();
+                    let Some(conn) = conn_opt else {
+                        return;
+                    };
+                    match conn
+                        .call::<WorkspaceRemoveParams, serde_json::Value>(
+                            METHOD_WORKSPACE_REMOVE,
+                            WorkspaceRemoveParams { workspace_id: id },
+                            Duration::from_secs(5),
+                        )
+                        .await
+                    {
+                        Ok(_) => {
+                            let _ = ui_sender.send(UiMessage::WorkspaceChanged);
+                        }
+                        Err(err) => {
+                            let _ = ui_sender.send(UiMessage::Toast(format!("Remove failed: {}", err)));
+                        }
+                    }
+                });
+            },
+        );
+    }
+
+    pub fn refresh_files(&self, path: &str) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+        let path = path.to_string();
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            let Some(conn) = conn_opt else {
+                return;
+            };
+            let workdir = conn
+                .call::<SessionWorkdirGetParams, SessionWorkdirResult>(
+                    METHOD_SESSION_WORKDIR_GET,
+                    SessionWorkdirGetParams {
+                        session_id: session_id.clone(),
+                    },
+                    Duration::from_secs(5),
+                )
+                .await
+                .ok()
+                .map(|result| result.cwd)
+                .unwrap_or_default();
+            let params = FilesListParams {
+                session_id,
+                path: if path == "." { None } else { Some(path) },
+            };
+            match conn
+                .call::<FilesListParams, FilesListResult>(
+                    METHOD_FILES_LIST,
+                    params,
+                    Duration::from_secs(5),
+                )
+                .await
+            {
+                Ok(result) => {
+                    let _ = ui_sender.send(UiMessage::FilesListed {
+                        path: result.path,
+                        workdir,
+                        entries: result.entries,
+                    });
+                }
+                Err(err) => {
+                    let _ = ui_sender.send(UiMessage::Toast(format!("Files list failed: {}", err)));
+                }
+            }
+        });
+    }
+
+    pub fn preview_file(&self, path: &str) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+        let path = path.to_string();
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            let Some(conn) = conn_opt else {
+                return;
+            };
+            let stat = conn
+                .call::<FilesStatParams, FilesStatResult>(
+                    METHOD_FILES_STAT,
+                    FilesStatParams {
+                        session_id: session_id.clone(),
+                        path: path.clone(),
+                    },
+                    Duration::from_secs(5),
+                )
+                .await;
+            match stat {
+                Ok(stat) => {
+                    let _ = ui_sender.send(UiMessage::FileStat(stat));
+                }
+                Err(err) => {
+                    let _ = ui_sender
+                        .send(UiMessage::FilePreviewUnavailable(format!("Stat failed: {}", err)));
+                    return;
+                }
+            }
+            if crate::ui::files_panel::is_image_path(&path) {
+                match conn
+                    .call::<FilesReadBytesParams, FilesReadBytesResult>(
+                        METHOD_FILES_READ_BYTES,
+                        FilesReadBytesParams {
+                            session_id,
+                            path: path.clone(),
+                            max_bytes: None,
+                        },
+                        Duration::from_secs(10),
+                    )
+                    .await
+                {
+                    Ok(result) => match crate::ui::files_panel::read_bytes_result(&result) {
+                        Some(bytes) => {
+                            let _ = ui_sender.send(UiMessage::FilePreviewImage { path, bytes });
+                        }
+                        None => {
+                            let _ = ui_sender
+                                .send(UiMessage::FilePreviewUnavailable("Invalid image data".into()));
+                        }
+                    },
+                    Err(err) => {
+                        let _ = ui_sender.send(UiMessage::FilePreviewUnavailable(format!(
+                            "Read failed: {}",
+                            err
+                        )));
+                    }
+                }
+            } else {
+                match conn
+                    .call::<FilesReadParams, FilesReadResult>(
+                        METHOD_FILES_READ,
+                        FilesReadParams {
+                            session_id,
+                            path: path.clone(),
+                            max_bytes: None,
+                        },
+                        Duration::from_secs(10),
+                    )
+                    .await
+                {
+                    Ok(result) => match crate::ui::files_panel::read_text_result(&result) {
+                        Some((text, truncated)) => {
+                            let _ = ui_sender.send(UiMessage::FilePreviewText {
+                                path,
+                                text,
+                                truncated,
+                            });
+                        }
+                        None => {
+                            let _ = ui_sender.send(UiMessage::FilePreviewUnavailable(
+                                "Binary file — preview unavailable".to_string(),
+                            ));
+                        }
+                    },
+                    Err(err) => {
+                        let _ = ui_sender.send(UiMessage::FilePreviewUnavailable(format!(
+                            "Read failed: {}",
+                            err
+                        )));
+                    }
                 }
             }
         });
@@ -1291,6 +1688,141 @@ impl SessionController {
         popover.popup();
     }
 
+    pub fn refresh_permission(&self, session_id: &str) {
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+        let session_id = session_id.to_string();
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            let Some(conn) = conn_opt else {
+                return;
+            };
+            if let Ok(result) = conn
+                .call::<PermissionGetParams, PermissionGetResult>(
+                    METHOD_PERMISSION_GET,
+                    PermissionGetParams { session_id },
+                    Duration::from_secs(5),
+                )
+                .await
+            {
+                let _ = ui_sender.send(UiMessage::PermissionLoaded(result));
+            }
+        });
+    }
+
+    pub fn switch_permission_preset(&self, preset: &str) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+        let preset = preset.to_string();
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            let Some(conn) = conn_opt else {
+                return;
+            };
+            match conn
+                .call::<PermissionSetParams, PermissionSetResult>(
+                    METHOD_PERMISSION_SET,
+                    PermissionSetParams {
+                        session_id: session_id.clone(),
+                        preset,
+                    },
+                    Duration::from_secs(5),
+                )
+                .await
+            {
+                Ok(result) => {
+                    let _ = ui_sender.send(UiMessage::PermissionValueUpdated {
+                        session_id,
+                        current_value: result.current_value,
+                    });
+                }
+                Err(err) => {
+                    let _ = ui_sender.send(UiMessage::Toast(format!("Permission failed: {}", err)));
+                }
+            }
+        });
+    }
+
+    pub fn open_permission_picker(&self, anchor: &impl IsA<gtk4::Widget>) {
+        let popover = gtk4::Popover::builder().build();
+        let box_widget = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Vertical)
+            .spacing(4)
+            .margin_start(6)
+            .margin_end(6)
+            .margin_top(6)
+            .margin_bottom(6)
+            .build();
+        let options = self
+            .permission_state
+            .borrow()
+            .as_ref()
+            .map(|state| {
+                if !state.catalog.options.is_empty() {
+                    state.catalog.options.clone()
+                } else {
+                    state.catalog.default_options.clone()
+                }
+            })
+            .unwrap_or_default();
+        let weak = self.weak_self();
+        for option in options {
+            let label = match &option.description {
+                Some(description) if !description.is_empty() => {
+                    format!("{} — {}", option.name, description)
+                }
+                _ => option.name.clone(),
+            };
+            let btn = gtk4::Button::builder()
+                .label(&label)
+                .css_classes(["flat"])
+                .halign(gtk4::Align::Fill)
+                .build();
+            let pop_clone = popover.clone();
+            let weak_clone = weak.clone();
+            let value = option.value.clone();
+            btn.connect_clicked(move |_| {
+                if let Some(ctrl) = weak_clone.upgrade() {
+                    ctrl.switch_permission_preset(&value);
+                }
+                pop_clone.popdown();
+            });
+            box_widget.append(&btn);
+        }
+        popover.set_child(Some(&box_widget));
+        popover.set_parent(anchor);
+        popover.popup();
+    }
+
+    pub fn apply_permission_state(&self, state: PermissionGetResult) {
+        let label = permission_display_label(&state);
+        self.conversation_view
+            .composer()
+            .set_permission_label(&label);
+        *self.permission_state.borrow_mut() = Some(state);
+    }
+
+    pub fn update_permission_value(&self, session_id: &str, current_value: &str) {
+        if self.active_session_id().as_deref() != Some(session_id) {
+            return;
+        }
+        let mut guard = self.permission_state.borrow_mut();
+        if let Some(state) = guard.as_mut() {
+            state.current_value = current_value.to_string();
+            let label = permission_display_label(state);
+            self.conversation_view
+                .composer()
+                .set_permission_label(&label);
+        } else {
+            self.conversation_view
+                .composer()
+                .set_permission_label(current_value);
+        }
+    }
+
     pub fn inject_credential(&self, provider: &str, key: &str) {
         let prov = provider.to_string();
         let k = key.to_string();
@@ -1416,6 +1948,29 @@ impl SessionController {
                             ctrl.handle_session_list_loaded(&sessions);
                         }
                         sidebar.load_sessions(&sessions);
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            *ctrl.sessions_cache.borrow_mut() = sessions.clone();
+                            let workspaces = ctrl.workspaces.borrow().clone();
+                            sidebar.load_workspaces(&workspaces, &sessions);
+                        }
+                    }
+                    UiMessage::WorkspacesLoaded(workspaces) => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            *ctrl.workspaces.borrow_mut() = workspaces.clone();
+                            let sessions = ctrl.sessions_cache.borrow().clone();
+                            sidebar.load_workspaces(&workspaces, &sessions);
+                        }
+                    }
+                    UiMessage::WorkspaceCreated(path) => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.switch_to_workspace_path(&path);
+                            ctrl.load_workspaces();
+                        }
+                    }
+                    UiMessage::WorkspaceChanged => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.load_workspaces();
+                        }
                     }
                     UiMessage::SessionFollowed(follow) => {
                         let title = follow
@@ -1446,6 +2001,11 @@ impl SessionController {
                         let sess_model = SessionModel::from_follow(follow);
                         conv_view.update_transcript(&sess_model.transcript);
                         *active_sess.borrow_mut() = Some(sess_model);
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.right_dock.preview_panel().clear();
+                            ctrl.refresh_files(".");
+                            ctrl.refresh_permission(&session_id);
+                        }
                     }
                     UiMessage::Notification(notif) => {
                         match notif {
@@ -1493,6 +2053,19 @@ impl SessionController {
                                     .unwrap_or(false);
                                 if matches_active {
                                     conv_view.update_queue(&p.items);
+                                }
+                            }
+                            IncomingNotification::SettingsUpdated(_)
+                            | IncomingNotification::GoalUpdated(_) => {
+                                if let Some(ctrl) = ctrl_weak.upgrade() {
+                                    if let Some(handle) = ctrl.settings_dialog.borrow().as_ref() {
+                                        handle.refresh();
+                                    }
+                                }
+                            }
+                            IncomingNotification::PermissionUpdated(p) => {
+                                if let Some(ctrl) = ctrl_weak.upgrade() {
+                                    ctrl.update_permission_value(&p.session_id, &p.current_value);
                                 }
                             }
                             _ => {}
@@ -1646,6 +2219,65 @@ impl SessionController {
                             }
                         });
                     }
+                    UiMessage::FilesListed {
+                        path,
+                        workdir,
+                        entries,
+                    } => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            let panel = ctrl.right_dock.files_panel();
+                            panel.apply_listing(&path, &entries);
+                            if !workdir.is_empty() {
+                                panel.set_status(&format!(
+                                    "{} entries under {}",
+                                    entries.len(),
+                                    workdir
+                                ));
+                            }
+                        }
+                    }
+                    UiMessage::FileStat(stat) => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.right_dock.files_panel().set_stat(&stat);
+                        }
+                    }
+                    UiMessage::FilePreviewText {
+                        path,
+                        text,
+                        truncated,
+                    } => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.right_dock
+                                .preview_panel()
+                                .show_text(&path, &text, truncated);
+                            ctrl.right_dock.show_preview();
+                        }
+                    }
+                    UiMessage::FilePreviewImage { path, bytes } => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.right_dock.preview_panel().show_image(&path, &bytes);
+                            ctrl.right_dock.show_preview();
+                        }
+                    }
+                    UiMessage::FilePreviewUnavailable(reason) => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.right_dock.preview_panel().show_unavailable(&reason);
+                            ctrl.right_dock.show_preview();
+                        }
+                    }
+                    UiMessage::PermissionLoaded(state) => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.apply_permission_state(state);
+                        }
+                    }
+                    UiMessage::PermissionValueUpdated {
+                        session_id,
+                        current_value,
+                    } => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.update_permission_value(&session_id, &current_value);
+                        }
+                    }
                 }
             }
         });
@@ -1686,6 +2318,12 @@ impl SessionController {
         composer.model_button().connect_clicked(move |btn| {
             if let Some(c) = c_weak_model.upgrade() {
                 c.open_model_picker(btn);
+            }
+        });
+        let c_weak_perm = controller_weak.clone();
+        composer.permission_button().connect_clicked(move |btn| {
+            if let Some(c) = c_weak_perm.upgrade() {
+                c.open_permission_picker(btn);
             }
         });
 
@@ -1768,4 +2406,15 @@ impl SessionController {
             .add_controller(key_controller);
     }
 
+}
+
+pub fn permission_display_label(state: &PermissionGetResult) -> String {
+    state
+        .catalog
+        .options
+        .iter()
+        .chain(state.catalog.default_options.iter())
+        .find(|option| option.value == state.current_value)
+        .map(|option| option.name.clone())
+        .unwrap_or_else(|| state.current_value.clone())
 }
