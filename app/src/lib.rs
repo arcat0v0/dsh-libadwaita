@@ -1,6 +1,8 @@
 pub const APP_ID: &str = "io.github.deepseek_ai.DshLibadwaita";
 pub const APP_NAME: &str = "dsh";
 
+pub mod attachments;
+pub mod links;
 pub mod connection;
 pub mod credentials;
 pub mod drafts;

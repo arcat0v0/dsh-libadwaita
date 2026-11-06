@@ -14,6 +14,8 @@ pub enum RenderBlock {
         text: String,
         time: u64,
         seq: i64,
+        #[serde(default)]
+        images: Vec<UserImageAttachment>,
     },
     AssistantMessage {
         text: String,
@@ -22,6 +24,7 @@ pub enum RenderBlock {
         is_live: bool,
         attempt_id: Option<String>,
         seq: Option<i64>,
+        time: u64,
     },
     ToolResult {
         call_id: String,
@@ -183,7 +186,25 @@ impl ConversationTranscript {
             text: text.to_string(),
             time: 0,
             seq: -2,
+            images: Vec::new(),
         });
+    }
+
+    pub fn push_pending_user_with_images(
+        &mut self,
+        text: &str,
+        images: &[UserImageAttachment],
+    ) {
+        self.push_pending_user(text);
+        if let Some(index) = self.pending_user {
+            if let Some(RenderBlock::UserMessage {
+                images: block_images,
+                ..
+            }) = self.blocks.get_mut(index)
+            {
+                *block_images = images.to_vec();
+            }
+        }
     }
 
     pub fn clear_pending_user(&mut self) {
@@ -248,6 +269,7 @@ impl ConversationTranscript {
                 is_live: true,
                 attempt_id: Some(b.attempt_id),
                 seq: None,
+                time: 0,
             };
 
             self.live_attempt = Some(state);
@@ -280,6 +302,7 @@ impl ConversationTranscript {
                     is_live: true,
                     attempt_id: Some(attempt_id),
                     seq: None,
+                    time: 0,
                 };
 
                 self.live_attempt = Some(state);
@@ -326,6 +349,7 @@ impl ConversationTranscript {
                             is_live: true,
                             attempt_id: Some(attempt_id),
                             seq: None,
+                            time: 0,
                         });
                     }
                 }
@@ -381,11 +405,13 @@ impl ConversationTranscript {
                         text: block_text,
                         time,
                         seq,
+                        images,
                     }) = self.blocks.get_mut(index)
                     {
                         *block_text = text;
                         *time = event.time;
                         *seq = event.seq;
+                        *images = parse_user_images(&event.data);
                         return Ok(TranscriptUpdate::Replaced(index));
                     }
                 }
@@ -393,6 +419,7 @@ impl ConversationTranscript {
                     text,
                     time: event.time,
                     seq: event.seq,
+                    images: parse_user_images(&event.data),
                 });
                 Ok(TranscriptUpdate::Appended(self.blocks.len() - 1))
             }
@@ -406,11 +433,13 @@ impl ConversationTranscript {
                             is_live,
                             seq,
                             text: b_text,
+                            time: b_time,
                             ..
                         } => {
                             if *is_live || *seq == Some(event.seq) {
                                 *is_live = false;
                                 *seq = Some(event.seq);
+                                *b_time = event.time;
                                 if !text.is_empty() {
                                     *b_text = text.clone();
                                 }
@@ -433,6 +462,7 @@ impl ConversationTranscript {
                         is_live: false,
                         attempt_id: None,
                         seq: Some(event.seq),
+                        time: event.time,
                     });
                     self.live_attempt = None;
                     Ok(TranscriptUpdate::Appended(self.blocks.len() - 1))

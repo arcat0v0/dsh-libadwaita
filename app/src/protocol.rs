@@ -740,6 +740,12 @@ pub struct ApprovalRequestParams {
     pub call_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2219,6 +2225,165 @@ pub struct ScheduleChangedNotificationParams {
     pub changed: bool,
 }
 
+pub fn build_question_answer(
+    id: &str,
+    selected: Vec<String>,
+    free_text: &str,
+) -> UserQuestionAnswer {
+    let mut selected = selected;
+    if selected.is_empty() {
+        let trimmed = free_text.trim();
+        if !trimmed.is_empty() {
+            selected.push(trimmed.to_string());
+        }
+    }
+    UserQuestionAnswer {
+        id: id.to_string(),
+        selected,
+    }
+}
+
 pub fn schedule_field<'a>(entry: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     entry.get(key).and_then(|value| value.as_str())
+}
+
+pub const METHOD_ATTACHMENT_UPLOAD: &str = "libadwaita/attachment/upload";
+pub const METHOD_ATTACHMENT_READ: &str = "libadwaita/attachment/read";
+pub const METHOD_SESSION_SEARCH: &str = "libadwaita/session/search";
+pub const METHOD_SESSION_PROJECTIONS: &str = "libadwaita/session/projections";
+pub const NOTIFICATION_SESSION_PROJECTION: &str = "session.projection";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentUploadParams {
+    pub session_id: String,
+    pub name: String,
+    pub data: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentUploadResult {
+    pub attachment_id: String,
+    pub name: String,
+    pub size: u64,
+    pub mime_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentReadParams {
+    pub session_id: String,
+    pub attachment_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentReadResult {
+    pub attachment_id: String,
+    pub name: String,
+    pub size: u64,
+    pub mime_type: String,
+    pub encoding: String,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSearchParams {
+    pub query: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archived: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSearchItem {
+    pub id: String,
+    pub title: String,
+    pub cwd: String,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSearchResult {
+    pub items: Vec<SessionSearchItem>,
+    pub has_more: bool,
+    pub full_text: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionProjectionsParams {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionProjectionsResult {
+    pub as_of_seq: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_outline: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_stats: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_usage: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_pressure: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_breakdown: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal: Option<GoalView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionProjectionNotificationParams {
+    pub session_id: String,
+    pub kind: String,
+    pub value: serde_json::Value,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserImageAttachment {
+    pub name: Option<String>,
+    pub mime_type: String,
+    pub data: Option<String>,
+    pub attachment_id: Option<String>,
+}
+
+pub fn parse_user_images(data: &serde_json::Value) -> Vec<UserImageAttachment> {
+    let mut images = Vec::new();
+    let Some(blocks) = data["content"].as_array() else {
+        return images;
+    };
+    for block in blocks {
+        if block["type"] != "image" {
+            continue;
+        }
+        let attachment_id = block["attachment"]
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| block["attachment"]["id"].as_str().map(str::to_string))
+            .or_else(|| block["attachmentId"].as_str().map(str::to_string));
+        images.push(UserImageAttachment {
+            name: block["name"].as_str().map(str::to_string),
+            mime_type: block["mimeType"]
+                .as_str()
+                .unwrap_or("image/png")
+                .to_string(),
+            data: block["data"].as_str().map(str::to_string),
+            attachment_id,
+        });
+    }
+    images
 }

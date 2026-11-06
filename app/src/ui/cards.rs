@@ -497,6 +497,28 @@ pub fn render_tool_result_card(
             let info = parse_web_tool(name, args_str, result);
             build_web_card(&info)
         }
+        "read_image" => {
+            let card = build_generic_fallback_card(name, args_str, result);
+            let value: serde_json::Value = serde_json::from_str(result).unwrap_or_default();
+            let attachment_id = value["attachmentId"]
+                .as_str()
+                .or_else(|| value["attachment"]["id"].as_str())
+                .or_else(|| value["meta"]["attachmentId"].as_str())
+                .map(str::to_string);
+            let data = value["data"].as_str().map(str::to_string);
+            if attachment_id.is_some() || data.is_some() {
+                let thumbnail = crate::ui::message_renderer::build_attachment_thumbnail(
+                    &crate::protocol::UserImageAttachment {
+                        name: value["name"].as_str().map(str::to_string),
+                        mime_type: value["mimeType"].as_str().unwrap_or("image/png").to_string(),
+                        data,
+                        attachment_id,
+                    },
+                );
+                card.append(&thumbnail);
+            }
+            card
+        }
         "exit_plan_mode" => build_plan_card(result, "Plan completed"),
         "ask_user_question" => {
             let card = build_generic_fallback_card(name, args_str, result);

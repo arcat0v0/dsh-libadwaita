@@ -4,9 +4,11 @@ pub struct Composer {
     container: gtk4::Box,
     text_view: gtk4::TextView,
     send_button: gtk4::Button,
+    attach_button: gtk4::Button,
     model_button: gtk4::Button,
     permission_button: gtk4::Button,
     continue_button: gtk4::Button,
+    plan_button: gtk4::Button,
     status_label: gtk4::Label,
 }
 
@@ -71,6 +73,14 @@ impl Composer {
             .build();
         action_bar.append(&model_button);
 
+        let plan_button = gtk4::Button::builder()
+            .label("Plan mode")
+            .tooltip_text("Exit plan mode")
+            .css_classes(["flat", "accent-badge"])
+            .visible(false)
+            .build();
+        action_bar.append(&plan_button);
+
         let permission_button = gtk4::Button::builder()
             .label("default")
             .tooltip_text("Permission preset")
@@ -109,9 +119,11 @@ impl Composer {
             container,
             text_view,
             send_button,
+            attach_button: attach_btn.clone(),
             model_button,
             permission_button,
             continue_button,
+            plan_button: plan_button.clone(),
             status_label,
         }
     }
@@ -128,12 +140,24 @@ impl Composer {
         &self.send_button
     }
 
+    pub fn attach_button(&self) -> &gtk4::Button {
+        &self.attach_button
+    }
+
     pub fn model_button(&self) -> &gtk4::Button {
         &self.model_button
     }
 
     pub fn permission_button(&self) -> &gtk4::Button {
         &self.permission_button
+    }
+
+    pub fn plan_button(&self) -> &gtk4::Button {
+        &self.plan_button
+    }
+
+    pub fn set_plan_mode(&self, active: bool) {
+        self.plan_button.set_visible(active);
     }
 
     pub fn set_permission_label(&self, label: &str) {

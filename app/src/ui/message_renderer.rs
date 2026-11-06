@@ -1,4 +1,4 @@
-use crate::protocol::{MessageFeedbackItem, TodoItem};
+use crate::protocol::{MessageFeedbackItem, TodoItem, UserImageAttachment};
 use crate::transcript::{RenderBlock, ToolCallItem};
 use crate::ui::controller::SessionController;
 use gtk4::prelude::*;
@@ -46,6 +46,14 @@ pub fn reopen_question() {
     with_controller(|controller| controller.reopen_question());
 }
 
+fn attach_link_handler(label: &gtk4::Label) {
+    label.connect_activate_link(|_, uri| {
+        let uri = uri.to_string();
+        with_controller(|controller| controller.open_link_target(&uri));
+        gtk4::glib::Propagation::Stop
+    });
+}
+
 pub fn render_markdown(text: &str) -> gtk4::Box {
     let container = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
@@ -58,6 +66,9 @@ pub fn render_markdown(text: &str) -> gtk4::Box {
     let mut code_block_lang = String::new();
     let mut code_block_content = String::new();
     let mut list_index: Option<u64> = None;
+    let mut in_table = false;
+    let mut table_rows: Vec<Vec<String>> = Vec::new();
+    let mut current_cell = String::new();
 
     for event in parser {
         match event {
@@ -91,6 +102,16 @@ pub fn render_markdown(text: &str) -> gtk4::Box {
                 Tag::List(first_num) => {
                     list_index = first_num;
                 }
+                Tag::Table(_) => {
+                    in_table = true;
+                    table_rows.clear();
+                }
+                Tag::TableHead | Tag::TableRow => {
+                    table_rows.push(Vec::new());
+                }
+                Tag::TableCell => {
+                    current_cell.clear();
+                }
                 Tag::Item => {
                     current_markup.clear();
                     if let Some(idx) = list_index {
@@ -115,6 +136,9 @@ pub fn render_markdown(text: &str) -> gtk4::Box {
                         gtk4::glib::markup_escape_text(&dest_url)
                     ));
                 }
+                Tag::FootnoteDefinition(name) => {
+                    current_markup.push_str(&format!("[{}] ", name));
+                }
                 _ => {}
             },
             Event::End(tag_end) => match tag_end {
@@ -129,6 +153,7 @@ pub fn render_markdown(text: &str) -> gtk4::Box {
                             .xalign(0.0)
                             .selectable(true)
                             .build();
+                        attach_link_handler(&label);
                         container.append(&label);
                         current_markup.clear();
                     }
@@ -144,6 +169,7 @@ pub fn render_markdown(text: &str) -> gtk4::Box {
                         .xalign(0.0)
                         .selectable(true)
                         .build();
+                    attach_link_handler(&label);
                     container.append(&label);
                     current_markup.clear();
                 }
@@ -167,6 +193,7 @@ pub fn render_markdown(text: &str) -> gtk4::Box {
                         .margin_bottom(6)
                         .selectable(true)
                         .build();
+                    attach_link_handler(&label);
                     bq_box.append(&label);
                     container.append(&bq_box);
                     current_markup.clear();
@@ -191,6 +218,7 @@ pub fn render_markdown(text: &str) -> gtk4::Box {
                             .margin_start(12)
                             .selectable(true)
                             .build();
+                        attach_link_handler(&label);
                         container.append(&label);
                         current_markup.clear();
                     }
@@ -207,11 +235,25 @@ pub fn render_markdown(text: &str) -> gtk4::Box {
                 TagEnd::Link => {
                     current_markup.push_str("</a>");
                 }
+                TagEnd::TableCell => {
+                    if let Some(row) = table_rows.last_mut() {
+                        row.push(current_cell.clone());
+                    }
+                    current_cell.clear();
+                }
+                TagEnd::Table => {
+                    in_table = false;
+                    let grid = build_table(&table_rows);
+                    container.append(&grid);
+                    table_rows.clear();
+                }
                 _ => {}
             },
             Event::Text(t) => {
                 if in_code_block {
                     code_block_content.push_str(&t);
+                } else if in_table {
+                    current_cell.push_str(&t);
                 } else {
                     current_markup.push_str(&gtk4::glib::markup_escape_text(&t));
                 }
@@ -219,6 +261,8 @@ pub fn render_markdown(text: &str) -> gtk4::Box {
             Event::Code(c) => {
                 if in_code_block {
                     code_block_content.push_str(&c);
+                } else if in_table {
+                    current_cell.push_str(&c);
                 } else {
                     current_markup.push_str(&format!(
                         "<tt>{}</tt>",
@@ -229,9 +273,17 @@ pub fn render_markdown(text: &str) -> gtk4::Box {
             Event::SoftBreak => {
                 if in_code_block {
                     code_block_content.push('\n');
+                } else if in_table {
+                    current_cell.push(' ');
                 } else {
                     current_markup.push(' ');
                 }
+            }
+            Event::FootnoteReference(name) => {
+                current_markup.push_str(&format!("[{}]", name));
+            }
+            Event::TaskListMarker(checked) => {
+                current_markup.push_str(if checked { "☑ " } else { "☐ " });
             }
             Event::HardBreak => {
                 if in_code_block {
@@ -262,10 +314,41 @@ pub fn render_markdown(text: &str) -> gtk4::Box {
             .xalign(0.0)
             .selectable(true)
             .build();
+        attach_link_handler(&label);
         container.append(&label);
     }
 
     container
+}
+
+fn build_table(rows: &[Vec<String>]) -> gtk4::ScrolledWindow {
+    let grid = gtk4::Grid::builder()
+        .column_spacing(12)
+        .row_spacing(6)
+        .margin_start(4)
+        .margin_end(4)
+        .margin_top(4)
+        .margin_bottom(4)
+        .build();
+    for (row_index, row) in rows.iter().enumerate() {
+        for (column_index, cell) in row.iter().enumerate() {
+            let label = gtk4::Label::builder()
+                .label(cell)
+                .wrap(true)
+                .wrap_mode(gtk4::pango::WrapMode::WordChar)
+                .xalign(0.0)
+                .selectable(true)
+                .build();
+            if row_index == 0 {
+                label.add_css_class("heading");
+            }
+            grid.attach(&label, column_index as i32, row_index as i32, 1, 1);
+        }
+    }
+    gtk4::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk4::PolicyType::Automatic)
+        .child(&grid)
+        .build()
 }
 
 pub fn build_code_block(lang: &str, code: &str) -> gtk4::Box {
@@ -381,7 +464,12 @@ impl AssistantLiveHandle {
     }
 }
 
-pub fn build_user_message(text: &str, _time: u64, _seq: i64) -> gtk4::Box {
+pub fn build_user_message(
+    text: &str,
+    _time: u64,
+    _seq: i64,
+    images: &[UserImageAttachment],
+) -> gtk4::Box {
     let masked = crate::drafts::mask_secret_patterns(text);
     let row = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Horizontal)
@@ -412,6 +500,56 @@ pub fn build_user_message(text: &str, _time: u64, _seq: i64) -> gtk4::Box {
         .selectable(true)
         .build();
     bubble.append(&label);
+    if !images.is_empty() {
+        let gallery = gtk4::FlowBox::builder()
+            .selection_mode(gtk4::SelectionMode::None)
+            .max_children_per_line(3)
+            .margin_start(10)
+            .margin_end(10)
+            .margin_top(8)
+            .build();
+        for image in images {
+            gallery.append(&build_user_image(image));
+        }
+        bubble.append(&gallery);
+    }
+    if let Some(chips) = build_file_chips(text) {
+        bubble.append(&chips);
+    }
+    let footer = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing(4)
+        .halign(gtk4::Align::End)
+        .margin_end(8)
+        .margin_bottom(6)
+        .build();
+    let copy = gtk4::Button::builder()
+        .icon_name("edit-copy-symbolic")
+        .tooltip_text("Copy original text")
+        .css_classes(["flat", "circular"])
+        .build();
+    let copy_text = text.to_string();
+    copy.connect_clicked(move |_| {
+        if let Some(display) = gtk4::gdk::Display::default() {
+            display.clipboard().set_text(&copy_text);
+        }
+    });
+    footer.append(&copy);
+    if _time > 0 {
+        let stamp = gtk4::glib::DateTime::from_unix_local((_time / 1000) as i64)
+            .ok()
+            .and_then(|date| date.format("%H:%M").ok())
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        if !stamp.is_empty() {
+            let time_label = gtk4::Label::builder()
+                .label(&stamp)
+                .css_classes(["dim-label", "caption"])
+                .build();
+            footer.append(&time_label);
+        }
+    }
+    bubble.append(&footer);
     if masked != text {
         let actions = gtk4::Box::builder()
             .orientation(gtk4::Orientation::Horizontal)
@@ -444,18 +582,6 @@ pub fn build_user_message(text: &str, _time: u64, _seq: i64) -> gtk4::Box {
             }
         });
         actions.append(&reveal);
-        let copy = gtk4::Button::builder()
-            .icon_name("edit-copy-symbolic")
-            .tooltip_text("Copy original text")
-            .css_classes(["flat", "circular"])
-            .build();
-        let copy_text = text.to_string();
-        copy.connect_clicked(move |_| {
-            if let Some(display) = gtk4::gdk::Display::default() {
-                display.clipboard().set_text(&copy_text);
-            }
-        });
-        actions.append(&copy);
         bubble.append(&actions);
     }
     row.append(&bubble);
@@ -469,12 +595,150 @@ pub fn build_user_message(text: &str, _time: u64, _seq: i64) -> gtk4::Box {
     row
 }
 
+pub fn build_attachment_thumbnail(image: &UserImageAttachment) -> gtk4::Button {
+    build_user_image(image)
+}
+
+fn build_file_chips(text: &str) -> Option<gtk4::FlowBox> {
+    let chips = gtk4::FlowBox::builder()
+        .selection_mode(gtk4::SelectionMode::None)
+        .max_children_per_line(3)
+        .margin_start(10)
+        .margin_end(10)
+        .margin_top(6)
+        .build();
+    let mut found = false;
+    for token in text.split_whitespace() {
+        let Some(raw) = token.strip_prefix('@') else {
+            continue;
+        };
+        let path = raw.trim_end_matches(['.', ',', ';', ')', ']']);
+        if path.is_empty() {
+            continue;
+        }
+        let path = std::path::Path::new(path);
+        let label = match std::fs::metadata(path) {
+            Ok(meta) => format!(
+                "{} · {} bytes",
+                crate::attachments::display_name(path),
+                meta.len()
+            ),
+            Err(_) => crate::attachments::display_name(path),
+        };
+        let chip = gtk4::Label::builder()
+            .label(&label)
+            .css_classes(["card", "caption"])
+            .margin_start(4)
+            .margin_end(4)
+            .margin_top(2)
+            .margin_bottom(2)
+            .selectable(true)
+            .build();
+        chips.append(&chip);
+        found = true;
+    }
+    if found {
+        Some(chips)
+    } else {
+        None
+    }
+}
+
+fn build_user_image(image: &UserImageAttachment) -> gtk4::Button {
+    let picture = gtk4::Picture::builder()
+        .content_fit(gtk4::ContentFit::Cover)
+        .can_shrink(true)
+        .width_request(140)
+        .height_request(100)
+        .build();
+    let button = gtk4::Button::builder()
+        .child(&picture)
+        .css_classes(["flat"])
+        .tooltip_text(image.name.as_deref().unwrap_or("Image attachment"))
+        .build();
+    let picture_for_dialog = picture.clone();
+    button.connect_clicked(move |_| {
+        let dialog = libadwaita::Dialog::builder()
+            .title("Image")
+            .content_width(720)
+            .build();
+        let preview = gtk4::Picture::builder()
+            .content_fit(gtk4::ContentFit::Contain)
+            .can_shrink(true)
+            .build();
+        preview.set_paintable(picture_for_dialog.paintable().as_ref());
+        let scroll = gtk4::ScrolledWindow::builder()
+            .vexpand(true)
+            .child(&preview)
+            .build();
+        dialog.set_child(Some(&scroll));
+        dialog.present(Some(&picture_for_dialog));
+    });
+    if let Some(data) = &image.data {
+        if let Some(bytes) = crate::attachments::decode_base64(data) {
+            set_picture_bytes(&picture, &bytes);
+        }
+    } else if let Some(attachment_id) = &image.attachment_id {
+        let Some(controller) = controller_ref() else {
+            return button;
+        };
+        let Some(session_id) = controller.active_session_id() else {
+            return button;
+        };
+        let conn = controller.connection_handle();
+        let attachment_id = attachment_id.clone();
+        let (sender, mut receiver) =
+            tokio::sync::mpsc::unbounded_channel::<Result<crate::protocol::AttachmentReadResult, String>>();
+        crate::ui::controller::tokio_runtime().spawn(async move {
+            let conn_opt = conn.read().await.clone();
+            let Some(conn) = conn_opt else {
+                return;
+            };
+            let result = conn
+                .call::<crate::protocol::AttachmentReadParams, crate::protocol::AttachmentReadResult>(
+                    crate::protocol::METHOD_ATTACHMENT_READ,
+                    crate::protocol::AttachmentReadParams {
+                        session_id,
+                        attachment_id,
+                        encoding: Some("base64".to_string()),
+                    },
+                    std::time::Duration::from_secs(15),
+                )
+                .await
+                .map_err(|err| err.to_string());
+            let _ = sender.send(result);
+        });
+        let picture_for_load = picture.clone();
+        gtk4::glib::MainContext::default().spawn_local(async move {
+            if let Some(Ok(read)) = receiver.recv().await {
+                if let Some(bytes) = crate::attachments::decode_base64(&read.data) {
+                    set_picture_bytes(&picture_for_load, &bytes);
+                }
+            }
+        });
+    }
+    button
+}
+
+fn set_picture_bytes(picture: &gtk4::Picture, bytes: &[u8]) {
+    if let Ok(texture) =
+        gtk4::gdk::Texture::from_bytes(&gtk4::glib::Bytes::from_owned(bytes.to_vec()))
+    {
+        picture.set_paintable(Some(&texture));
+    }
+}
+
+fn controller_ref() -> Option<Rc<SessionController>> {
+    UI_CONTROLLER.with(|slot| slot.borrow().as_ref().and_then(|weak| weak.upgrade()))
+}
+
 pub fn build_assistant_message(
     text: &str,
     reasoning: Option<&str>,
     tool_calls: &[ToolCallItem],
     is_live: bool,
     seq: Option<i64>,
+    time: u64,
 ) -> (gtk4::Box, AssistantLiveHandle) {
     let row = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Horizontal)
@@ -582,6 +846,32 @@ pub fn build_assistant_message(
                 .margin_end(10)
                 .margin_bottom(8)
                 .build();
+            let copy_btn = gtk4::Button::builder()
+                .icon_name("edit-copy-symbolic")
+                .tooltip_text("Copy full message")
+                .css_classes(["flat", "circular"])
+                .build();
+            let copy_text = text.to_string();
+            copy_btn.connect_clicked(move |_| {
+                if let Some(display) = gtk4::gdk::Display::default() {
+                    display.clipboard().set_text(&copy_text);
+                }
+            });
+            actions_box.append(&copy_btn);
+            if time > 0 {
+                let stamp = gtk4::glib::DateTime::from_unix_local((time / 1000) as i64)
+                    .ok()
+                    .and_then(|date| date.format("%H:%M").ok())
+                    .map(|value| value.to_string())
+                    .unwrap_or_default();
+                if !stamp.is_empty() {
+                    let time_label = gtk4::Label::builder()
+                        .label(&stamp)
+                        .css_classes(["dim-label", "caption"])
+                        .build();
+                    actions_box.append(&time_label);
+                }
+            }
             let fork_btn = gtk4::Button::builder()
                 .icon_name("view-more-symbolic")
                 .tooltip_text("Fork from here")
@@ -845,15 +1135,19 @@ pub fn build_generic_event(event_type: &str, summary: &str, _seq: i64) -> gtk4::
 
 pub fn render_block(block: &RenderBlock) -> (gtk4::Box, Option<AssistantLiveHandle>) {
     match block {
-        RenderBlock::UserMessage { text, time, seq } => {
-            (build_user_message(text, *time, *seq), None)
-        }
+        RenderBlock::UserMessage {
+            text,
+            time,
+            seq,
+            images,
+        } => (build_user_message(text, *time, *seq, images), None),
         RenderBlock::AssistantMessage {
             text,
             reasoning,
             tool_calls,
             is_live,
             seq,
+            time,
             ..
         } => {
             let (widget, handle) = build_assistant_message(
@@ -862,6 +1156,7 @@ pub fn render_block(block: &RenderBlock) -> (gtk4::Box, Option<AssistantLiveHand
                 tool_calls,
                 *is_live,
                 *seq,
+                *time,
             );
             (widget, Some(handle))
         }

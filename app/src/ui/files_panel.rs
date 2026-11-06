@@ -5,7 +5,7 @@ use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 use sourceview5::prelude::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 pub struct FilesPanel {
@@ -178,6 +178,7 @@ pub struct PreviewPanel {
     container: gtk4::Box,
     content: RefCell<Option<gtk4::Widget>>,
     status_label: gtk4::Label,
+    pending_line: Cell<Option<u32>>,
 }
 
 impl PreviewPanel {
@@ -203,6 +204,7 @@ impl PreviewPanel {
             container,
             content: RefCell::new(None),
             status_label,
+            pending_line: Cell::new(None),
         }
     }
 
@@ -222,6 +224,9 @@ impl PreviewPanel {
         self.status_label.set_label(reason);
     }
 
+    pub fn set_pending_line(&self, line: Option<u32>) {
+        self.pending_line.set(line);
+    }
     pub fn show_text(&self, path: &str, text: &str, truncated: bool) {
         self.clear();
         let buffer = sourceview5::Buffer::new(None);
@@ -251,6 +256,11 @@ impl PreviewPanel {
             if truncated { " (truncated)" } else { "" }
         ));
         self.container.append(&scroll);
+        if let Some(line) = self.pending_line.take() {
+            if let Some(mut iter) = buffer.iter_at_line(line.saturating_sub(1) as i32) {
+                view.scroll_to_iter(&mut iter, 0.0, false, 0.0, 0.0);
+            }
+        }
         *self.content.borrow_mut() = Some(scroll.upcast());
     }
 

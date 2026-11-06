@@ -25,6 +25,11 @@ pub struct ConversationView {
     jobs_popover: gtk4::Popover,
     jobs_box: gtk4::Box,
     jobs_output: gtk4::Label,
+    usage_label: gtk4::Label,
+    context_button: gtk4::MenuButton,
+    context_label: gtk4::Label,
+    context_pressure: RefCell<Option<serde_json::Value>>,
+    context_breakdown: RefCell<Option<serde_json::Value>>,
     transcript_scroll: gtk4::ScrolledWindow,
     on_load_older: Rc<RefCell<Option<Box<dyn Fn()>>>>,
     live_handle: RefCell<Option<AssistantLiveHandle>>,
@@ -138,6 +143,33 @@ impl ConversationView {
         jobs_popover.set_child(Some(&jobs_outer));
         jobs_button.set_popover(Some(&jobs_popover));
         session_header.append(&jobs_button);
+
+        let usage_label = gtk4::Label::builder()
+            .label("")
+            .css_classes(["dim-label", "caption"])
+            .build();
+        session_header.append(&usage_label);
+
+        let context_button = gtk4::MenuButton::builder()
+            .label("Context")
+            .css_classes(["flat"])
+            .visible(false)
+            .build();
+        let context_popover = gtk4::Popover::builder().build();
+        let context_label = gtk4::Label::builder()
+            .label("")
+            .wrap(true)
+            .selectable(true)
+            .xalign(0.0)
+            .margin_start(8)
+            .margin_end(8)
+            .margin_top(8)
+            .margin_bottom(8)
+            .css_classes(["monospace", "caption"])
+            .build();
+        context_popover.set_child(Some(&context_label));
+        context_button.set_popover(Some(&context_popover));
+        session_header.append(&context_button);
 
         let status_label = gtk4::Label::builder()
             .label("Idle")
@@ -269,6 +301,11 @@ impl ConversationView {
             jobs_popover,
             jobs_box,
             jobs_output,
+            usage_label,
+            context_button,
+            context_label,
+            context_pressure: RefCell::new(None),
+            context_breakdown: RefCell::new(None),
             transcript_scroll,
             on_load_older: load_slot_for_scroll,
             live_handle: RefCell::new(None),
@@ -426,6 +463,45 @@ impl ConversationView {
             self.jobs_output.set_label(&text);
         }
         self.jobs_popover.popup();
+    }
+
+    pub fn set_usage(&self, usage: &serde_json::Value) {
+        let text = usage
+            .get("totalTokens")
+            .and_then(|value| value.as_u64())
+            .or_else(|| usage.get("total").and_then(|value| value.as_u64()))
+            .map(|value| format!("{} tok", value))
+            .unwrap_or_else(|| serde_json::to_string(usage).unwrap_or_default());
+        self.usage_label.set_label(&text);
+    }
+
+    pub fn set_context(&self, pressure: Option<&serde_json::Value>, breakdown: Option<&serde_json::Value>) {
+        if let Some(pressure) = pressure {
+            *self.context_pressure.borrow_mut() = Some(pressure.clone());
+        }
+        if let Some(breakdown) = breakdown {
+            *self.context_breakdown.borrow_mut() = Some(breakdown.clone());
+        }
+        let pressure = self.context_pressure.borrow().clone();
+        let Some(pressure) = pressure else {
+            self.context_button.set_visible(false);
+            return;
+        };
+        let text = pressure
+            .get("used")
+            .and_then(|value| value.as_u64())
+            .zip(pressure.get("limit").and_then(|value| value.as_u64()))
+            .map(|(used, limit)| format!("{}%", used.saturating_mul(100) / limit.max(1)))
+            .unwrap_or_else(|| serde_json::to_string(&pressure).unwrap_or_default());
+        self.context_button.set_label(&format!("Context {}", text));
+        self.context_button.set_visible(true);
+        let details = self
+            .context_breakdown
+            .borrow()
+            .as_ref()
+            .map(|value| serde_json::to_string_pretty(value).unwrap_or_default())
+            .unwrap_or_else(|| serde_json::to_string_pretty(&pressure).unwrap_or_default());
+        self.context_label.set_label(&details);
     }
 
     pub fn job_output_append(&self, chunks: &[crate::protocol::JobChunkWire]) {

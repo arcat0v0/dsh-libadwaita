@@ -146,6 +146,21 @@ pub enum UiMessage {
     },
     CredentialRecordsLoaded(Vec<CredentialRecordItem>),
     QuestionReopened(SdkUserQuestionRequest),
+    ImageAttached {
+        name: String,
+        mime_type: String,
+        data: String,
+    },
+    FileAttached(String),
+    SessionSearchLoaded(Vec<SessionSearchItem>),
+    ProjectionsLoaded(SessionProjectionsResult),
+}
+
+#[derive(Clone)]
+struct PendingImage {
+    name: String,
+    mime_type: String,
+    data: String,
 }
 
 struct ApprovalHandler {
@@ -195,6 +210,8 @@ pub struct SessionController {
     settings_dialog: Rc<RefCell<Option<SettingsDialogHandle>>>,
     permission_state: Rc<RefCell<Option<PermissionGetResult>>>,
     history_loading: Rc<Cell<bool>>,
+    pending_images: Rc<RefCell<Vec<PendingImage>>>,
+    search_generation: Rc<Cell<u64>>,
     window_title: adw::WindowTitle,
     toast_overlay: adw::ToastOverlay,
     ui_sender: UnboundedSender<UiMessage>,
@@ -245,6 +262,8 @@ impl SessionController {
             settings_dialog: Rc::new(RefCell::new(None)),
             permission_state: Rc::new(RefCell::new(None)),
             history_loading: Rc::new(Cell::new(false)),
+            pending_images: Rc::new(RefCell::new(Vec::new())),
+            search_generation: Rc::new(Cell::new(0)),
             window_title: main_window.window_title().clone(),
             toast_overlay: main_window
                 .window()
@@ -331,6 +350,32 @@ impl SessionController {
             if let Some(ctrl) = ctrl_weak_banner.upgrade() {
                 ctrl.bootstrap_supervisor();
             }
+        });
+
+        let search_weak = Rc::downgrade(&controller);
+        let search_generation = controller.search_generation.clone();
+        controller.sidebar.search_entry().connect_search_changed(move |entry| {
+            let text = entry.text().to_string();
+            let generation = search_generation.get().wrapping_add(1);
+            search_generation.set(generation);
+            let weak = search_weak.clone();
+            let generation_slot = search_generation.clone();
+            gtk4::glib::timeout_add_local_once(
+                std::time::Duration::from_millis(250),
+                move || {
+                    if generation_slot.get() != generation {
+                        return;
+                    }
+                    let Some(ctrl) = weak.upgrade() else {
+                        return;
+                    };
+                    if text.trim().is_empty() {
+                        ctrl.load_session_list();
+                    } else {
+                        ctrl.search_sessions(text.trim());
+                    }
+                },
+            );
         });
 
         crate::ui::message_renderer::set_controller(&controller);
@@ -846,9 +891,101 @@ impl SessionController {
         });
     }
 
+    pub fn pick_attachments(&self) {
+        let dialog = gtk4::FileDialog::builder()
+            .title("Attach Files")
+            .build();
+        let weak = self.weak_self();
+        dialog.open_multiple(
+            Some(&self.window),
+            None::<&gtk4::gio::Cancellable>,
+            move |result| {
+                let Ok(files) = result else {
+                    return;
+                };
+                let Some(ctrl) = weak.upgrade() else {
+                    return;
+                };
+                for index in 0..files.n_items() {
+                    if let Some(file) = files
+                        .item(index)
+                        .and_then(|item| item.downcast::<gtk4::gio::File>().ok())
+                    {
+                        if let Some(path) = file.path() {
+                            ctrl.attach_file_path(&path);
+                        }
+                    }
+                }
+            },
+        );
+    }
+
+    pub fn attach_file_path(&self, path: &std::path::Path) {
+        let Ok(bytes) = std::fs::read(path) else {
+            let _ = self
+                .ui_sender
+                .send(UiMessage::Toast(format!("Cannot read {}", path.display())));
+            return;
+        };
+        let name = crate::attachments::display_name(path);
+        match crate::attachments::classify_path(path) {
+            crate::attachments::AttachmentKind::Image(mime) => {
+                self.upload_attachment(name, mime.to_string(), bytes, true);
+            }
+            crate::attachments::AttachmentKind::File => {
+                let reference = crate::attachments::file_reference_text(path);
+                self.upload_attachment(name, "application/octet-stream".to_string(), bytes, false);
+                self.insert_composer_text(&reference);
+            }
+        }
+    }
+
+    pub fn attach_clipboard_texture(&self, texture: &gtk4::gdk::Texture) {
+        let bytes = texture.save_to_png_bytes();
+        self.upload_attachment(
+            "clipboard.png".to_string(),
+            "image/png".to_string(),
+            bytes.as_ref().to_vec(),
+            true,
+        );
+    }
+
+    fn upload_attachment(&self, name: String, mime_type: String, bytes: Vec<u8>, image: bool) {
+        let Some(session_id) = self.active_session_id() else {
+            let _ = self
+                .ui_sender
+                .send(UiMessage::Toast("Open a session before attaching".to_string()));
+            return;
+        };
+        let data = crate::attachments::encode_base64(&bytes);
+        let params = AttachmentUploadParams {
+            session_id,
+            name: name.clone(),
+            data: data.clone(),
+            mime_type: Some(mime_type.clone()),
+        };
+        let ui_sender = self.ui_sender.clone();
+        self.dispatch_call(
+            METHOD_ATTACHMENT_UPLOAD,
+            params,
+            Duration::from_secs(30),
+            move |result: Result<AttachmentUploadResult, ConnectionError>| match result {
+                Ok(_) if image => UiMessage::ImageAttached {
+                    name,
+                    mime_type,
+                    data,
+                },
+                Ok(_) => UiMessage::FileAttached(String::new()),
+                Err(err) => UiMessage::Toast(format!("Attachment upload failed: {}", err)),
+            },
+        );
+        let _ = ui_sender;
+    }
+
     pub fn submit_text(&self, text: &str, steer: bool) {
         let trimmed = text.trim();
-        if trimmed.is_empty() {
+        let images = self.pending_images.borrow().clone();
+        if trimmed.is_empty() && images.is_empty() {
             return;
         }
         if trimmed.starts_with('/') {
@@ -865,18 +1002,45 @@ impl SessionController {
         let Some(session_id) = self.active_session_id() else {
             return;
         };
+        let pending_text = if text.trim().is_empty() {
+            "[image]"
+        } else {
+            text
+        };
+        let pending_images: Vec<UserImageAttachment> = images
+            .iter()
+            .map(|image| UserImageAttachment {
+                name: Some(image.name.clone()),
+                mime_type: image.mime_type.clone(),
+                data: Some(image.data.clone()),
+                attachment_id: None,
+            })
+            .collect();
         {
             let mut guard = self.active_session.borrow_mut();
             if let Some(session) = guard.as_mut() {
-                session.transcript.push_pending_user(text);
+                session
+                    .transcript
+                    .push_pending_user_with_images(pending_text, &pending_images);
                 self.conversation_view.update_transcript(&session.transcript);
             }
         }
+        let mut content_blocks = Vec::new();
+        if !text.trim().is_empty() {
+            content_blocks.push(PromptContentBlock::Text {
+                text: text.to_string(),
+            });
+        }
+        for image in &images {
+            content_blocks.push(PromptContentBlock::Image {
+                data: image.data.clone(),
+                mime_type: image.mime_type.clone(),
+                name: Some(image.name.clone()),
+            });
+        }
         let params = SessionPromptParams {
             session_id,
-            content_blocks: vec![PromptContentBlock::Text {
-                text: text.to_string(),
-            }],
+            content_blocks,
             mode: Some(mode.to_string()),
         };
         let conn_arc = self.connection.clone();
@@ -1313,6 +1477,37 @@ impl SessionController {
         });
     }
 
+    pub fn load_projections(&self, session_id: &str) {
+        self.dispatch_call(
+            METHOD_SESSION_PROJECTIONS,
+            SessionProjectionsParams {
+                session_id: session_id.to_string(),
+            },
+            Duration::from_secs(10),
+            |result: Result<SessionProjectionsResult, ConnectionError>| match result {
+                Ok(projections) => UiMessage::ProjectionsLoaded(projections),
+                Err(err) => UiMessage::Toast(format!("Projections failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn search_sessions(&self, query: &str) {
+        let params = SessionSearchParams {
+            query: query.to_string(),
+            limit: Some(50),
+            archived: Some(false),
+        };
+        self.dispatch_call(
+            METHOD_SESSION_SEARCH,
+            params,
+            Duration::from_secs(10),
+            |result: Result<SessionSearchResult, ConnectionError>| match result {
+                Ok(search) => UiMessage::SessionSearchLoaded(search.items),
+                Err(err) => UiMessage::Toast(format!("Search failed: {}", err)),
+            },
+        );
+    }
+
     pub fn load_workspaces(&self) {
         let conn_arc = self.connection.clone();
         let ui_sender = self.ui_sender.clone();
@@ -1652,6 +1847,37 @@ impl SessionController {
                 }
             }
         });
+    }
+
+    pub fn open_link_target(&self, target: &str) {
+        match crate::links::classify_link(target) {
+            crate::links::LinkTarget::External(uri) => {
+                if let Err(err) = gtk4::gio::AppInfo::launch_default_for_uri(
+                    &uri,
+                    None::<&gtk4::gio::AppLaunchContext>,
+                ) {
+                    let _ = self
+                        .ui_sender
+                        .send(UiMessage::Toast(format!("Open link failed: {}", err)));
+                }
+            }
+            crate::links::LinkTarget::File { path, line, .. } => {
+                let resolved = if std::path::Path::new(&path).is_absolute() {
+                    path
+                } else {
+                    let cwd = self
+                        .active_session
+                        .borrow()
+                        .as_ref()
+                        .map(|session| session.cwd.clone())
+                        .unwrap_or_else(|| ".".to_string());
+                    std::path::Path::new(&cwd).join(path).display().to_string()
+                };
+                self.right_dock.preview_panel().set_pending_line(line);
+                self.preview_file(&resolved);
+            }
+            crate::links::LinkTarget::Blocked => {}
+        }
     }
 
     pub fn prompt_new_session_portal(&self) {
@@ -2203,12 +2429,16 @@ impl SessionController {
                         let sess_model = SessionModel::from_follow(follow);
                         conv_view.update_transcript(&sess_model.transcript);
                         *active_sess.borrow_mut() = Some(sess_model);
+                        if let Some(sess) = active_sess.borrow().as_ref() {
+                            conv_view.composer().set_plan_mode(sess.plan_mode);
+                        }
                         if let Some(ctrl) = ctrl_weak.upgrade() {
                             ctrl.right_dock.preview_panel().clear();
                             ctrl.refresh_files(".");
                             ctrl.refresh_permission(&session_id);
                             ctrl.update_continue_state();
                             ctrl.right_dock.on_session_followed(&session_id, &cwd);
+                            ctrl.load_projections(&session_id);
                             ctrl.refresh_subagents();
                             ctrl.refresh_jobs();
                             ctrl.load_feedback();
@@ -2222,6 +2452,7 @@ impl SessionController {
                                     if p.session_id == sess.id {
                                         let _ = sess.handle_event(p.event);
                                         conv_view.update_transcript(&sess.transcript);
+                                        conv_view.composer().set_plan_mode(sess.plan_mode);
                                     }
                                 }
                             }
@@ -2229,6 +2460,13 @@ impl SessionController {
                                 let mut sess_guard = active_sess.borrow_mut();
                                 if let Some(sess) = sess_guard.as_mut() {
                                     if p.session_id == sess.id {
+                                        if let crate::protocol::AssistantStreamFrame::Chunk {
+                                            chunk: crate::protocol::StreamChunk::Usage { usage },
+                                            ..
+                                        } = &p.frame
+                                        {
+                                            conv_view.set_usage(usage);
+                                        }
                                         sess.handle_stream_frame(p.frame);
                                         conv_view.update_transcript(&sess.transcript);
                                     }
@@ -2260,6 +2498,20 @@ impl SessionController {
                                     .unwrap_or(false);
                                 if matches_active {
                                     conv_view.update_queue(&p.items);
+                                }
+                            }
+                            IncomingNotification::SessionProjection(p) => {
+                                if matches_active_session(&active_sess, &p.session_id) {
+                                    match p.kind.as_str() {
+                                        "contextPressure" => {
+                                            conv_view.set_context(Some(&p.value), None);
+                                        }
+                                        "contextBreakdown" => {
+                                            conv_view.set_context(None, Some(&p.value));
+                                        }
+                                        "tokenUsage" => conv_view.set_usage(&p.value),
+                                        _ => {}
+                                    }
                                 }
                             }
                             IncomingNotification::JobOutput(p) => {
@@ -2540,6 +2792,47 @@ impl SessionController {
                     UiMessage::EchoAck => {
                         let buffer = conv_view.composer().text_view().buffer();
                         buffer.set_text("");
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.pending_images.borrow_mut().clear();
+                        }
+                    }
+                    UiMessage::ImageAttached {
+                        name,
+                        mime_type,
+                        data,
+                    } => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.pending_images.borrow_mut().push(PendingImage {
+                                name: name.clone(),
+                                mime_type,
+                                data,
+                            });
+                        }
+                        toast_overlay
+                            .add_toast(adw::Toast::new(&format!("Image attached: {}", name)));
+                    }
+                    UiMessage::SessionSearchLoaded(items) => {
+                        sidebar.load_sessions(
+                            &items
+                                .into_iter()
+                                .map(|item| SessionListItem {
+                                    id: item.id,
+                                    created_at: item.updated_at,
+                                    updated_at: item.updated_at,
+                                    cwd: item.cwd,
+                                    title: item.title,
+                                    turn_count: 0,
+                                    is_archived: false,
+                                })
+                                .collect::<Vec<_>>(),
+                        );
+                    }
+                    UiMessage::FileAttached(path) => {
+                        if !path.is_empty() {
+                            if let Some(ctrl) = ctrl_weak.upgrade() {
+                                ctrl.insert_composer_text(&format!("@{} ", path));
+                            }
+                        }
                     }
                     UiMessage::EchoFailed { text, error } => {
                         let mut guard = active_sess.borrow_mut();
@@ -2574,6 +2867,15 @@ impl SessionController {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
                             ctrl.right_dock.terminal_panel().handle_output(&output);
                         }
+                    }
+                    UiMessage::ProjectionsLoaded(projections) => {
+                        if let Some(usage) = projections.token_usage.as_ref() {
+                            conv_view.set_usage(usage);
+                        }
+                        conv_view.set_context(
+                            projections.context_pressure.as_ref(),
+                            projections.context_breakdown.as_ref(),
+                        );
                     }
                     UiMessage::ScheduleCatalogLoaded(entries) => {
                         conv_view.schedules_page().handle_catalog(&entries);
@@ -2666,6 +2968,71 @@ impl SessionController {
                 c.continue_generation();
             }
         });
+
+        let c_weak_plan = controller_weak.clone();
+        composer.plan_button().connect_clicked(move |_| {
+            if let Some(c) = c_weak_plan.upgrade() {
+                c.execute_command("plan", "off");
+            }
+        });
+
+        let c_weak_attach = controller_weak.clone();
+        composer.attach_button().connect_clicked(move |_| {
+            if let Some(c) = c_weak_attach.upgrade() {
+                c.pick_attachments();
+            }
+        });
+
+        let c_weak_drop = controller_weak.clone();
+        let drop = gtk4::DropTarget::new(
+            gtk4::gdk::FileList::static_type(),
+            gtk4::gdk::DragAction::COPY,
+        );
+        drop.connect_drop(move |_, value, _, _| {
+            if let Ok(list) = value.get::<gtk4::gdk::FileList>() {
+                if let Some(c) = c_weak_drop.upgrade() {
+                    for file in list.files() {
+                        if let Some(path) = file.path() {
+                            c.attach_file_path(&path);
+                        }
+                    }
+                }
+            }
+            true
+        });
+        composer.widget().add_controller(drop);
+
+        let c_weak_paste = controller_weak.clone();
+        let paste_controller = gtk4::EventControllerKey::new();
+        paste_controller.connect_key_pressed(move |_, key, _, modifier| {
+            if key == gtk4::gdk::Key::v
+                && (modifier.contains(gtk4::gdk::ModifierType::CONTROL_MASK)
+                    || modifier.contains(gtk4::gdk::ModifierType::SUPER_MASK))
+            {
+                if let Some(display) = gtk4::gdk::Display::default() {
+                    let clipboard = display.clipboard();
+                    if clipboard
+                        .formats()
+                        .contain_mime_type("image/png")
+                    {
+                        let c = c_weak_paste.clone();
+                        clipboard.read_texture_async(
+                            None::<&gtk4::gio::Cancellable>,
+                            move |result| {
+                                if let Ok(Some(texture)) = result {
+                                    if let Some(ctrl) = c.upgrade() {
+                                        ctrl.attach_clipboard_texture(&texture);
+                                    }
+                                }
+                            },
+                        );
+                        return gtk4::glib::Propagation::Stop;
+                    }
+                }
+            }
+            gtk4::glib::Propagation::Proceed
+        });
+        text_view.add_controller(paste_controller);
 
         let c_weak_enter = controller_weak.clone();
         let tv_enter = text_view.clone();
@@ -3392,6 +3759,17 @@ impl SessionController {
             },
         );
     }
+}
+
+fn matches_active_session(
+    active: &Rc<RefCell<Option<SessionModel>>>,
+    session_id: &str,
+) -> bool {
+    active
+        .borrow()
+        .as_ref()
+        .map(|session| session.id == session_id)
+        .unwrap_or(false)
 }
 
 pub fn permission_display_label(state: &PermissionGetResult) -> String {

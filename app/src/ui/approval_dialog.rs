@@ -5,6 +5,12 @@ use libadwaita as adw;
 use libadwaita::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
+
+struct QuestionPageState {
+    id: String,
+    checks: Vec<(String, gtk4::CheckButton)>,
+    entry: gtk4::Entry,
+}
 use tokio::sync::oneshot;
 
 pub fn show_approval_dialog(
@@ -69,6 +75,42 @@ pub fn show_approval_dialog(
             .build();
         details_card.append(&reason_row);
     }
+    if let Some(ref text) = req.display_reason {
+        let row = adw::ActionRow::builder()
+            .title("Display Reason")
+            .subtitle(text)
+            .build();
+        details_card.append(&row);
+    }
+    if let Some(ref text) = req.warning {
+        let row = adw::ActionRow::builder()
+            .title("Warning")
+            .subtitle(text)
+            .build();
+        details_card.append(&row);
+    }
+    if let Some(ref detail) = req.detail {
+        let row = adw::ActionRow::builder()
+            .title("Detail")
+            .subtitle(
+                serde_json::to_string_pretty(detail).unwrap_or_else(|_| detail.to_string()),
+            )
+            .build();
+        details_card.append(&row);
+    }
+    let raw = serde_json::to_string_pretty(&req).unwrap_or_default();
+    let raw_label = gtk4::Label::builder()
+        .label(&raw)
+        .selectable(true)
+        .wrap(true)
+        .xalign(0.0)
+        .css_classes(["monospace", "caption"])
+        .build();
+    let expander = gtk4::Expander::builder()
+        .label("Details")
+        .child(&raw_label)
+        .build();
+    details_card.append(&expander);
     content_box.append(&details_card);
 
     let button_box = gtk4::Box::builder()
@@ -111,7 +153,30 @@ pub fn show_approval_dialog(
     button_box.append(&allow_btn);
 
     content_box.append(&button_box);
+
+    let s_key = sender_cell.clone();
+    let d_key = dialog.clone();
+    let key_controller = gtk4::EventControllerKey::new();
+    key_controller.connect_key_pressed(move |_, key, _, _| {
+        let outcome = if key == gtk4::gdk::Key::Return || key == gtk4::gdk::Key::KP_Enter {
+            Some(ApprovalOutcome::AllowedOnce)
+        } else if key == gtk4::gdk::Key::Escape {
+            Some(ApprovalOutcome::Rejected)
+        } else {
+            None
+        };
+        if let Some(outcome) = outcome {
+            if let Some(tx) = s_key.borrow_mut().take() {
+                let _ = tx.send(outcome);
+            }
+            d_key.close();
+            return gtk4::glib::Propagation::Stop;
+        }
+        gtk4::glib::Propagation::Proceed
+    });
+    dialog.add_controller(key_controller);
     dialog.set_child(Some(&content_box));
+
 
     let s_close = sender_cell.clone();
     dialog.connect_closed(move |_| {
@@ -228,14 +293,18 @@ pub fn show_user_question_dialog(
 
         content_box.append(&button_box);
     } else {
-        let mut answer_entries = Vec::new();
+        let pages_state: Rc<RefCell<Vec<QuestionPageState>>> = Rc::new(RefCell::new(Vec::new()));
+        let page_stack = gtk4::Stack::builder()
+            .transition_type(gtk4::StackTransitionType::SlideLeftRight)
+            .build();
+        let mut first_groups: std::collections::HashMap<String, gtk4::CheckButton> =
+            std::collections::HashMap::new();
 
-        for q in &req.questions {
+        for (index, q) in req.questions.iter().enumerate() {
             let q_box = gtk4::Box::builder()
                 .orientation(gtk4::Orientation::Vertical)
                 .spacing(6)
                 .build();
-
             let prompt = gtk4::Label::builder()
                 .label(&q.question)
                 .css_classes(["heading"])
@@ -243,7 +312,6 @@ pub fn show_user_question_dialog(
                 .wrap(true)
                 .build();
             q_box.append(&prompt);
-
             if let Some(ref detail) = q.detail {
                 let detail_label = gtk4::Label::builder()
                     .label(detail)
@@ -254,15 +322,48 @@ pub fn show_user_question_dialog(
                 q_box.append(&detail_label);
             }
 
+            let mut checks = Vec::new();
+            if let Some(options) = &q.options {
+                let multi = q.multi_select.unwrap_or(false);
+                let group_key = format!("q-{}", index);
+                for option in options {
+                    let label = match &option.description {
+                        Some(description) if !description.is_empty() => {
+                            format!("{} — {}", option.label, description)
+                        }
+                        _ => option.label.clone(),
+                    };
+                    let check = gtk4::CheckButton::builder()
+                        .label(&label)
+                        .css_classes(["flat"])
+                        .build();
+                    if !multi {
+                        if let Some(first) = first_groups.get(&group_key) {
+                            check.set_group(Some(first));
+                        } else {
+                            first_groups.insert(group_key.clone(), check.clone());
+                        }
+                    }
+                    checks.push((option.label.clone(), check.clone()));
+                    q_box.append(&check);
+                }
+            }
+
             let entry = gtk4::Entry::builder()
-                .placeholder_text("Your answer...")
+                .placeholder_text("Custom answer...")
                 .build();
             q_box.append(&entry);
-            answer_entries.push((q.id.clone(), entry));
-
-            content_box.append(&q_box);
+            page_stack.add_named(&q_box, Some(&index.to_string()));
+            pages_state.borrow_mut().push(QuestionPageState {
+                id: q.id.clone(),
+                checks,
+                entry,
+            });
         }
 
+        content_box.append(&page_stack);
+
+        let index_cell = Rc::new(RefCell::new(0usize));
         let button_box = gtk4::Box::builder()
             .orientation(gtk4::Orientation::Horizontal)
             .spacing(10)
@@ -270,10 +371,76 @@ pub fn show_user_question_dialog(
             .margin_top(8)
             .build();
 
-        let cancel_btn = gtk4::Button::builder()
-            .label("Cancel")
-            .build();
+        let back_btn = gtk4::Button::builder().label("Back").build();
+        let back_stack = page_stack.clone();
+        let back_index = index_cell.clone();
+        back_btn.connect_clicked(move |_| {
+            let mut index = back_index.borrow_mut();
+            if *index > 0 {
+                *index -= 1;
+                back_stack.set_visible_child_name(&index.to_string());
+            }
+        });
+        button_box.append(&back_btn);
 
+        let skip_btn = gtk4::Button::builder().label("Skip").build();
+        let skip_stack = page_stack.clone();
+        let skip_index = index_cell.clone();
+        let skip_pages = pages_state.clone();
+        skip_btn.connect_clicked(move |_| {
+            let mut index = skip_index.borrow_mut();
+            if let Some(page) = skip_pages.borrow().get(*index) {
+                for (_, check) in &page.checks {
+                    check.set_active(false);
+                }
+                page.entry.set_text("");
+            }
+            if *index + 1 < skip_pages.borrow().len() {
+                *index += 1;
+                skip_stack.set_visible_child_name(&index.to_string());
+            }
+        });
+        button_box.append(&skip_btn);
+
+        let next_btn = gtk4::Button::builder()
+            .label("Next")
+            .css_classes(["suggested-action"])
+            .build();
+        let next_stack = page_stack.clone();
+        let next_index = index_cell.clone();
+        let next_pages = pages_state.clone();
+        let s_next = sender_cell.clone();
+        let d_next = dialog.clone();
+        next_btn.connect_clicked(move |_| {
+            let page_count = next_pages.borrow().len();
+            let mut index = next_index.borrow_mut();
+            if *index + 1 < page_count {
+                *index += 1;
+                next_stack.set_visible_child_name(&index.to_string());
+                return;
+            }
+            if let Some(tx) = s_next.borrow_mut().take() {
+                let mut answers = Vec::new();
+                for page in next_pages.borrow().iter() {
+                    let mut selected = Vec::new();
+                    for (label, check) in &page.checks {
+                        if check.is_active() {
+                            selected.push(label.clone());
+                        }
+                    }
+                    answers.push(crate::protocol::build_question_answer(
+                        &page.id,
+                        selected,
+                        &page.entry.text(),
+                    ));
+                }
+                let _ = tx.send(SdkUserQuestionResult::answers(answers));
+            }
+            d_next.close();
+        });
+        button_box.append(&next_btn);
+
+        let cancel_btn = gtk4::Button::builder().label("Cancel").build();
         let s_cancel = sender_cell.clone();
         let d_cancel = dialog.clone();
         cancel_btn.connect_clicked(move |_| {
@@ -283,29 +450,6 @@ pub fn show_user_question_dialog(
             d_cancel.close();
         });
         button_box.append(&cancel_btn);
-
-        let submit_btn = gtk4::Button::builder()
-            .label("Submit")
-            .css_classes(["suggested-action"])
-            .build();
-
-        let s_submit = sender_cell.clone();
-        let d_submit = dialog.clone();
-        submit_btn.connect_clicked(move |_| {
-            if let Some(tx) = s_submit.borrow_mut().take() {
-                let mut answers = Vec::new();
-                for (id, entry) in &answer_entries {
-                    let text = entry.text().to_string();
-                    answers.push(UserQuestionAnswer {
-                        id: id.clone(),
-                        selected: vec![text],
-                    });
-                }
-                let _ = tx.send(SdkUserQuestionResult::answers(answers));
-            }
-            d_submit.close();
-        });
-        button_box.append(&submit_btn);
 
         content_box.append(&button_box);
     }
