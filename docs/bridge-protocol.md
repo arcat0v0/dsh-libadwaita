@@ -256,6 +256,32 @@ GUI 连接 Socket 后的第一个请求必须为 `libadwaita/initialize`。在�
 | `libadwaita/command/execute` | 执行 slash 命令（如 `/plan off`） | `ctx.commands.execute` |
 | `libadwaita/skill/list` | 列出当前工作区可用的 skill 目录 | `ctx.skills.snapshot` |
 | `libadwaita/reference/list` | 列出 `@` 文件引用候选 | `ctx.fileReferences.list` |
+| `libadwaita/plugin/detail` | 读取 Bundle 详情文档 | `ctx.pluginManager.readBundleDetail` |
+| `libadwaita/plugin/inspect` | 预检安装规格（本地路径/包/git） | `ctx.pluginManager.inspect` |
+| `libadwaita/plugin/install` | 安装 Bundle | `ctx.pluginManager.installBundle` |
+| `libadwaita/plugin/cancel-install` | 取消安装 | `ctx.pluginManager.cancelInstall` |
+| `libadwaita/plugin/wait-install` | 等待安装结果 | `ctx.pluginManager.waitForInstall` |
+| `libadwaita/plugin/remove` | 卸载 Bundle | `ctx.pluginManager.removeBundle` |
+| `libadwaita/plugin/versions` | 列出版本 | `ctx.pluginManager.listVersions` |
+| `libadwaita/plugin/update` | 更新 Bundle | `ctx.pluginManager.updateBundle` |
+| `libadwaita/plugin/registries` | 读取 registry 列表 | `ctx.pluginManager.registries` |
+| `libadwaita/plugin/inventory` | 插件 + Bundle 清单 | `listPlugins` + `listBundles` |
+| `libadwaita/plugin/retry` | 重读插件清单 | 同 inventory |
+| `libadwaita/model/discover` | 用未保存配置发现模型 | `ctx.llm.discoverModels` |
+| `libadwaita/web-search/providers` | 列出 search/fetch provider | `ctx.web.listProviders` |
+| `libadwaita/subagent/list` | 递归列出子代理目录 | `ctx.subagents.listDescendants` |
+| `libadwaita/subagent/prompt` | 向子代理投递续接消息 | `ctx.subagents.prompt` |
+| `libadwaita/subagent/interrupt` | 用户中断子代理 | `ctx.subagents.interrupt/interruptByUser` |
+| `libadwaita/agent-team/get` | 读取 Team 开关与任务 | `ctx.agentTeams.isEnabled/listTasks` |
+| `libadwaita/agent-team/set-enabled` | 设置 Team 开关 | `ctx.agentTeams.setEnabled` |
+| `libadwaita/credentials/records/list` | 列出凭据记录元数据 | `CredentialProvider.listRecords` |
+| `libadwaita/credentials/records/read` | 读取脱敏凭据记录 | `describeRecord` + `readRecord`（脱敏） |
+| `libadwaita/credentials/records/modify` | 写入凭据记录 | `CredentialProvider.modifyRecord` |
+| `libadwaita/credentials/records/delete` | 删除凭据记录 | `CredentialProvider.deleteRecord` |
+| `libadwaita/account/status` | 读取账号状态 | `ctx.deepseekAccount.getState` |
+| `libadwaita/account/profile` | 读取账号资料 | `ctx.deepseekAccount.getProfile` |
+| `libadwaita/account/balance` | 读取账号余额 | `ctx.deepseekAccount.getBalance` |
+| `libadwaita/account/sign-out` | 退出账号 | `ctx.deepseekAccount.signOut` |
 
 ---
 
@@ -940,6 +966,36 @@ Bridge 直接投影上游 `agent.inbox`：`nextTurn` 为等待独立 turn 的排
 - **prompt 图片链路**：`session/prompt` 的 `{type:'image', data, mimeType, name?}` 先经上游 `ctx.attachments.saveImages` 验证与持久化，再以 `{type:'image', attachment: ref}` 进入模型历史，复用 base 的 `attachment-local` 限制。
 ---
 
+### 6.12 插件生命周期、模型发现、子代理、Team、凭据记录与账号
+
+#### 插件生命周期
+
+`plugin/detail` 参数 `{name, language?}`，`plugin/inspect` 参数 `{spec, registry?}`，`plugin/install` 参数 `{spec, enabled?, saveExact?, requestId?, approvedBuilds?, registry?}`，`plugin/cancel-install` / `wait-install` 参数 `{requestId}`，`plugin/remove` 参数 `{name}`，`plugin/versions` 参数 `{name, registry?}`，`plugin/update` 参数 `{name, version, registry?}`，`plugin/registries` 无参数。以上均返回 `{result: unknown}`，原样承载上游 plugin-manager 结果；`plugin/inventory` 返回 `{plugins, bundles}`，`plugin/retry` 为同一清单重读。安装过程通过 `plugin.install-state` / `plugin.install-log` 通知推送。网络安装需要用户环境可达 registry；本地路径/git/压缩包规格由上游 inspect/install 处理。
+
+#### 模型发现
+
+`model/discover` 参数 `{settingsNs, provider?, baseURL?, api?, apiKey?}` → `{models: unknown[]}`。调用 `ctx.llm.discoverModels`；`apiKey` 仅用于本次查询，bridge 不持久化。base 仅 `llm-pi-ai` 注册 discovery，且协议必须由该构建支持模型列表；不支持时返回 `-32044`。`web-search/providers` 返回 `{search, fetch}`，来自 `ctx.web.listProviders()`；base 组合下 provider 列表可能为空，不伪造。
+
+#### 子代理
+
+- `subagent/list` `{sessionId}` → `{entries}`（`ctx.subagents.listDescendants`）。
+- `subagent/prompt` `{sessionId, childSessionId, requestId?, delivery?: 'queue'|'steer', content}` → `{messageId}`；图片内容由上游 admission 处理。
+- `subagent/interrupt` `{sessionId, childSessionId}` → `{accepted:true}`；优先 `interruptByUser`，否则调用公开 `interrupt(child,{kind:'user'})`。
+
+#### Agent Team
+
+- `agent-team/get` `{sessionId}` → `{enabled, tasks}`。
+- `agent-team/set-enabled` `{sessionId, enabled}` → `{enabled}`。
+- base-only profile 下 `ctx.agentTeams` 在本机集成验证中未激活（见 §11），调用返回 `-32040`，不伪造 Team 状态。
+
+#### 凭据记录（脱敏）
+
+`credentials/records/list` → `{records:[{key,kind,configured,writable}]}`；`read` `{key}` 仅返回 `{configured,kind,writable,hasKey?,envNames?,payloadRedacted?}`，**绝不返回 key/payload**；`modify` `{key,record}` 写入 api-key/grant；`delete` `{key}` 幂等删除。复用 bridge 内存 CredentialProvider。
+
+#### 账号
+
+`account/status` 返回 `{state}`，`account/profile` / `account/balance` 返回只读资料/余额，`account/sign-out` 返回 `{state}`。均调用 base 的 `ctx.deepseekAccount`；浏览器 OAuth 登录流程依赖 Host webServer 回调，不在本协议内实现（见 §11）。
+
 ## 7. 服务端推流通知（Server-to-Client Notifications）
 
 通知一律无 `id` 字段。客户端被动接收并更新本地领域模型。
@@ -1251,6 +1307,15 @@ Bridge 直接投影上游 `agent.inbox`：`nextTurn` 为等待独立 turn 的排
 
 ---
 
+### 7.13 `plugin.install-state` / `plugin.install-log`：安装进度通知
+
+`plugin.install-state` 载荷 `{requestId, phase, attempt?}`，phase 为 `installing` / `cancelling` / `applying`。`plugin.install-log` 载荷 `{requestId?, jobId, argv, cwd, stream, text, exitCode?}`，为 pnpm/安装运行的一次输出块。
+
+```json
+{"jsonrpc":"2.0","method":"plugin.install-state","params":{"requestId":"req-1","phase":"installing"}}
+{"jsonrpc":"2.0","method":"plugin.install-log","params":{"requestId":"req-1","jobId":"job-1","argv":["pnpm","add","file:/tmp/plugin"],"cwd":"/home/u/.local/share/dsh-libadwaita/profiles/libadwaita","stream":"stdout","text":"Progress: resolved 1","exitCode":0}}
+```
+
 ## 8. 双向交互请求（Server-to-Client Requests）与 Fail-Closed 语义
 
 此类消息由 bridge 主动发起，GUI 作为响应端。GUI 处理完毕后必须回传具有相同 `id` 的响应帧。
@@ -1428,6 +1493,13 @@ Bridge 直接投影上游 `agent.inbox`：`nextTurn` 为等待独立 turn 的排
 | `-32035` | `ATTACHMENT_NOT_FOUND` | 指定会话附件不存在 |
 | `-32036` | `ATTACHMENT_TOO_LARGE` | 附件超过 16 MiB 限制 |
 | `-32037` | `ATTACHMENT_INVALID` | 附件 id、base64、文件名或文本编码非法 |
+| `-32038` | `PLUGIN_OPERATION_FAILED` | 插件管理操作失败或服务不可用 |
+| `-32039` | `SUBAGENTS_UNAVAILABLE` | 子代理服务/中断能力不可用 |
+| `-32040` | `TEAM_UNAVAILABLE` | Agent Team 服务在当前组合中不可用 |
+| `-32041` | `TERMINAL_UNAVAILABLE` | 终端服务在当前组合中不可用 |
+| `-32042` | `TERMINAL_NOT_FOUND` | 终端 id 不存在或跨会话不可见 |
+| `-32043` | `ACCOUNT_UNAVAILABLE` | 账号服务不可用 |
+| `-32044` | `MODEL_DISCOVERY_FAILED` | 模型发现未注册、协议不支持列表或请求失败 |
 
 ---
 
@@ -1542,6 +1614,18 @@ Bridge 直接投影上游 `agent.inbox`：`nextTurn` 为等待独立 turn 的排
 9. **G04 全文搜索保持禁用**：base 的 `session-query-sqlite` 以 `openAt: never` 配置（`packages/bundle/base/cordis.patch.yml` 第 157–161 行），因此 `session/search` 只做标题与 cwd 元数据匹配，`fullText` 恒为 `false`。
 
 10. **G28 中 `remainingMs` 不伪造**：上游 `attachWait` 是异步流（`packages/interaction/user-questions/src/index.ts`），bridge 以原请求快照支持 `question/reopen`，不承诺静态剩余毫秒值。
+
+11. **G05 Terminal 为 base 阻塞缺口**：交互终端核心 `@deepseek-ai/dsh-terminal` 与 `@deepseek-ai/dsh-terminal-bash` 未在 `packages/bundle/base/cordis.patch.yml` 挂载；仅 `packages/bundle/web-app` 与 `packages/api/terminal-controller` 组合使用。本版未启用 bridge-local PTY，`terminal/*` 方法未定义，GUI 右栏终端标记缺失。
+
+12. **G07 Office→PDF 为 base 阻塞缺口**：`ctx.officeToPdf` 属于 `packages/bundle/web-app` 的文档预览组合（`packages/api/remotes` 的 officeToPdf Remote、web-app e2e 测试）；base 不提供该服务。GUI 回退为系统默认应用打开。
+
+13. **G09 Agent Team 服务在 base-only 环境中未激活**：base patch 第 366–367 行虽然插入 `agent-team` 行，但本机集成探针在启动后 `ctx.get('agentTeams')` 及 loose 读取均为 `undefined`，`agent-team/*` 返回 `-32040`。协议不伪造 Team 状态。
+
+14. **G17 模型发现/Provider 目录的 base 限制**：base 只有 `llm-pi-ai` 注册 `discoverModels`，且具体协议需该构建支持模型列表；不支持时返回 `-32044`。`web-search/providers` 返回 `ctx.web.listProviders()`，本机 base-only 组合中列表为空；协议不合成 provider。
+
+15. **G18 浏览器登录不在协议内**：`ctx.deepseekAccount` 的 OAuth 回调依赖 Host webServer（`packages/credentials/deepseek-account-platform`），base-only 组合无 webServer；本协议只提供状态/资料/余额/退出。
+
+16. **G27 Cordis define 实例控制为 base 阻塞缺口**：`cordis_define` 动态实例控制属于 `packages/extensions/ui-cordis`/web-app 层，base 不挂载对应 Host runner；协议不定义 `cordis-control/*`。
 
 ---
 

@@ -6,6 +6,10 @@ import { buildForkSeed } from '@deepseek-ai/dsh-session/fork';
 import type { BridgeCredentials } from './credentials.js';
 import { BridgeServer } from './server.js';
 import {
+  type AccountBalanceResult,
+  type AccountProfileResult,
+  type AccountSignOutResult,
+  type AccountStatusResult,
   type AssistantStreamFrame,
   type AttachmentReadParams,
   type AttachmentReadResult,
@@ -18,6 +22,13 @@ import {
   type CommandExecuteResult,
   type CommandListParams,
   type CommandListResult,
+  type CredentialRecordDeleteParams,
+  type CredentialRecordItem,
+  type CredentialRecordModifyParams,
+  type CredentialRecordMutationResult,
+  type CredentialRecordReadParams,
+  type CredentialRecordReadResult,
+  type CredentialRecordsListResult,
   DSH_PINNED_VERSION,
   type FileEntry,
   type FilesListParams,
@@ -52,14 +63,27 @@ import {
   type MessageFeedbackPutParams,
   type MessageFeedbackPutResult,
   type ModelCatalogResult,
+  type ModelDiscoverParams,
+  type ModelDiscoverResult,
   type PermissionCatalogResult,
   type PermissionGetParams,
   type PermissionGetResult,
   type PermissionSetParams,
   type PermissionSetResult,
   type PermissionUpdatedNotification,
+  type PluginDetailParams,
+  type PluginInspectParams,
+  type PluginInstallLogNotification,
+  type PluginInstallParams,
+  type PluginInstallStateNotification,
+  type PluginInventoryResult,
   type PluginListResult,
+  type PluginOperationResult,
+  type PluginRemoveParams,
+  type PluginRequestParams,
   type PluginToggleResult,
+  type PluginUpdateParams,
+  type PluginVersionsParams,
   type QuestionReopenParams,
   type QuestionReopenResult,
   type QueueEditParams,
@@ -121,10 +145,21 @@ import {
   type SkillListParams,
   type SkillListResult,
   type StreamChunk,
+  type SubagentInterruptParams,
+  type SubagentInterruptResult,
+  type SubagentListParams,
+  type SubagentListResult,
+  type SubagentPromptParams,
+  type SubagentPromptResult,
+  type TeamGetParams,
+  type TeamGetResult,
+  type TeamSetParams,
+  type TeamSetResult,
   type TodoItem,
   type ToolResultUpdatedNotification,
   type ToolResultWatchParams,
   type ToolResultWatchResult,
+  type WebProvidersResult,
   type WorkspaceChangesParams,
   type WorkspaceChangesResult,
   type WorkspaceCreateParams,
@@ -421,6 +456,42 @@ export class BridgeService extends Service {
       }
     });
 
+    this.ctx.on('plugin-manager/install-state', (payload: unknown) => {
+      if (!payload || typeof payload !== 'object') return;
+      const p = payload as { requestId?: string; phase?: string; attempt?: unknown };
+      if (!p.requestId || !p.phase) return;
+      const notification: PluginInstallStateNotification = {
+        requestId: p.requestId,
+        phase: p.phase,
+        ...(p.attempt === undefined ? {} : { attempt: p.attempt }),
+      };
+      this.server.notify('plugin.install-state', notification);
+    });
+
+    this.ctx.on('plugin-manager/install-log', (payload: unknown) => {
+      if (!payload || typeof payload !== 'object') return;
+      const p = payload as {
+        requestId?: string;
+        jobId?: string;
+        argv?: string[];
+        cwd?: string;
+        stream?: 'stdout' | 'stderr';
+        text?: string;
+        exitCode?: number | null;
+      };
+      if (!p.jobId || !p.stream || p.text === undefined) return;
+      const notification: PluginInstallLogNotification = {
+        ...(p.requestId === undefined ? {} : { requestId: p.requestId }),
+        jobId: p.jobId,
+        argv: p.argv ?? [],
+        cwd: p.cwd ?? '',
+        stream: p.stream,
+        text: p.text,
+        ...(p.exitCode === undefined ? {} : { exitCode: p.exitCode }),
+      };
+      this.server.notify('plugin.install-log', notification);
+    });
+
     this.ctx.on('settings/document-updated', (namespace: string, revision: number) => {
       const notification: SettingsUpdatedNotification = { namespace, revision };
       this.server.notify('settings.updated', notification);
@@ -655,6 +726,58 @@ export class BridgeService extends Service {
         return this.handlePluginEnable(params as unknown as { id: string });
       case 'libadwaita/plugin/disable':
         return this.handlePluginDisable(params as unknown as { id: string });
+      case 'libadwaita/plugin/detail':
+        return this.handlePluginDetail(params as unknown as PluginDetailParams);
+      case 'libadwaita/plugin/inspect':
+        return this.handlePluginInspect(params as unknown as PluginInspectParams);
+      case 'libadwaita/plugin/install':
+        return this.handlePluginInstall(params as unknown as PluginInstallParams);
+      case 'libadwaita/plugin/cancel-install':
+        return this.handlePluginCancelInstall(params as unknown as PluginRequestParams);
+      case 'libadwaita/plugin/wait-install':
+        return this.handlePluginWaitInstall(params as unknown as PluginRequestParams);
+      case 'libadwaita/plugin/remove':
+        return this.handlePluginRemove(params as unknown as PluginRemoveParams);
+      case 'libadwaita/plugin/versions':
+        return this.handlePluginVersions(params as unknown as PluginVersionsParams);
+      case 'libadwaita/plugin/update':
+        return this.handlePluginUpdate(params as unknown as PluginUpdateParams);
+      case 'libadwaita/plugin/registries':
+        return this.handlePluginRegistries();
+      case 'libadwaita/plugin/inventory':
+        return this.handlePluginInventory();
+      case 'libadwaita/plugin/retry':
+        return this.handlePluginInventory();
+      case 'libadwaita/model/discover':
+        return this.handleModelDiscover(params as unknown as ModelDiscoverParams);
+      case 'libadwaita/web-search/providers':
+        return this.handleWebProviders();
+      case 'libadwaita/subagent/list':
+        return this.handleSubagentList(params as unknown as SubagentListParams);
+      case 'libadwaita/subagent/prompt':
+        return this.handleSubagentPrompt(params as unknown as SubagentPromptParams);
+      case 'libadwaita/subagent/interrupt':
+        return this.handleSubagentInterrupt(params as unknown as SubagentInterruptParams);
+      case 'libadwaita/agent-team/get':
+        return this.handleTeamGet(params as unknown as TeamGetParams);
+      case 'libadwaita/agent-team/set-enabled':
+        return this.handleTeamSet(params as unknown as TeamSetParams);
+      case 'libadwaita/credentials/records/list':
+        return this.handleCredentialRecordsList();
+      case 'libadwaita/credentials/records/read':
+        return this.handleCredentialRecordRead(params as unknown as CredentialRecordReadParams);
+      case 'libadwaita/credentials/records/modify':
+        return this.handleCredentialRecordModify(params as unknown as CredentialRecordModifyParams);
+      case 'libadwaita/credentials/records/delete':
+        return this.handleCredentialRecordDelete(params as unknown as CredentialRecordDeleteParams);
+      case 'libadwaita/account/status':
+        return this.handleAccountStatus();
+      case 'libadwaita/account/profile':
+        return this.handleAccountProfile();
+      case 'libadwaita/account/balance':
+        return this.handleAccountBalance();
+      case 'libadwaita/account/sign-out':
+        return this.handleAccountSignOut();
       case 'libadwaita/credentials/status':
         return this.handleCredentialsStatus();
       case 'libadwaita/credentials/inject':
@@ -2522,6 +2645,515 @@ export class BridgeService extends Service {
       encoding: 'base64',
       data: bytes.toString('base64'),
     };
+  }
+
+  private pluginManager():
+    | {
+        readBundleDetail?: (name: string, language: string, options?: object) => Promise<unknown>;
+        inspect?: (spec: string, options?: object, signal?: AbortSignal) => Promise<unknown>;
+        installBundle?: (spec: string, options?: object) => Promise<unknown>;
+        cancelInstall?: (requestId: string) => Promise<unknown>;
+        waitForInstall?: (requestId: string) => Promise<unknown>;
+        removeBundle?: (name: string) => Promise<unknown>;
+        listVersions?: (name: string, options?: object, signal?: AbortSignal) => Promise<unknown>;
+        updateBundle?: (name: string, version: string, options?: object) => Promise<unknown>;
+        registries?: () => Promise<unknown>;
+        listPlugins?: () => Promise<unknown[]>;
+        listBundles?: () => Promise<unknown[]>;
+      }
+    | undefined {
+    return this.ctx.get('pluginManager') as
+      | {
+          readBundleDetail?: (name: string, language: string, options?: object) => Promise<unknown>;
+          inspect?: (spec: string, options?: object, signal?: AbortSignal) => Promise<unknown>;
+          installBundle?: (spec: string, options?: object) => Promise<unknown>;
+          cancelInstall?: (requestId: string) => Promise<unknown>;
+          waitForInstall?: (requestId: string) => Promise<unknown>;
+          removeBundle?: (name: string) => Promise<unknown>;
+          listVersions?: (name: string, options?: object, signal?: AbortSignal) => Promise<unknown>;
+          updateBundle?: (name: string, version: string, options?: object) => Promise<unknown>;
+          registries?: () => Promise<unknown>;
+          listPlugins?: () => Promise<unknown[]>;
+          listBundles?: () => Promise<unknown[]>;
+        }
+      | undefined;
+  }
+
+  private async pluginOperation<T>(operation: () => Promise<T>): Promise<PluginOperationResult> {
+    try {
+      return { result: await operation() };
+    } catch (error) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.PLUGIN_OPERATION_FAILED,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  private async handlePluginDetail(params: PluginDetailParams): Promise<PluginOperationResult> {
+    const manager = this.pluginManager();
+    if (!manager?.readBundleDetail) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.PLUGIN_OPERATION_FAILED,
+        'plugin manager is not available',
+      );
+    }
+    return this.pluginOperation(() =>
+      manager.readBundleDetail!(params.name, params.language ?? 'en'),
+    );
+  }
+
+  private async handlePluginInspect(params: PluginInspectParams): Promise<PluginOperationResult> {
+    const manager = this.pluginManager();
+    if (!manager?.inspect) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.PLUGIN_OPERATION_FAILED,
+        'plugin manager is not available',
+      );
+    }
+    return this.pluginOperation(() =>
+      manager.inspect!(
+        params.spec,
+        params.registry === undefined ? undefined : { registry: params.registry },
+        new AbortController().signal,
+      ),
+    );
+  }
+
+  private async handlePluginInstall(params: PluginInstallParams): Promise<PluginOperationResult> {
+    const manager = this.pluginManager();
+    if (!manager?.installBundle) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.PLUGIN_OPERATION_FAILED,
+        'plugin manager is not available',
+      );
+    }
+    return this.pluginOperation(() =>
+      manager.installBundle!(params.spec, {
+        ...(params.enabled === undefined ? {} : { enabled: params.enabled }),
+        ...(params.saveExact === undefined ? {} : { saveExact: params.saveExact }),
+        ...(params.requestId === undefined ? {} : { requestId: params.requestId }),
+        ...(params.approvedBuilds === undefined ? {} : { approvedBuilds: params.approvedBuilds }),
+        ...(params.registry === undefined ? {} : { registry: params.registry }),
+      }),
+    );
+  }
+
+  private async handlePluginCancelInstall(
+    params: PluginRequestParams,
+  ): Promise<PluginOperationResult> {
+    const manager = this.pluginManager();
+    if (!manager?.cancelInstall) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.PLUGIN_OPERATION_FAILED,
+        'plugin manager is not available',
+      );
+    }
+    return this.pluginOperation(() => manager.cancelInstall!(params.requestId));
+  }
+
+  private async handlePluginWaitInstall(
+    params: PluginRequestParams,
+  ): Promise<PluginOperationResult> {
+    const manager = this.pluginManager();
+    if (!manager?.waitForInstall) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.PLUGIN_OPERATION_FAILED,
+        'plugin manager is not available',
+      );
+    }
+    return this.pluginOperation(() => manager.waitForInstall!(params.requestId));
+  }
+
+  private async handlePluginRemove(params: PluginRemoveParams): Promise<PluginOperationResult> {
+    const manager = this.pluginManager();
+    if (!manager?.removeBundle) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.PLUGIN_OPERATION_FAILED,
+        'plugin manager is not available',
+      );
+    }
+    return this.pluginOperation(() => manager.removeBundle!(params.name));
+  }
+
+  private async handlePluginVersions(params: PluginVersionsParams): Promise<PluginOperationResult> {
+    const manager = this.pluginManager();
+    if (!manager?.listVersions) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.PLUGIN_OPERATION_FAILED,
+        'plugin manager is not available',
+      );
+    }
+    return this.pluginOperation(() =>
+      manager.listVersions!(
+        params.name,
+        params.registry === undefined ? undefined : { registry: params.registry },
+        new AbortController().signal,
+      ),
+    );
+  }
+
+  private async handlePluginUpdate(params: PluginUpdateParams): Promise<PluginOperationResult> {
+    const manager = this.pluginManager();
+    if (!manager?.updateBundle) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.PLUGIN_OPERATION_FAILED,
+        'plugin manager is not available',
+      );
+    }
+    return this.pluginOperation(() =>
+      manager.updateBundle!(
+        params.name,
+        params.version,
+        params.registry === undefined ? undefined : { registry: params.registry },
+      ),
+    );
+  }
+
+  private async handlePluginRegistries(): Promise<PluginOperationResult> {
+    const manager = this.pluginManager();
+    if (!manager?.registries) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.PLUGIN_OPERATION_FAILED,
+        'plugin manager is not available',
+      );
+    }
+    return this.pluginOperation(() => manager.registries!());
+  }
+
+  private async handlePluginInventory(): Promise<PluginInventoryResult> {
+    const manager = this.pluginManager();
+    if (!manager?.listPlugins || !manager.listBundles) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.PLUGIN_OPERATION_FAILED,
+        'plugin manager is not available',
+      );
+    }
+    return {
+      plugins: await manager.listPlugins(),
+      bundles: await manager.listBundles(),
+    };
+  }
+
+  private async handleModelDiscover(params: ModelDiscoverParams): Promise<ModelDiscoverResult> {
+    const llm = this.ctx.get('llm') as unknown as {
+      discoverModels?: (
+        settingsNs: string,
+        request: object,
+        signal: AbortSignal,
+      ) => Promise<unknown[]>;
+    };
+    if (!llm?.discoverModels) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.MODEL_DISCOVERY_FAILED,
+        'model discovery is not available',
+      );
+    }
+    try {
+      const models = await llm.discoverModels(
+        params.settingsNs,
+        {
+          ...(params.provider === undefined ? {} : { provider: params.provider }),
+          ...(params.baseURL === undefined ? {} : { baseURL: params.baseURL }),
+          ...(params.api === undefined ? {} : { api: params.api }),
+          ...(params.apiKey === undefined ? {} : { apiKey: params.apiKey }),
+        },
+        new AbortController().signal,
+      );
+      return { models };
+    } catch (error) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.MODEL_DISCOVERY_FAILED,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  private async handleWebProviders(): Promise<WebProvidersResult> {
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const web = this.ctx.get('web') as unknown as {
+        listProviders?: () => { search?: unknown[]; fetch?: unknown[] };
+      };
+      if (web?.listProviders) {
+        const providers = web.listProviders();
+        if ((providers.search?.length ?? 0) + (providers.fetch?.length ?? 0) > 0) {
+          return { search: providers.search ?? [], fetch: providers.fetch ?? [] };
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return { search: [], fetch: [] };
+  }
+
+  private async handleSubagentList(params: SubagentListParams): Promise<SubagentListResult> {
+    const subagents = await this.waitForService<{
+      listDescendants?: (sessionId: string, signal?: AbortSignal) => Promise<unknown[]>;
+    }>('subagents');
+    if (!subagents?.listDescendants) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.SUBAGENTS_UNAVAILABLE,
+        'subagent service is not available',
+      );
+    }
+    return {
+      entries: await subagents.listDescendants(params.sessionId, new AbortController().signal),
+    };
+  }
+
+  private async handleSubagentPrompt(params: SubagentPromptParams): Promise<SubagentPromptResult> {
+    const subagents = await this.waitForService<{
+      prompt?: (request: object, signal: AbortSignal) => Promise<{ messageId: string }>;
+    }>('subagents');
+    if (!subagents?.prompt) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.SUBAGENTS_UNAVAILABLE,
+        'subagent service is not available',
+      );
+    }
+    try {
+      const result = await subagents.prompt(
+        {
+          requestId: params.requestId ?? crypto.randomUUID(),
+          childSessionId: params.childSessionId,
+          delivery: params.delivery ?? 'queue',
+          content: params.content,
+        },
+        new AbortController().signal,
+      );
+      return { messageId: result.messageId };
+    } catch (error) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.SUBAGENTS_UNAVAILABLE,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  private async handleSubagentInterrupt(
+    params: SubagentInterruptParams,
+  ): Promise<SubagentInterruptResult> {
+    const subagents = await this.waitForService<{
+      interruptByUser?: (childSessionId: string) => { accepted: true };
+      interrupt?: (id: string, authority: object) => void;
+    }>('subagents');
+    if (!subagents) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.SUBAGENTS_UNAVAILABLE,
+        'subagent service is not available',
+      );
+    }
+    if (subagents.interruptByUser) return subagents.interruptByUser(params.childSessionId);
+    const interrupt = subagents.interrupt;
+    if (!interrupt) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.SUBAGENTS_UNAVAILABLE,
+        'subagent interrupt is not available',
+      );
+    }
+    interrupt.call(subagents, params.childSessionId, { kind: 'user' });
+    return { accepted: true };
+  }
+
+  private async handleTeamGet(params: TeamGetParams): Promise<TeamGetResult> {
+    const teams = await this.waitForService<{
+      isEnabled: (agent: AgentLike) => boolean;
+      listTasks: (agent: AgentLike) => unknown[];
+    }>('agentTeams');
+    if (!teams) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.TEAM_UNAVAILABLE,
+        'agent team service is not available',
+      );
+    }
+    const { agent } = await this.resolveSessionEntry(params.sessionId);
+    if (!agent) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.SESSION_NOT_FOUND,
+        `session not found: ${params.sessionId}`,
+      );
+    }
+    return { enabled: teams.isEnabled(agent), tasks: teams.listTasks(agent) };
+  }
+
+  private async handleTeamSet(params: TeamSetParams): Promise<TeamSetResult> {
+    const teams = await this.waitForService<{
+      isEnabled: (agent: AgentLike) => boolean;
+      setEnabled: (agent: AgentLike, enabled: boolean, signal?: AbortSignal) => Promise<void>;
+    }>('agentTeams');
+    if (!teams) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.TEAM_UNAVAILABLE,
+        'agent team service is not available',
+      );
+    }
+    const { agent } = await this.resolveSessionEntry(params.sessionId);
+    if (!agent) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.SESSION_NOT_FOUND,
+        `session not found: ${params.sessionId}`,
+      );
+    }
+    await teams.setEnabled(agent, params.enabled, new AbortController().signal);
+    return { enabled: teams.isEnabled(agent) };
+  }
+
+  private async handleCredentialRecordsList(): Promise<CredentialRecordsListResult> {
+    const credentials = this.ctx.get('credentials') as unknown as BridgeCredentials | undefined;
+    if (!credentials?.listRecords) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.CREDENTIAL_REJECTED,
+        'credential service is not available',
+      );
+    }
+    const entries = await credentials.listRecords();
+    const records: CredentialRecordItem[] = [];
+    for (const entry of entries) {
+      const info = await credentials.describeRecord(entry.key);
+      records.push({
+        key: entry.key,
+        kind: entry.kind,
+        configured: info.configured,
+        writable: info.writable,
+      });
+    }
+    return { records };
+  }
+
+  private async handleCredentialRecordRead(
+    params: CredentialRecordReadParams,
+  ): Promise<CredentialRecordReadResult> {
+    const credentials = this.ctx.get('credentials') as unknown as BridgeCredentials | undefined;
+    if (!credentials?.readRecord) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.CREDENTIAL_REJECTED,
+        'credential service is not available',
+      );
+    }
+    const info = await credentials.describeRecord(params.key as never);
+    const record = await credentials.readRecord(params.key as never);
+    if (!record) {
+      return { key: params.key, configured: false, writable: info.writable };
+    }
+    if (record.kind === 'api-key') {
+      return {
+        key: params.key,
+        configured: info.configured,
+        kind: record.kind,
+        writable: info.writable,
+        hasKey: record.key !== undefined && record.key.length > 0,
+        envNames: Object.keys(record.env ?? {}),
+      };
+    }
+    return {
+      key: params.key,
+      configured: info.configured,
+      kind: record.kind,
+      writable: info.writable,
+      payloadRedacted: true,
+    };
+  }
+
+  private async handleCredentialRecordModify(
+    params: CredentialRecordModifyParams,
+  ): Promise<CredentialRecordMutationResult> {
+    const credentials = this.ctx.get('credentials') as unknown as BridgeCredentials | undefined;
+    if (!credentials?.modifyRecord) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.CREDENTIAL_REJECTED,
+        'credential service is not available',
+      );
+    }
+    await credentials.modifyRecord(params.key as never, async () => params.record as never);
+    return {
+      metadata: await this.handleCredentialRecordRead({ key: params.key }),
+    };
+  }
+
+  private async handleCredentialRecordDelete(
+    params: CredentialRecordDeleteParams,
+  ): Promise<CredentialRecordMutationResult> {
+    const credentials = this.ctx.get('credentials') as unknown as BridgeCredentials | undefined;
+    if (!credentials?.deleteRecord) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.CREDENTIAL_REJECTED,
+        'credential service is not available',
+      );
+    }
+    await credentials.deleteRecord(params.key as never);
+    return {
+      deleted: true,
+      metadata: {
+        key: params.key,
+        configured: false,
+        writable: true,
+      },
+    };
+  }
+
+  private accountService():
+    | {
+        getState: () => Promise<AccountStatusResult['state']>;
+        getProfile: (client: object) => Promise<AccountProfileResult['profile']>;
+        getBalance: (client: object) => Promise<AccountBalanceResult['balance']>;
+        signOut: (client: object) => Promise<AccountSignOutResult['state']>;
+      }
+    | undefined {
+    return this.ctx.get('deepseekAccount') as
+      | {
+          getState: () => Promise<AccountStatusResult['state']>;
+          getProfile: (client: object) => Promise<AccountProfileResult['profile']>;
+          getBalance: (client: object) => Promise<AccountBalanceResult['balance']>;
+          signOut: (client: object) => Promise<AccountSignOutResult['state']>;
+        }
+      | undefined;
+  }
+
+  private accountClient(): object {
+    return { version: '0.1.0', locale: 'en', timezoneOffsetSeconds: 0 };
+  }
+
+  private async handleAccountStatus(): Promise<AccountStatusResult> {
+    const account = this.accountService();
+    if (!account) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.ACCOUNT_UNAVAILABLE,
+        'account service is not available',
+      );
+    }
+    return { state: await account.getState() };
+  }
+
+  private async handleAccountProfile(): Promise<AccountProfileResult> {
+    const account = this.accountService();
+    if (!account) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.ACCOUNT_UNAVAILABLE,
+        'account service is not available',
+      );
+    }
+    return { profile: await account.getProfile(this.accountClient()) };
+  }
+
+  private async handleAccountBalance(): Promise<AccountBalanceResult> {
+    const account = this.accountService();
+    if (!account) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.ACCOUNT_UNAVAILABLE,
+        'account service is not available',
+      );
+    }
+    return { balance: await account.getBalance(this.accountClient()) };
+  }
+
+  private async handleAccountSignOut(): Promise<AccountSignOutResult> {
+    const account = this.accountService();
+    if (!account) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.ACCOUNT_UNAVAILABLE,
+        'account service is not available',
+      );
+    }
+    return { state: await account.signOut(this.accountClient()) };
   }
   private async handlePluginList(): Promise<PluginListResult> {
     const pm = this.ctx.get('pluginManager') as unknown as {

@@ -32,6 +32,11 @@ export class MockLlmServer {
         this.defaultResponse(res);
         return;
       }
+      if (req.method === 'GET' && req.url === '/anthropic/v1/models') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ data: [{ id: 'mock-model', object: 'model' }] }));
+        return;
+      }
       res.statusCode = 404;
       res.end();
     });

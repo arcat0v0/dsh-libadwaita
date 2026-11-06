@@ -40,6 +40,13 @@ export const BRIDGE_ERROR_CODES = {
   ATTACHMENT_NOT_FOUND: -32035,
   ATTACHMENT_TOO_LARGE: -32036,
   ATTACHMENT_INVALID: -32037,
+  PLUGIN_OPERATION_FAILED: -32038,
+  SUBAGENTS_UNAVAILABLE: -32039,
+  TEAM_UNAVAILABLE: -32040,
+  TERMINAL_UNAVAILABLE: -32041,
+  TERMINAL_NOT_FOUND: -32042,
+  ACCOUNT_UNAVAILABLE: -32043,
+  MODEL_DISCOVERY_FAILED: -32044,
 } as const;
 
 export class BridgeError extends Error {
@@ -975,6 +982,254 @@ export interface AttachmentReadResult {
   encoding: 'base64' | 'text';
   data: string;
 }
+
+export interface PluginDetailParams {
+  name: string;
+  language?: string;
+}
+
+export interface PluginInspectParams {
+  spec: string;
+  registry?: string;
+}
+
+export interface PluginInstallParams {
+  spec: string;
+  enabled?: boolean;
+  saveExact?: boolean;
+  requestId?: string;
+  approvedBuilds?: string[];
+  registry?: string;
+}
+
+export interface PluginRequestParams {
+  requestId: string;
+}
+
+export interface PluginRemoveParams {
+  name: string;
+}
+
+export interface PluginVersionsParams {
+  name: string;
+  registry?: string;
+}
+
+export interface PluginUpdateParams {
+  name: string;
+  version: string;
+  registry?: string;
+}
+
+export interface PluginInventoryResult {
+  plugins: unknown[];
+  bundles: unknown[];
+}
+
+export interface PluginOperationResult {
+  result: unknown;
+}
+
+export interface PluginInstallStateNotification {
+  requestId: string;
+  phase: string;
+  attempt?: unknown;
+}
+
+export interface PluginInstallLogNotification {
+  requestId?: string;
+  jobId: string;
+  argv: string[];
+  cwd: string;
+  stream: 'stdout' | 'stderr';
+  text: string;
+  exitCode?: number | null;
+}
+
+export interface ModelDiscoverParams {
+  settingsNs: string;
+  provider?: string;
+  baseURL?: string;
+  api?: string;
+  apiKey?: string;
+}
+
+export interface ModelDiscoverResult {
+  models: unknown[];
+}
+
+export interface WebProvidersResult {
+  search: unknown[];
+  fetch: unknown[];
+}
+
+export interface SubagentListParams {
+  sessionId: string;
+}
+
+export interface SubagentListResult {
+  entries: unknown[];
+}
+
+export interface SubagentPromptParams {
+  sessionId: string;
+  childSessionId: string;
+  requestId?: string;
+  delivery?: 'queue' | 'steer';
+  content: Array<
+    | { type: 'text'; text: string }
+    | { type: 'image'; data: string; mimeType: string; name?: string }
+  >;
+}
+
+export interface SubagentPromptResult {
+  messageId: string;
+}
+
+export interface SubagentInterruptParams {
+  sessionId: string;
+  childSessionId: string;
+}
+
+export interface SubagentInterruptResult {
+  accepted: true;
+}
+
+export interface TeamGetParams {
+  sessionId: string;
+}
+
+export interface TeamGetResult {
+  enabled: boolean;
+  tasks: unknown[];
+}
+
+export interface TeamSetParams {
+  sessionId: string;
+  enabled: boolean;
+}
+
+export interface TeamSetResult {
+  enabled: boolean;
+}
+
+export interface TerminalCreateParams {
+  sessionId: string;
+  command?: string;
+  args?: string[];
+  cwd?: string;
+  cols?: number;
+  rows?: number;
+}
+
+export interface TerminalCreateResult {
+  terminalId: string;
+  sessionId: string;
+  pid: number;
+  cwd: string;
+}
+
+export interface TerminalListParams {
+  sessionId: string;
+}
+
+export interface TerminalListResult {
+  terminals: Array<{
+    terminalId: string;
+    pid: number;
+    cwd: string;
+    running: boolean;
+    exitCode?: number;
+  }>;
+}
+
+export interface TerminalInputParams {
+  sessionId: string;
+  terminalId: string;
+  data: string;
+}
+
+export interface TerminalResizeParams {
+  sessionId: string;
+  terminalId: string;
+  cols: number;
+  rows: number;
+}
+
+export interface TerminalCloseParams {
+  sessionId: string;
+  terminalId: string;
+}
+
+export interface TerminalOutputNotification {
+  sessionId: string;
+  terminalId: string;
+  data: string;
+}
+
+export interface TerminalExitNotification {
+  sessionId: string;
+  terminalId: string;
+  exitCode: number;
+  signal?: number;
+}
+
+export interface CredentialRecordItem {
+  key: string;
+  kind: string;
+  configured: boolean;
+  writable: boolean;
+}
+
+export interface CredentialRecordsListResult {
+  records: CredentialRecordItem[];
+}
+
+export interface CredentialRecordReadParams {
+  key: string;
+}
+
+export interface CredentialRecordReadResult {
+  key: string;
+  configured: boolean;
+  kind?: string;
+  writable: boolean;
+  hasKey?: boolean;
+  envNames?: string[];
+  payloadRedacted?: true;
+}
+
+export interface CredentialRecordModifyParams {
+  key: string;
+  record:
+    | { kind: 'api-key'; key?: string; env?: Record<string, string> }
+    | { kind: 'grant'; payload: unknown };
+}
+
+export interface CredentialRecordDeleteParams {
+  key: string;
+}
+
+export interface CredentialRecordMutationResult {
+  deleted?: true;
+  metadata: CredentialRecordReadResult;
+}
+
+export interface AccountStatusResult {
+  state: unknown;
+}
+
+export interface AccountProfileResult {
+  profile: unknown | null;
+}
+
+export interface AccountBalanceResult {
+  balance: unknown | null;
+}
+
+export interface AccountSignOutResult {
+  state: unknown;
+}
 declare module '@deepseek-ai/cordis' {
   interface Events {
     'approval/request'(req: unknown, next: () => Promise<unknown>): Promise<unknown>;
@@ -984,5 +1239,7 @@ declare module '@deepseek-ai/cordis' {
     'agent/status'(payload: unknown): void;
     'settings/document-updated'(namespace: string, revision: number): void;
     'goal/activation-changed'(payload: unknown): void;
+    'plugin-manager/install-state'(payload: unknown): void;
+    'plugin-manager/install-log'(payload: unknown): void;
   }
 }
