@@ -6,6 +6,7 @@ pub struct Composer {
     send_button: gtk4::Button,
     model_button: gtk4::Button,
     permission_button: gtk4::Button,
+    continue_button: gtk4::Button,
     status_label: gtk4::Label,
 }
 
@@ -85,6 +86,14 @@ impl Composer {
             .build();
         action_bar.append(&status_label);
 
+        let continue_button = gtk4::Button::builder()
+            .label("Continue")
+            .tooltip_text("Continue the failed generation")
+            .css_classes(["flat", "suggested-action"])
+            .visible(false)
+            .build();
+        action_bar.append(&continue_button);
+
         let send_button = gtk4::Button::builder()
             .icon_name("send-to-symbolic")
             .tooltip_text("Send prompt (Enter)")
@@ -102,6 +111,7 @@ impl Composer {
             send_button,
             model_button,
             permission_button,
+            continue_button,
             status_label,
         }
     }
@@ -129,7 +139,6 @@ impl Composer {
     pub fn set_permission_label(&self, label: &str) {
         self.permission_button.set_label(label);
     }
-
     pub fn set_is_running(&self, running: bool) {
         if running {
             self.send_button.set_icon_name("media-playback-stop-symbolic");
@@ -142,6 +151,14 @@ impl Composer {
             self.send_button.set_css_classes(&["suggested-action", "circular"]);
             self.status_label.set_label("Ready");
         }
+    }
+
+    pub fn continue_button(&self) -> &gtk4::Button {
+        &self.continue_button
+    }
+
+    pub fn set_continue_visible(&self, visible: bool) {
+        self.continue_button.set_visible(visible);
     }
 }
 

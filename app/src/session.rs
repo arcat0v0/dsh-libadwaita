@@ -33,6 +33,7 @@ pub struct SessionModel {
     pub transcript: ConversationTranscript,
     pub plan_mode: bool,
     pub todos: Vec<TodoItem>,
+    pub last_error_code: Option<String>,
 }
 
 impl SessionModel {
@@ -47,6 +48,7 @@ impl SessionModel {
             transcript: ConversationTranscript::new(),
             plan_mode: false,
             todos: Vec::new(),
+            last_error_code: None,
         }
     }
 
@@ -70,10 +72,20 @@ impl SessionModel {
             transcript,
             plan_mode: follow.projections.plan_mode,
             todos: follow.projections.todos.unwrap_or_default(),
+            last_error_code: None,
         }
     }
-
     pub fn handle_event(&mut self, event: SessionEvent) -> Result<TranscriptUpdate, GapDetected> {
+        if event.event_type == "user/message" {
+            self.last_error_code = None;
+        }
+        if event.event_type.contains("error") {
+            if let Some(code) = event.data["code"].as_str() {
+                self.last_error_code = Some(code.to_string());
+            } else if let Some(code) = event.data["error"]["code"].as_str() {
+                self.last_error_code = Some(code.to_string());
+            }
+        }
         if event.event_type == "plan/mode" {
             if let Ok(data) = event.parse_data::<PlanModeData>() {
                 self.plan_mode = data.active;

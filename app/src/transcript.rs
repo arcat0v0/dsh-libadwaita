@@ -99,6 +99,7 @@ pub struct ConversationTranscript {
     last_seq: i64,
     live_attempt: Option<LiveAttemptState>,
     pending_tool_calls: std::collections::HashMap<String, (String, String)>,
+    pending_user: Option<usize>,
 }
 
 impl Default for ConversationTranscript {
@@ -114,6 +115,7 @@ impl ConversationTranscript {
             last_seq: -1,
             live_attempt: None,
             pending_tool_calls: std::collections::HashMap::new(),
+            pending_user: None,
         }
     }
 
@@ -172,6 +174,55 @@ impl ConversationTranscript {
         self.last_seq = -1;
         self.live_attempt = None;
         self.pending_tool_calls.clear();
+        self.pending_user = None;
+    }
+
+    pub fn push_pending_user(&mut self, text: &str) {
+        self.pending_user = Some(self.blocks.len());
+        self.blocks.push(RenderBlock::UserMessage {
+            text: text.to_string(),
+            time: 0,
+            seq: -2,
+        });
+    }
+
+    pub fn clear_pending_user(&mut self) {
+        if let Some(index) = self.pending_user.take() {
+            if index < self.blocks.len() {
+                self.blocks.remove(index);
+            }
+        }
+    }
+
+    pub fn first_seq(&self) -> Option<i64> {
+        self.blocks
+            .iter()
+            .filter_map(|block| match block {
+                RenderBlock::UserMessage { seq, .. } if *seq > 0 => Some(*seq),
+                RenderBlock::AssistantMessage { seq: Some(seq), .. } if *seq > 0 => Some(*seq),
+                RenderBlock::ToolResult { seq, .. } if *seq > 0 => Some(*seq),
+                RenderBlock::PlanModeBadge { seq, .. } if *seq > 0 => Some(*seq),
+                RenderBlock::PlanCard { seq, .. } if *seq > 0 => Some(*seq),
+                RenderBlock::TodoBlock { seq, .. } if *seq > 0 => Some(*seq),
+                RenderBlock::DeliverablesBlock { seq, .. } if *seq > 0 => Some(*seq),
+                RenderBlock::GenericEvent { seq, .. } if *seq > 0 => Some(*seq),
+                _ => None,
+            })
+            .min()
+    }
+
+    pub fn prepend_events(&mut self, events: Vec<SessionEvent>) {
+        if events.is_empty() {
+            return;
+        }
+        let mut temp = ConversationTranscript::new();
+        for event in events {
+            let _ = temp.apply_event(event);
+        }
+        let mut combined = temp.blocks().to_vec();
+        combined.append(&mut self.blocks);
+        self.blocks = combined;
+        self.pending_user = None;
     }
 
     pub fn apply_baseline(&mut self, baseline: Option<SessionAssistantBaseline>) {
@@ -325,6 +376,19 @@ impl ConversationTranscript {
         match event.event_type.as_str() {
             "user/message" => {
                 let text = Self::extract_user_text(&event.data);
+                if let Some(index) = self.pending_user.take() {
+                    if let Some(RenderBlock::UserMessage {
+                        text: block_text,
+                        time,
+                        seq,
+                    }) = self.blocks.get_mut(index)
+                    {
+                        *block_text = text;
+                        *time = event.time;
+                        *seq = event.seq;
+                        return Ok(TranscriptUpdate::Replaced(index));
+                    }
+                }
                 self.blocks.push(RenderBlock::UserMessage {
                     text,
                     time: event.time,

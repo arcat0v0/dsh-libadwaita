@@ -1,10 +1,49 @@
-use crate::protocol::TodoItem;
+use crate::protocol::{MessageFeedbackItem, TodoItem};
 use crate::transcript::{RenderBlock, ToolCallItem};
+use crate::ui::controller::SessionController;
 use gtk4::prelude::*;
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
 use sourceview5::prelude::*;
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::collections::HashMap;
+use std::rc::{Rc, Weak};
+
+thread_local! {
+    static UI_CONTROLLER: RefCell<Option<Weak<SessionController>>> = const { RefCell::new(None) };
+    static FEEDBACK: RefCell<HashMap<String, MessageFeedbackItem>> = RefCell::new(HashMap::new());
+}
+
+pub fn set_controller(controller: &Rc<SessionController>) {
+    UI_CONTROLLER.with(|slot| {
+        *slot.borrow_mut() = Some(Rc::downgrade(controller));
+    });
+}
+
+pub fn set_feedback_items(items: &[MessageFeedbackItem]) {
+    FEEDBACK.with(|feedback| {
+        let mut map = feedback.borrow_mut();
+        map.clear();
+        for item in items {
+            map.insert(item.message_id.clone(), item.clone());
+        }
+    });
+}
+
+fn feedback_for(message_id: &str) -> Option<MessageFeedbackItem> {
+    FEEDBACK.with(|feedback| feedback.borrow().get(message_id).cloned())
+}
+
+fn with_controller(f: impl FnOnce(&SessionController)) {
+    UI_CONTROLLER.with(|slot| {
+        if let Some(controller) = slot.borrow().as_ref().and_then(|weak| weak.upgrade()) {
+            f(&controller);
+        }
+    });
+}
+
+pub fn reopen_question() {
+    with_controller(|controller| controller.reopen_question());
+}
 
 pub fn render_markdown(text: &str) -> gtk4::Box {
     let container = gtk4::Box::builder()
@@ -342,6 +381,7 @@ impl AssistantLiveHandle {
 }
 
 pub fn build_user_message(text: &str, _time: u64, _seq: i64) -> gtk4::Box {
+    let masked = crate::drafts::mask_secret_patterns(text);
     let row = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Horizontal)
         .halign(gtk4::Align::End)
@@ -350,7 +390,6 @@ pub fn build_user_message(text: &str, _time: u64, _seq: i64) -> gtk4::Box {
         .margin_top(4)
         .margin_bottom(4)
         .build();
-
     let bubble = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
         .css_classes(["card"])
@@ -359,9 +398,8 @@ pub fn build_user_message(text: &str, _time: u64, _seq: i64) -> gtk4::Box {
         .margin_top(6)
         .margin_bottom(6)
         .build();
-
     let label = gtk4::Label::builder()
-        .label(text)
+        .label(&masked)
         .wrap(true)
         .wrap_mode(gtk4::pango::WrapMode::WordChar)
         .halign(gtk4::Align::Start)
@@ -373,8 +411,53 @@ pub fn build_user_message(text: &str, _time: u64, _seq: i64) -> gtk4::Box {
         .selectable(true)
         .build();
     bubble.append(&label);
+    if masked != text {
+        let actions = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Horizontal)
+            .spacing(4)
+            .halign(gtk4::Align::End)
+            .margin_end(8)
+            .margin_bottom(6)
+            .build();
+        let reveal = gtk4::Button::builder()
+            .icon_name("view-reveal-symbolic")
+            .tooltip_text("Reveal secrets")
+            .css_classes(["flat", "circular"])
+            .build();
+        let label_toggle = label.clone();
+        let original = text.to_string();
+        let masked_text = masked.clone();
+        let revealed = Rc::new(RefCell::new(false));
+        let revealed_toggle = revealed.clone();
+        reveal.connect_clicked(move |button| {
+            let mut shown = revealed_toggle.borrow_mut();
+            *shown = !*shown;
+            if *shown {
+                label_toggle.set_label(&original);
+                button.set_icon_name("view-conceal-symbolic");
+                button.set_tooltip_text(Some("Hide secrets"));
+            } else {
+                label_toggle.set_label(&masked_text);
+                button.set_icon_name("view-reveal-symbolic");
+                button.set_tooltip_text(Some("Reveal secrets"));
+            }
+        });
+        actions.append(&reveal);
+        let copy = gtk4::Button::builder()
+            .icon_name("edit-copy-symbolic")
+            .tooltip_text("Copy original text")
+            .css_classes(["flat", "circular"])
+            .build();
+        let copy_text = text.to_string();
+        copy.connect_clicked(move |_| {
+            if let Some(display) = gtk4::gdk::Display::default() {
+                display.clipboard().set_text(&copy_text);
+            }
+        });
+        actions.append(&copy);
+        bubble.append(&actions);
+    }
     row.append(&bubble);
-
     let avatar = gtk4::Image::builder()
         .icon_name("avatar-default-symbolic")
         .pixel_size(24)
@@ -382,7 +465,6 @@ pub fn build_user_message(text: &str, _time: u64, _seq: i64) -> gtk4::Box {
         .margin_top(8)
         .build();
     row.append(&avatar);
-
     row
 }
 
@@ -507,6 +589,56 @@ pub fn build_assistant_message(
             fork_btn.set_action_name(Some("win.fork-session"));
             fork_btn.set_action_target_value(Some(&message_seq.to_variant()));
             actions_box.append(&fork_btn);
+            let message_id = message_seq.to_string();
+            let existing = feedback_for(&message_id);
+            let up = gtk4::Button::builder()
+                .icon_name("thumbs-up-symbolic")
+                .tooltip_text("Good response")
+                .css_classes(["flat", "circular"])
+                .build();
+            if existing.as_ref().map(|item| item.rating.as_str()) == Some("positive") {
+                up.add_css_class("accent");
+            }
+            let down = gtk4::Button::builder()
+                .icon_name("thumbs-down-symbolic")
+                .tooltip_text("Bad response")
+                .css_classes(["flat", "circular"])
+                .build();
+            if existing.as_ref().map(|item| item.rating.as_str()) == Some("negative") {
+                down.add_css_class("accent");
+            }
+            let up_id = message_id.clone();
+            let up_version = existing.as_ref().map(|item| item.version.clone());
+            let up_existing = existing.clone();
+            up.connect_clicked(move |_| {
+                with_controller(|ctrl| {
+                    if up_existing.as_ref().map(|item| item.rating.as_str()) == Some("positive") {
+                        if let Some(item) = &up_existing {
+                            ctrl.delete_feedback(&up_id, &item.version);
+                        }
+                    } else {
+                        ctrl.put_feedback(&up_id, "positive", up_version.clone(), None, None);
+                    }
+                });
+            });
+            let down_id = message_id.clone();
+            let down_version = existing.as_ref().map(|item| item.version.clone());
+            let down_existing = existing;
+            down.connect_clicked(move |_| {
+                with_controller(|ctrl| {
+                    if down_existing.as_ref().map(|item| item.rating.as_str())
+                        == Some("negative")
+                    {
+                        if let Some(item) = &down_existing {
+                            ctrl.delete_feedback(&down_id, &item.version);
+                        }
+                    } else {
+                        ctrl.put_feedback(&down_id, "negative", down_version.clone(), None, None);
+                    }
+                });
+            });
+            actions_box.append(&up);
+            actions_box.append(&down);
             bubble.append(&actions_box);
         }
     }

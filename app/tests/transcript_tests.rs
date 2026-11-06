@@ -336,3 +336,54 @@ fn test_session_model_updates() {
     session.handle_event(ev).unwrap();
     assert!(session.plan_mode);
 }
+
+#[test]
+fn test_pending_user_echo_replacement() {
+    let mut transcript = ConversationTranscript::new();
+    transcript.push_pending_user("hello");
+    assert_eq!(transcript.blocks().len(), 1);
+    assert_eq!(transcript.first_seq(), None);
+
+    let event = SessionEvent {
+        event_type: "user/message".to_string(),
+        seq: 4,
+        time: 100,
+        data: serde_json::json!({"content": [{"type": "text", "text": "hello"}]}),
+        ignorable: None,
+        surface_op: None,
+        source_event_seqs: None,
+    };
+    let update = transcript.apply_event(event).unwrap();
+    assert_eq!(update, TranscriptUpdate::Replaced(0));
+    assert_eq!(transcript.blocks().len(), 1);
+    assert_eq!(transcript.first_seq(), Some(4));
+}
+
+#[test]
+fn test_prepend_events_preserves_existing_blocks() {
+    let mut transcript = ConversationTranscript::new();
+    transcript.set_last_seq(9);
+    let first = SessionEvent {
+        event_type: "user/message".to_string(),
+        seq: 10,
+        time: 100,
+        data: serde_json::json!({"content": [{"type": "text", "text": "new"}]}),
+        ignorable: None,
+        surface_op: None,
+        source_event_seqs: None,
+    };
+    transcript.apply_event(first).unwrap();
+
+    let older = vec![SessionEvent {
+        event_type: "user/message".to_string(),
+        seq: 3,
+        time: 50,
+        data: serde_json::json!({"content": [{"type": "text", "text": "old"}]}),
+        ignorable: None,
+        surface_op: None,
+        source_event_seqs: None,
+    }];
+    transcript.prepend_events(older);
+    assert_eq!(transcript.blocks().len(), 2);
+    assert_eq!(transcript.first_seq(), Some(3));
+}

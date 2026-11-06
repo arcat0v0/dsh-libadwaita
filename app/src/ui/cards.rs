@@ -498,6 +498,25 @@ pub fn render_tool_result_card(
             build_web_card(&info)
         }
         "exit_plan_mode" => build_plan_card(result, "Plan completed"),
+        "ask_user_question" => {
+            let card = build_generic_fallback_card(name, args_str, result);
+            let actions = gtk4::Box::builder()
+                .orientation(gtk4::Orientation::Horizontal)
+                .halign(gtk4::Align::End)
+                .margin_end(8)
+                .margin_bottom(6)
+                .build();
+            let reopen = gtk4::Button::builder()
+                .label("Reopen")
+                .css_classes(["flat"])
+                .build();
+            reopen.connect_clicked(|_| {
+                crate::ui::message_renderer::reopen_question();
+            });
+            actions.append(&reopen);
+            card.append(&actions);
+            card
+        }
         _ => build_generic_fallback_card(name, args_str, result),
     }
 }

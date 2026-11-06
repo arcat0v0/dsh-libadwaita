@@ -118,6 +118,9 @@ pub enum IncomingNotification {
     SettingsUpdated(SettingsUpdatedNotificationParams),
     PermissionUpdated(PermissionUpdatedNotificationParams),
     GoalUpdated(GoalUpdatedNotificationParams),
+    JobOutput(JobOutputNotificationParams),
+    PluginInstallState(PluginInstallStateNotificationParams),
+    PluginInstallLog(PluginInstallLogNotificationParams),
     Unknown {
         method: String,
         params: serde_json::Value,
@@ -210,6 +213,36 @@ impl IncomingNotification {
             NOTIFICATION_GOAL_UPDATED => {
                 if let Ok(parsed) = serde_json::from_value(params.clone()) {
                     Self::GoalUpdated(parsed)
+                } else {
+                    Self::Unknown {
+                        method: method.to_string(),
+                        params,
+                    }
+                }
+            }
+            NOTIFICATION_JOB_OUTPUT => {
+                if let Ok(parsed) = serde_json::from_value(params.clone()) {
+                    Self::JobOutput(parsed)
+                } else {
+                    Self::Unknown {
+                        method: method.to_string(),
+                        params,
+                    }
+                }
+            }
+            NOTIFICATION_PLUGIN_INSTALL_STATE => {
+                if let Ok(parsed) = serde_json::from_value(params.clone()) {
+                    Self::PluginInstallState(parsed)
+                } else {
+                    Self::Unknown {
+                        method: method.to_string(),
+                        params,
+                    }
+                }
+            }
+            NOTIFICATION_PLUGIN_INSTALL_LOG => {
+                if let Ok(parsed) = serde_json::from_value(params.clone()) {
+                    Self::PluginInstallLog(parsed)
                 } else {
                     Self::Unknown {
                         method: method.to_string(),

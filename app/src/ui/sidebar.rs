@@ -7,6 +7,7 @@ pub struct Sidebar {
     container: gtk4::Box,
     session_list: gtk4::ListBox,
     workspace_list: gtk4::ListBox,
+    subagent_list: gtk4::ListBox,
     search_entry: gtk4::SearchEntry,
     new_session_btn: gtk4::Button,
 }
@@ -44,6 +45,31 @@ impl Sidebar {
             .build();
         brand_box.append(&new_session_btn);
         container.append(&brand_box);
+
+        let subagent_header = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Horizontal)
+            .spacing(8)
+            .margin_start(12)
+            .margin_end(12)
+            .margin_top(4)
+            .margin_bottom(4)
+            .build();
+        let subagent_title = gtk4::Label::builder()
+            .label("Subagents")
+            .css_classes(["dim-label", "caption"])
+            .hexpand(true)
+            .halign(gtk4::Align::Start)
+            .build();
+        subagent_header.append(&subagent_title);
+        container.append(&subagent_header);
+        let subagent_list = gtk4::ListBox::builder()
+            .selection_mode(gtk4::SelectionMode::Single)
+            .css_classes(["boxed-list"])
+            .margin_start(8)
+            .margin_end(8)
+            .margin_bottom(8)
+            .build();
+        container.append(&subagent_list);
 
         let workspace_header = gtk4::Box::builder()
             .orientation(gtk4::Orientation::Horizontal)
@@ -178,6 +204,7 @@ impl Sidebar {
             container,
             session_list,
             workspace_list,
+            subagent_list,
             search_entry,
             new_session_btn,
         }
@@ -201,6 +228,53 @@ impl Sidebar {
 
     pub fn workspace_list(&self) -> &gtk4::ListBox {
         &self.workspace_list
+    }
+
+    pub fn load_subagents(&self, entries: &[serde_json::Value]) {
+        while let Some(child) = self.subagent_list.first_child() {
+            self.subagent_list.remove(&child);
+        }
+        if entries.is_empty() {
+            let row = adw::ActionRow::builder()
+                .title("No child agents")
+                .subtitle("Subagents appear here when spawned")
+                .sensitive(false)
+                .build();
+            self.subagent_list.append(&row);
+            return;
+        }
+        for entry in entries {
+            let child_id = entry["sessionId"]
+                .as_str()
+                .or_else(|| entry["childSessionId"].as_str())
+                .or_else(|| entry["id"].as_str())
+                .unwrap_or_default()
+                .to_string();
+            let title = entry["title"]
+                .as_str()
+                .or_else(|| entry["label"].as_str())
+                .or_else(|| entry["name"].as_str())
+                .unwrap_or("Subagent")
+                .to_string();
+            let status = entry["status"].as_str().unwrap_or("unknown");
+            let row = adw::ActionRow::builder()
+                .title(&title)
+                .subtitle(status)
+                .activatable(true)
+                .action_name("win.open-child")
+                .build();
+            row.set_action_target_value(Some(&child_id.to_variant()));
+            let interrupt = gtk4::Button::builder()
+                .icon_name("media-playback-stop-symbolic")
+                .tooltip_text("Interrupt subagent")
+                .action_name("win.interrupt-subagent")
+                .css_classes(["flat", "circular"])
+                .valign(gtk4::Align::Center)
+                .build();
+            interrupt.set_action_target_value(Some(&child_id.to_variant()));
+            row.add_suffix(&interrupt);
+            self.subagent_list.append(&row);
+        }
     }
 
     pub fn load_workspaces(&self, workspaces: &[WorkspaceView], sessions: &[SessionListItem]) {

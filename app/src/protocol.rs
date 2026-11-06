@@ -1611,3 +1611,460 @@ pub struct SessionTitleData {
 pub struct TodoWriteData {
     pub todos: Vec<TodoItem>,
 }
+
+pub const METHOD_PLUGIN_INVENTORY: &str = "libadwaita/plugin/inventory";
+pub const METHOD_PLUGIN_DETAIL: &str = "libadwaita/plugin/detail";
+pub const METHOD_PLUGIN_INSPECT: &str = "libadwaita/plugin/inspect";
+pub const METHOD_PLUGIN_INSTALL: &str = "libadwaita/plugin/install";
+pub const METHOD_PLUGIN_CANCEL_INSTALL: &str = "libadwaita/plugin/cancel-install";
+pub const METHOD_PLUGIN_WAIT_INSTALL: &str = "libadwaita/plugin/wait-install";
+pub const METHOD_PLUGIN_REMOVE: &str = "libadwaita/plugin/remove";
+pub const METHOD_PLUGIN_VERSIONS: &str = "libadwaita/plugin/versions";
+pub const METHOD_PLUGIN_UPDATE: &str = "libadwaita/plugin/update";
+pub const METHOD_PLUGIN_REGISTRIES: &str = "libadwaita/plugin/registries";
+pub const METHOD_PLUGIN_RETRY: &str = "libadwaita/plugin/retry";
+pub const METHOD_MODEL_DISCOVER: &str = "libadwaita/model/discover";
+pub const METHOD_WEB_SEARCH_PROVIDERS: &str = "libadwaita/web-search/providers";
+pub const METHOD_SUBAGENT_LIST: &str = "libadwaita/subagent/list";
+pub const METHOD_SUBAGENT_PROMPT: &str = "libadwaita/subagent/prompt";
+pub const METHOD_SUBAGENT_INTERRUPT: &str = "libadwaita/subagent/interrupt";
+pub const METHOD_AGENT_TEAM_GET: &str = "libadwaita/agent-team/get";
+pub const METHOD_AGENT_TEAM_SET_ENABLED: &str = "libadwaita/agent-team/set-enabled";
+pub const METHOD_CREDENTIALS_RECORDS_LIST: &str = "libadwaita/credentials/records/list";
+pub const METHOD_CREDENTIALS_RECORDS_READ: &str = "libadwaita/credentials/records/read";
+pub const METHOD_CREDENTIALS_RECORDS_MODIFY: &str = "libadwaita/credentials/records/modify";
+pub const METHOD_CREDENTIALS_RECORDS_DELETE: &str = "libadwaita/credentials/records/delete";
+pub const METHOD_ACCOUNT_STATUS: &str = "libadwaita/account/status";
+pub const METHOD_ACCOUNT_PROFILE: &str = "libadwaita/account/profile";
+pub const METHOD_ACCOUNT_BALANCE: &str = "libadwaita/account/balance";
+pub const METHOD_ACCOUNT_SIGN_OUT: &str = "libadwaita/account/sign-out";
+pub const METHOD_MESSAGE_FEEDBACK_LIST: &str = "libadwaita/message-feedback/list";
+pub const METHOD_MESSAGE_FEEDBACK_PUT: &str = "libadwaita/message-feedback/put";
+pub const METHOD_MESSAGE_FEEDBACK_DELETE: &str = "libadwaita/message-feedback/delete";
+pub const METHOD_SESSION_FEEDBACK_RECORD: &str = "libadwaita/session-feedback/record";
+pub const METHOD_QUESTION_REOPEN: &str = "libadwaita/question/reopen";
+pub const METHOD_JOB_LIST: &str = "libadwaita/job/list";
+pub const METHOD_JOB_FOLLOW: &str = "libadwaita/job/follow";
+pub const METHOD_JOB_KILL: &str = "libadwaita/job/kill";
+
+pub const NOTIFICATION_JOB_OUTPUT: &str = "job.output";
+pub const NOTIFICATION_PLUGIN_INSTALL_STATE: &str = "plugin.install-state";
+pub const NOTIFICATION_PLUGIN_INSTALL_LOG: &str = "plugin.install-log";
+
+pub const ERR_QUESTION_NOT_PENDING: i64 = -32030;
+pub const ERR_FEEDBACK_CONFLICT: i64 = -32031;
+pub const ERR_FEEDBACK_TARGET_NOT_FOUND: i64 = -32032;
+pub const ERR_JOB_NOT_FOUND: i64 = -32033;
+pub const ERR_ATTACHMENT_NOT_FOUND: i64 = -32035;
+pub const ERR_ATTACHMENT_TOO_LARGE: i64 = -32036;
+pub const ERR_ATTACHMENT_INVALID: i64 = -32037;
+pub const ERR_AGENT_TEAM_UNAVAILABLE: i64 = -32040;
+pub const ERR_MODEL_DISCOVERY_UNSUPPORTED: i64 = -32044;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInventoryResult {
+    pub plugins: Vec<serde_json::Value>,
+    pub bundles: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PluginOperationResult {
+    pub result: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginDetailParams {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginInspectParams {
+    pub spec: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInstallParams {
+    pub spec: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub save_exact: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approved_builds: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginRequestParams {
+    pub request_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginRemoveParams {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginVersionsParams {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginUpdateParams {
+    pub name: String,
+    pub version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginInstallStateNotificationParams {
+    pub request_id: String,
+    pub phase: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInstallLogNotificationParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    pub job_id: String,
+    pub argv: Vec<String>,
+    pub cwd: String,
+    pub stream: String,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentListParams {
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubagentListResult {
+    pub entries: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentPromptParams {
+    pub session_id: String,
+    pub child_session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<String>,
+    pub content: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentPromptResult {
+    pub message_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentInterruptParams {
+    pub session_id: String,
+    pub child_session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentInterruptResult {
+    pub accepted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTeamGetParams {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentTeamGetResult {
+    pub enabled: bool,
+    pub tasks: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTeamSetParams {
+    pub session_id: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentTeamSetResult {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialRecordItem {
+    pub key: String,
+    pub kind: String,
+    pub configured: bool,
+    pub writable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialRecordsListResult {
+    pub records: Vec<CredentialRecordItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialRecordReadParams {
+    pub key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialRecordReadResult {
+    pub key: String,
+    pub configured: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    pub writable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_key: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env_names: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload_redacted: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CredentialRecordModifyParams {
+    pub key: String,
+    pub record: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialRecordDeleteParams {
+    pub key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialRecordMutationResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted: Option<bool>,
+    pub metadata: CredentialRecordReadResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountStatusResult {
+    pub state: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountProfileResult {
+    pub profile: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountBalanceResult {
+    pub balance: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountSignOutResult {
+    pub state: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageFeedbackItem {
+    #[serde(rename = "messageId")]
+    pub message_id: String,
+    pub rating: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    pub version: String,
+    #[serde(rename = "createdAt")]
+    pub created_at: u64,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageFeedbackListParams {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageFeedbackListResult {
+    pub items: Vec<MessageFeedbackItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageFeedbackPutParams {
+    pub session_id: String,
+    pub message_id: String,
+    pub rating: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    pub if_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageFeedbackPutResult {
+    pub item: MessageFeedbackItem,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageFeedbackDeleteParams {
+    pub session_id: String,
+    pub message_id: String,
+    pub if_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageFeedbackDeleteResult {
+    pub absent: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionFeedbackRecordParams {
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionFeedbackRecordResult {
+    pub recorded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionReopenParams {
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuestionReopenResult {
+    pub request: SdkUserQuestionRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobWireView {
+    pub id: String,
+    pub kind: String,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub started_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<u64>,
+    pub output: JobOutputState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobOutputState {
+    pub total: u64,
+    pub earliest: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spill_paths: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobChunkWire {
+    pub at: u64,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gap_before: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobListParams {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobListResult {
+    pub jobs: Vec<JobWireView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobFollowParams {
+    pub session_id: String,
+    pub job_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobFollowResult {
+    pub job: JobWireView,
+    pub chunks: Vec<JobChunkWire>,
+    pub next: u64,
+    pub lossy: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobKillParams {
+    pub session_id: String,
+    pub job_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobKillResult {
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobOutputNotificationParams {
+    pub session_id: String,
+    pub job_id: String,
+    pub job: JobWireView,
+    pub chunks: Vec<JobChunkWire>,
+    pub next: u64,
+    pub lossy: bool,
+}
+
+pub fn json_text(value: &serde_json::Value) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+}

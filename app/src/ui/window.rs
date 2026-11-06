@@ -6,6 +6,7 @@ use crate::ui::settings::show_settings_dialog;
 use crate::ui::sidebar::Sidebar;
 use gtk4::prelude::*;
 use libadwaita as adw;
+use libadwaita::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -239,6 +240,85 @@ impl MainWindow {
             }
         });
         self.window.add_action(&remove_workspace_action);
+
+        let ctrl_open_child = Rc::downgrade(&controller);
+        let open_child = gtk4::gio::SimpleAction::new(
+            "open-child",
+            Some(&gtk4::glib::VariantTy::STRING),
+        );
+        open_child.connect_activate(move |_, param| {
+            if let (Some(c), Some(id)) = (
+                ctrl_open_child.upgrade(),
+                param.and_then(|value| value.get::<String>()),
+            ) {
+                c.open_child_session(&id);
+            }
+        });
+        self.window.add_action(&open_child);
+
+        let ctrl_interrupt_child = Rc::downgrade(&controller);
+        let interrupt_child = gtk4::gio::SimpleAction::new(
+            "interrupt-subagent",
+            Some(&gtk4::glib::VariantTy::STRING),
+        );
+        interrupt_child.connect_activate(move |_, param| {
+            if let (Some(c), Some(id)) = (
+                ctrl_interrupt_child.upgrade(),
+                param.and_then(|value| value.get::<String>()),
+            ) {
+                c.interrupt_subagent(&id);
+            }
+        });
+        self.window.add_action(&interrupt_child);
+
+        let ctrl_follow_job = Rc::downgrade(&controller);
+        let follow_job = gtk4::gio::SimpleAction::new(
+            "follow-job",
+            Some(&gtk4::glib::VariantTy::STRING),
+        );
+        follow_job.connect_activate(move |_, param| {
+            if let (Some(c), Some(id)) = (
+                ctrl_follow_job.upgrade(),
+                param.and_then(|value| value.get::<String>()),
+            ) {
+                c.follow_job(&id);
+            }
+        });
+        self.window.add_action(&follow_job);
+
+        let ctrl_kill_job = Rc::downgrade(&controller);
+        let window_for_kill = self.window.clone();
+        let kill_job = gtk4::gio::SimpleAction::new(
+            "kill-job",
+            Some(&gtk4::glib::VariantTy::STRING),
+        );
+        kill_job.connect_activate(move |_, param| {
+            let Some(id) = param.and_then(|value| value.get::<String>()) else {
+                return;
+            };
+            let dialog = adw::AlertDialog::builder()
+                .heading("Kill background job?")
+                .body(format!("Confirm stopping job {}.", id))
+                .build();
+            dialog.add_response("cancel", "Cancel");
+            dialog.add_response("kill", "Kill");
+            dialog.set_response_appearance("kill", adw::ResponseAppearance::Destructive);
+            dialog.set_close_response("cancel");
+            let ctrl = ctrl_kill_job.clone();
+            dialog.choose(
+                Some(&window_for_kill),
+                None::<&gtk4::gio::Cancellable>,
+                move |response| {
+                    if response == "kill" {
+                        if let Some(c) = ctrl.upgrade() {
+                            c.kill_job(&id);
+                        }
+                    }
+                },
+            );
+        });
+        self.window.add_action(&kill_job);
+
         let ctrl_new = Rc::downgrade(&controller);
         let new_session_action = gtk4::gio::SimpleAction::new("new-session", None);
         new_session_action.connect_activate(move |_, _| {

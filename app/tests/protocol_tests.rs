@@ -347,3 +347,63 @@ fn test_batch_b_protocol_roundtrips() {
         dsh_libadwaita::connection::IncomingNotification::GoalUpdated(goal_notif)
     );
 }
+
+#[test]
+fn test_batch_d_notifications_and_types() {
+    let install = serde_json::json!({
+        "requestId": "req-1",
+        "jobId": "job-1",
+        "argv": ["pnpm", "add", "file:/tmp/plugin"],
+        "cwd": "/tmp/profile",
+        "stream": "stdout",
+        "text": "Progress",
+        "exitCode": 0
+    });
+    match dsh_libadwaita::connection::IncomingNotification::from_raw(
+        NOTIFICATION_PLUGIN_INSTALL_LOG,
+        install,
+    ) {
+        dsh_libadwaita::connection::IncomingNotification::PluginInstallLog(log) => {
+            assert_eq!(log.job_id, "job-1");
+            assert_eq!(log.text, "Progress");
+        }
+        other => panic!("unexpected notification: {:?}", other),
+    }
+
+    let job = serde_json::json!({
+        "sessionId": "s1",
+        "jobId": "job-1",
+        "job": {
+            "id": "job-1",
+            "kind": "bash",
+            "label": "sleep 3",
+            "status": "running",
+            "startedAt": 1,
+            "output": {"total": 5, "earliest": 0}
+        },
+        "chunks": [{"at": 0, "text": "hello\n", "channel": "stdout"}],
+        "next": 5,
+        "lossy": false
+    });
+    match dsh_libadwaita::connection::IncomingNotification::from_raw(
+        NOTIFICATION_JOB_OUTPUT,
+        job,
+    ) {
+        dsh_libadwaita::connection::IncomingNotification::JobOutput(output) => {
+            assert_eq!(output.chunks[0].text, "hello\n");
+            assert_eq!(output.next, 5);
+        }
+        other => panic!("unexpected notification: {:?}", other),
+    }
+
+    let feedback = MessageFeedbackItem {
+        message_id: "m1".to_string(),
+        rating: "positive".to_string(),
+        note: None,
+        category: None,
+        version: "v1".to_string(),
+        created_at: 1,
+        updated_at: 2,
+    };
+    assert_eq!(feedback.rating, "positive");
+}

@@ -1,4 +1,7 @@
-use crate::connection::{ApprovalResponder, BridgeConnection, IncomingNotification, UserQuestionResponder};
+use crate::connection::{
+    ApprovalResponder, BridgeConnection, ConnectionError, IncomingNotification,
+    UserQuestionResponder,
+};
 use crate::credentials::{should_show_onboarding, CredentialStore, DEFAULT_PROVIDER};
 use crate::protocol::*;
 use crate::session::{SessionModel, SessionStatus};
@@ -101,6 +104,39 @@ pub enum UiMessage {
         session_id: String,
         current_value: String,
     },
+    EchoAck,
+    EchoFailed {
+        text: String,
+        error: String,
+    },
+    HistoryPageLoaded {
+        events: Vec<SessionEvent>,
+        has_more: bool,
+    },
+    PluginInventoryLoaded(PluginInventoryResult),
+    PluginOperationDone {
+        label: String,
+        value: serde_json::Value,
+    },
+    PluginInstallState {
+        request_id: String,
+        phase: String,
+    },
+    PluginInstallLog {
+        request_id: Option<String>,
+        text: String,
+    },
+    SubagentsLoaded(Vec<serde_json::Value>),
+    JobsLoaded(Vec<JobWireView>),
+    JobFollowLoaded(JobFollowResult),
+    FeedbackLoaded(Vec<MessageFeedbackItem>),
+    AccountLoaded {
+        status: Result<AccountStatusResult, String>,
+        profile: Result<AccountProfileResult, String>,
+        balance: Result<AccountBalanceResult, String>,
+    },
+    CredentialRecordsLoaded(Vec<CredentialRecordItem>),
+    QuestionReopened(SdkUserQuestionRequest),
 }
 
 struct ApprovalHandler {
@@ -149,6 +185,7 @@ pub struct SessionController {
     sessions_cache: Rc<RefCell<Vec<SessionListItem>>>,
     settings_dialog: Rc<RefCell<Option<SettingsDialogHandle>>>,
     permission_state: Rc<RefCell<Option<PermissionGetResult>>>,
+    history_loading: Rc<Cell<bool>>,
     window_title: adw::WindowTitle,
     toast_overlay: adw::ToastOverlay,
     ui_sender: UnboundedSender<UiMessage>,
@@ -198,6 +235,7 @@ impl SessionController {
             sessions_cache: Rc::new(RefCell::new(Vec::new())),
             settings_dialog: Rc::new(RefCell::new(None)),
             permission_state: Rc::new(RefCell::new(None)),
+            history_loading: Rc::new(Cell::new(false)),
             window_title: main_window.window_title().clone(),
             toast_overlay: main_window
                 .window()
@@ -282,6 +320,13 @@ impl SessionController {
             }
         });
 
+        crate::ui::message_renderer::set_controller(&controller);
+        let weak_history = Rc::downgrade(&controller);
+        controller.conversation_view.set_on_load_older(move || {
+            if let Some(ctrl) = weak_history.upgrade() {
+                ctrl.load_older_history();
+            }
+        });
         controller
     }
 
@@ -669,6 +714,99 @@ impl SessionController {
         self.send_prompt_with_mode(text, "prompt");
     }
 
+
+    pub fn update_continue_state(&self) {
+        let composer_empty = {
+            let buffer = self.conversation_view.composer().text_view().buffer();
+            let (start, end) = buffer.bounds();
+            buffer.text(&start, &end, false).trim().is_empty()
+        };
+        let running = self
+            .active_session
+            .borrow()
+            .as_ref()
+            .map(|session| session.status == SessionStatus::Running)
+            .unwrap_or(false);
+        let last_error = self
+            .active_session
+            .borrow()
+            .as_ref()
+            .and_then(|session| session.last_error_code.clone());
+        let eligible = crate::drafts::continuation_eligibility(
+            last_error.as_deref(),
+            composer_empty,
+            running,
+        );
+        self.conversation_view
+            .composer()
+            .set_continue_visible(eligible == crate::drafts::ContinuationEligibility::Eligible);
+    }
+
+    pub fn continue_generation(&self) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        if let Some(session) = self.active_session.borrow_mut().as_mut() {
+            session.last_error_code = None;
+        }
+        let params = SessionPromptParams {
+            session_id,
+            content_blocks: Vec::new(),
+            mode: Some("queue".to_string()),
+        };
+        self.dispatch_call(
+            METHOD_SESSION_PROMPT,
+            params,
+            Duration::from_secs(10),
+            |result: Result<SessionPromptResult, ConnectionError>| match result {
+                Ok(_) => UiMessage::Toast("Continuing generation".to_string()),
+                Err(err) => UiMessage::Toast(format!("Continue failed: {}", err)),
+            },
+        );
+        self.conversation_view.composer().set_continue_visible(false);
+    }
+
+    pub fn load_older_history(&self) {
+        if self.history_loading.replace(true) {
+            return;
+        }
+        let Some(session_id) = self.active_session_id() else {
+            self.history_loading.set(false);
+            return;
+        };
+        let oldest = self
+            .active_session
+            .borrow()
+            .as_ref()
+            .and_then(|session| session.transcript.first_seq());
+        let Some(oldest) = oldest else {
+            self.history_loading.set(false);
+            return;
+        };
+        if oldest <= 0 {
+            self.history_loading.set(false);
+            return;
+        }
+        self.conversation_view.set_history_loading(true);
+        let params = SessionPageParams {
+            session_id,
+            from_seq: (oldest - 50).max(0),
+            to_seq: Some(oldest - 1),
+            limit: Some(50),
+        };
+        self.dispatch_call(
+            METHOD_SESSION_PAGE,
+            params,
+            Duration::from_secs(10),
+            |result: Result<SessionPageResult, ConnectionError>| match result {
+                Ok(page) => UiMessage::HistoryPageLoaded {
+                    events: page.events,
+                    has_more: page.has_more,
+                },
+                Err(err) => UiMessage::Toast(format!("History load failed: {}", err)),
+            },
+        );
+    }
     pub fn send_prompt_with_mode(&self, text: &str, mode: &str) {
         let Some(session_id) = self.active_session_id() else {
             return;
@@ -711,7 +849,50 @@ impl SessionController {
             .map(|session| session.status == SessionStatus::Running)
             .unwrap_or(false);
         let mode = if running && steer { "steer" } else { "prompt" };
-        self.send_prompt_with_mode(text, mode);
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        {
+            let mut guard = self.active_session.borrow_mut();
+            if let Some(session) = guard.as_mut() {
+                session.transcript.push_pending_user(text);
+                self.conversation_view.update_transcript(&session.transcript);
+            }
+        }
+        let params = SessionPromptParams {
+            session_id,
+            content_blocks: vec![PromptContentBlock::Text {
+                text: text.to_string(),
+            }],
+            mode: Some(mode.to_string()),
+        };
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+        let echoed = text.to_string();
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            let Some(conn) = conn_opt else {
+                return;
+            };
+            match conn
+                .call::<SessionPromptParams, SessionPromptResult>(
+                    METHOD_SESSION_PROMPT,
+                    params,
+                    Duration::from_secs(10),
+                )
+                .await
+            {
+                Ok(_) => {
+                    let _ = ui_sender.send(UiMessage::EchoAck);
+                }
+                Err(err) => {
+                    let _ = ui_sender.send(UiMessage::EchoFailed {
+                        text: echoed,
+                        error: err.to_string(),
+                    });
+                }
+            }
+        });
     }
 
     pub fn fetch_commands(&self) {
@@ -1526,6 +1707,7 @@ impl SessionController {
     }
 
     pub fn follow_session(&self, session_id: &str) {
+        self.conversation_view.set_breadcrumb("");
         let sess_id = session_id.to_string();
         let conn_arc = self.connection.clone();
         let ui_sender = self.ui_sender.clone();
@@ -1548,6 +1730,12 @@ impl SessionController {
                 }
             }
         });
+    }
+
+    pub fn open_child_session(&self, child_session_id: &str) {
+        self.follow_session(child_session_id);
+        self.conversation_view
+            .set_breadcrumb(&format!("Subagent · {}", child_session_id));
     }
 
     pub fn archive_session(&self, session_id: &str) {
@@ -2005,6 +2193,10 @@ impl SessionController {
                             ctrl.right_dock.preview_panel().clear();
                             ctrl.refresh_files(".");
                             ctrl.refresh_permission(&session_id);
+                            ctrl.update_continue_state();
+                            ctrl.refresh_subagents();
+                            ctrl.refresh_jobs();
+                            ctrl.load_feedback();
                         }
                     }
                     UiMessage::Notification(notif) => {
@@ -2053,6 +2245,33 @@ impl SessionController {
                                     .unwrap_or(false);
                                 if matches_active {
                                     conv_view.update_queue(&p.items);
+                                }
+                            }
+                            IncomingNotification::JobOutput(p) => {
+                                let matches_active = active_sess
+                                    .borrow()
+                                    .as_ref()
+                                    .map(|sess| sess.id == p.session_id)
+                                    .unwrap_or(false);
+                                if matches_active {
+                                    conv_view.job_output_append(&p.chunks);
+                                }
+                            }
+                            IncomingNotification::PluginInstallState(p) => {
+                                if let Some(ctrl) = ctrl_weak.upgrade() {
+                                    if let Some(handle) = ctrl.settings_dialog.borrow().as_ref() {
+                                        handle.plugin_install_state(&p.request_id, &p.phase);
+                                    }
+                                }
+                            }
+                            IncomingNotification::PluginInstallLog(p) => {
+                                if let Some(ctrl) = ctrl_weak.upgrade() {
+                                    if let Some(handle) = ctrl.settings_dialog.borrow().as_ref() {
+                                        handle.plugin_install_log(
+                                            p.request_id.as_deref(),
+                                            &p.text,
+                                        );
+                                    }
                                 }
                             }
                             IncomingNotification::SettingsUpdated(_)
@@ -2278,6 +2497,74 @@ impl SessionController {
                             ctrl.update_permission_value(&session_id, &current_value);
                         }
                     }
+                    UiMessage::HistoryPageLoaded { events, has_more } => {
+                        conv_view.set_history_loading(false);
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.history_loading.set(false);
+                        }
+                        if events.is_empty() {
+                            let _ = has_more;
+                            return;
+                        }
+                        let adjustment = conv_view.transcript_adjustment();
+                        let distance_from_bottom = adjustment.upper() - adjustment.value();
+                        let mut guard = active_sess.borrow_mut();
+                        if let Some(session) = guard.as_mut() {
+                            session.transcript.prepend_events(events);
+                            conv_view.rerender_transcript(&session.transcript);
+                        }
+                        let adjustment = conv_view.transcript_adjustment();
+                        adjustment
+                            .set_value((adjustment.upper() - distance_from_bottom).max(0.0));
+                    }
+                    UiMessage::EchoAck => {
+                        let buffer = conv_view.composer().text_view().buffer();
+                        buffer.set_text("");
+                    }
+                    UiMessage::EchoFailed { text, error } => {
+                        let mut guard = active_sess.borrow_mut();
+                        if let Some(session) = guard.as_mut() {
+                            session.transcript.clear_pending_user();
+                            conv_view.update_transcript(&session.transcript);
+                        }
+                        conv_view.composer().text_view().buffer().set_text(&text);
+                        toast_overlay
+                            .add_toast(adw::Toast::new(&format!("Send failed: {}", error)));
+                    }
+                    UiMessage::SubagentsLoaded(entries) => {
+                        sidebar.load_subagents(&entries);
+                    }
+                    UiMessage::JobsLoaded(jobs) => {
+                        conv_view.set_jobs(&jobs);
+                    }
+                    UiMessage::JobFollowLoaded(follow) => {
+                        conv_view.show_job_follow(&follow);
+                    }
+                    UiMessage::QuestionReopened(request) => {
+                        let (sender, _receiver) = oneshot::channel();
+                        show_user_question_dialog(&win, request, sender);
+                    }
+                    UiMessage::FeedbackLoaded(items) => {
+                        crate::ui::message_renderer::set_feedback_items(&items);
+                    }
+                    UiMessage::PluginInventoryLoaded(inventory) => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            if let Some(handle) = ctrl.settings_dialog.borrow().as_ref() {
+                                handle.plugin_inventory(&inventory);
+                            }
+                        }
+                    }
+                    UiMessage::PluginOperationDone { label, value } => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            if let Some(handle) = ctrl.settings_dialog.borrow().as_ref() {
+                                handle.plugin_operation(&label, &value);
+                            }
+                        }
+                    }
+                    UiMessage::PluginInstallState { .. }
+                    | UiMessage::PluginInstallLog { .. }
+                    | UiMessage::AccountLoaded { .. }
+                    | UiMessage::CredentialRecordsLoaded(_) => {}
                 }
             }
         });
@@ -2307,7 +2594,6 @@ impl SessionController {
                     let (start, end) = buf.bounds();
                     let text = buf.text(&start, &end, false).to_string();
                     if !text.trim().is_empty() {
-                        buf.set_text("");
                         c.submit_text(&text, false);
                     }
                 }
@@ -2327,6 +2613,13 @@ impl SessionController {
             }
         });
 
+        let c_weak_continue = controller_weak.clone();
+        composer.continue_button().connect_clicked(move |_| {
+            if let Some(c) = c_weak_continue.upgrade() {
+                c.continue_generation();
+            }
+        });
+
         let c_weak_enter = controller_weak.clone();
         let tv_enter = text_view.clone();
         let enter_controller = gtk4::EventControllerKey::new();
@@ -2343,7 +2636,6 @@ impl SessionController {
                     let (start, end) = buf.bounds();
                     let text = buf.text(&start, &end, false).to_string();
                     if !text.trim().is_empty() {
-                        buf.set_text("");
                         c.submit_text(&text, steer);
                     }
                 }
@@ -2404,6 +2696,471 @@ impl SessionController {
         self.conversation_view
             .widget()
             .add_controller(key_controller);
+    }
+
+    fn dispatch_call<P, R, F>(&self, method: &'static str, params: P, timeout: Duration, map: F)
+    where
+        P: serde::Serialize + Send + 'static,
+        R: serde::de::DeserializeOwned + Send + 'static,
+        F: FnOnce(Result<R, ConnectionError>) -> UiMessage + Send + 'static,
+    {
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            let Some(conn) = conn_opt else {
+                return;
+            };
+            let result = conn.call::<P, R>(method, params, timeout).await;
+            let _ = ui_sender.send(map(result));
+        });
+    }
+
+    pub fn refresh_plugins(&self) {
+        self.dispatch_call(
+            METHOD_PLUGIN_INVENTORY,
+            serde_json::json!({}),
+            Duration::from_secs(10),
+            |result| match result {
+                Ok(inventory) => UiMessage::PluginInventoryLoaded(inventory),
+                Err(err) => UiMessage::Toast(format!("Plugin inventory failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn plugin_inspect(&self, spec: &str) {
+        let params = PluginInspectParams {
+            spec: spec.to_string(),
+            registry: None,
+        };
+        self.dispatch_call(
+            METHOD_PLUGIN_INSPECT,
+            params,
+            Duration::from_secs(30),
+            |result: Result<PluginOperationResult, ConnectionError>| match result {
+                Ok(value) => UiMessage::PluginOperationDone {
+                    label: "Inspect".to_string(),
+                    value: value.result,
+                },
+                Err(err) => UiMessage::Toast(format!("Inspect failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn plugin_install(&self, spec: &str, request_id: Option<String>) {
+        let params = PluginInstallParams {
+            spec: spec.to_string(),
+            enabled: None,
+            save_exact: None,
+            request_id,
+            approved_builds: None,
+            registry: None,
+        };
+        self.dispatch_call(
+            METHOD_PLUGIN_INSTALL,
+            params,
+            Duration::from_secs(300),
+            |result: Result<PluginOperationResult, ConnectionError>| match result {
+                Ok(value) => UiMessage::PluginOperationDone {
+                    label: "Install".to_string(),
+                    value: value.result,
+                },
+                Err(err) => UiMessage::Toast(format!("Install failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn plugin_cancel_install(&self, request_id: &str) {
+        let params = PluginRequestParams {
+            request_id: request_id.to_string(),
+        };
+        self.dispatch_call(
+            METHOD_PLUGIN_CANCEL_INSTALL,
+            params,
+            Duration::from_secs(10),
+            |result: Result<PluginOperationResult, ConnectionError>| match result {
+                Ok(value) => UiMessage::PluginOperationDone {
+                    label: "Cancel install".to_string(),
+                    value: value.result,
+                },
+                Err(err) => UiMessage::Toast(format!("Cancel failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn plugin_wait_install(&self, request_id: &str) {
+        let params = PluginRequestParams {
+            request_id: request_id.to_string(),
+        };
+        self.dispatch_call(
+            METHOD_PLUGIN_WAIT_INSTALL,
+            params,
+            Duration::from_secs(300),
+            |result: Result<PluginOperationResult, ConnectionError>| match result {
+                Ok(value) => UiMessage::PluginOperationDone {
+                    label: "Install".to_string(),
+                    value: value.result,
+                },
+                Err(err) => UiMessage::Toast(format!("Wait install failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn plugin_remove(&self, name: &str) {
+        let params = PluginRemoveParams {
+            name: name.to_string(),
+        };
+        self.dispatch_call(
+            METHOD_PLUGIN_REMOVE,
+            params,
+            Duration::from_secs(120),
+            |result: Result<PluginOperationResult, ConnectionError>| match result {
+                Ok(value) => UiMessage::PluginOperationDone {
+                    label: "Remove".to_string(),
+                    value: value.result,
+                },
+                Err(err) => UiMessage::Toast(format!("Remove failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn plugin_versions(&self, name: &str) {
+        let params = PluginVersionsParams {
+            name: name.to_string(),
+            registry: None,
+        };
+        self.dispatch_call(
+            METHOD_PLUGIN_VERSIONS,
+            params,
+            Duration::from_secs(30),
+            |result: Result<PluginOperationResult, ConnectionError>| match result {
+                Ok(value) => UiMessage::PluginOperationDone {
+                    label: "Versions".to_string(),
+                    value: value.result,
+                },
+                Err(err) => UiMessage::Toast(format!("Versions failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn plugin_update(&self, name: &str, version: &str) {
+        let params = PluginUpdateParams {
+            name: name.to_string(),
+            version: version.to_string(),
+            registry: None,
+        };
+        self.dispatch_call(
+            METHOD_PLUGIN_UPDATE,
+            params,
+            Duration::from_secs(300),
+            |result: Result<PluginOperationResult, ConnectionError>| match result {
+                Ok(value) => UiMessage::PluginOperationDone {
+                    label: "Update".to_string(),
+                    value: value.result,
+                },
+                Err(err) => UiMessage::Toast(format!("Update failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn refresh_subagents(&self) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        self.dispatch_call(
+            METHOD_SUBAGENT_LIST,
+            SubagentListParams { session_id },
+            Duration::from_secs(10),
+            |result: Result<SubagentListResult, ConnectionError>| match result {
+                Ok(list) => UiMessage::SubagentsLoaded(list.entries),
+                Err(err) => UiMessage::Toast(format!("Subagent list failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn interrupt_subagent(&self, child_session_id: &str) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        let params = SubagentInterruptParams {
+            session_id,
+            child_session_id: child_session_id.to_string(),
+        };
+        self.dispatch_call(
+            METHOD_SUBAGENT_INTERRUPT,
+            params,
+            Duration::from_secs(10),
+            |result: Result<SubagentInterruptResult, ConnectionError>| match result {
+                Ok(_) => UiMessage::Toast("Subagent interrupted".to_string()),
+                Err(err) => UiMessage::Toast(format!("Interrupt failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn refresh_jobs(&self) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        self.dispatch_call(
+            METHOD_JOB_LIST,
+            JobListParams { session_id },
+            Duration::from_secs(10),
+            |result: Result<JobListResult, ConnectionError>| match result {
+                Ok(list) => UiMessage::JobsLoaded(list.jobs),
+                Err(err) => UiMessage::Toast(format!("Job list failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn follow_job(&self, job_id: &str) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        let params = JobFollowParams {
+            session_id,
+            job_id: job_id.to_string(),
+            from: None,
+        };
+        self.dispatch_call(
+            METHOD_JOB_FOLLOW,
+            params,
+            Duration::from_secs(10),
+            |result: Result<JobFollowResult, ConnectionError>| match result {
+                Ok(follow) => UiMessage::JobFollowLoaded(follow),
+                Err(err) => UiMessage::Toast(format!("Job follow failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn kill_job(&self, job_id: &str) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        let params = JobKillParams {
+            session_id,
+            job_id: job_id.to_string(),
+            reason: Some("user requested".to_string()),
+        };
+        self.dispatch_call(
+            METHOD_JOB_KILL,
+            params,
+            Duration::from_secs(10),
+            |result: Result<JobKillResult, ConnectionError>| match result {
+                Ok(kill) => UiMessage::Toast(format!("Job kill: {}", kill.status)),
+                Err(err) => UiMessage::Toast(format!("Job kill failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn load_feedback(&self) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        self.dispatch_call(
+            METHOD_MESSAGE_FEEDBACK_LIST,
+            MessageFeedbackListParams { session_id },
+            Duration::from_secs(10),
+            |result: Result<MessageFeedbackListResult, ConnectionError>| match result {
+                Ok(list) => UiMessage::FeedbackLoaded(list.items),
+                Err(err) => UiMessage::Toast(format!("Feedback load failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn put_feedback(
+        &self,
+        message_id: &str,
+        rating: &str,
+        if_version: Option<String>,
+        note: Option<String>,
+        category: Option<String>,
+    ) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        let params = MessageFeedbackPutParams {
+            session_id,
+            message_id: message_id.to_string(),
+            rating: rating.to_string(),
+            note,
+            category,
+            if_version,
+        };
+        self.dispatch_call(
+            METHOD_MESSAGE_FEEDBACK_PUT,
+            params,
+            Duration::from_secs(10),
+            |result: Result<MessageFeedbackPutResult, ConnectionError>| match result {
+                Ok(_) => UiMessage::Toast("Feedback saved".to_string()),
+                Err(err) => UiMessage::Toast(format!("Feedback failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn delete_feedback(&self, message_id: &str, if_version: &str) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        let params = MessageFeedbackDeleteParams {
+            session_id,
+            message_id: message_id.to_string(),
+            if_version: if_version.to_string(),
+        };
+        self.dispatch_call(
+            METHOD_MESSAGE_FEEDBACK_DELETE,
+            params,
+            Duration::from_secs(10),
+            |result: Result<MessageFeedbackDeleteResult, ConnectionError>| match result {
+                Ok(_) => UiMessage::Toast("Feedback removed".to_string()),
+                Err(err) => UiMessage::Toast(format!("Feedback delete failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn record_session_feedback(&self, text: &str) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        let params = SessionFeedbackRecordParams {
+            session_id,
+            text: Some(text.to_string()),
+            category: None,
+        };
+        self.dispatch_call(
+            METHOD_SESSION_FEEDBACK_RECORD,
+            params,
+            Duration::from_secs(10),
+            |result: Result<SessionFeedbackRecordResult, ConnectionError>| match result {
+                Ok(_) => UiMessage::Toast("Feedback recorded".to_string()),
+                Err(err) => UiMessage::Toast(format!("Feedback record failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn reopen_question(&self) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        self.dispatch_call(
+            METHOD_QUESTION_REOPEN,
+            QuestionReopenParams { session_id },
+            Duration::from_secs(10),
+            |result: Result<QuestionReopenResult, ConnectionError>| match result {
+                Ok(reopen) => UiMessage::QuestionReopened(reopen.request),
+                Err(err) => UiMessage::Toast(format!("No pending question: {}", err)),
+            },
+        );
+    }
+
+    pub fn load_account(&self) {
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            let Some(conn) = conn_opt else {
+                return;
+            };
+            let status = conn
+                .call::<serde_json::Value, AccountStatusResult>(
+                    METHOD_ACCOUNT_STATUS,
+                    serde_json::json!({}),
+                    Duration::from_secs(10),
+                )
+                .await
+                .map_err(|err| err.to_string());
+            let profile = conn
+                .call::<serde_json::Value, AccountProfileResult>(
+                    METHOD_ACCOUNT_PROFILE,
+                    serde_json::json!({}),
+                    Duration::from_secs(10),
+                )
+                .await
+                .map_err(|err| err.to_string());
+            let balance = conn
+                .call::<serde_json::Value, AccountBalanceResult>(
+                    METHOD_ACCOUNT_BALANCE,
+                    serde_json::json!({}),
+                    Duration::from_secs(10),
+                )
+                .await
+                .map_err(|err| err.to_string());
+            let _ = ui_sender.send(UiMessage::AccountLoaded {
+                status,
+                profile,
+                balance,
+            });
+        });
+    }
+
+    pub fn sign_out_account(&self) {
+        self.dispatch_call(
+            METHOD_ACCOUNT_SIGN_OUT,
+            serde_json::json!({}),
+            Duration::from_secs(10),
+            |result: Result<AccountSignOutResult, ConnectionError>| match result {
+                Ok(_) => UiMessage::Toast("Signed out".to_string()),
+                Err(err) => UiMessage::Toast(format!("Sign out failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn load_credential_records(&self) {
+        self.dispatch_call(
+            METHOD_CREDENTIALS_RECORDS_LIST,
+            serde_json::json!({}),
+            Duration::from_secs(10),
+            |result: Result<CredentialRecordsListResult, ConnectionError>| match result {
+                Ok(list) => UiMessage::CredentialRecordsLoaded(list.records),
+                Err(err) => UiMessage::Toast(format!("Credential records failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn credential_record_read(&self, key: &str) {
+        let params = CredentialRecordReadParams {
+            key: key.to_string(),
+        };
+        self.dispatch_call(
+            METHOD_CREDENTIALS_RECORDS_READ,
+            params,
+            Duration::from_secs(10),
+            |result: Result<CredentialRecordReadResult, ConnectionError>| match result {
+                Ok(read) => UiMessage::PluginOperationDone {
+                    label: "Credential record".to_string(),
+                    value: serde_json::json!({
+                        "key": read.key,
+                        "configured": read.configured,
+                        "kind": read.kind,
+                        "writable": read.writable,
+                        "hasKey": read.has_key,
+                        "envNames": read.env_names,
+                        "payloadRedacted": read.payload_redacted,
+                    }),
+                },
+                Err(err) => UiMessage::Toast(format!("Credential read failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn credential_record_delete(&self, key: &str) {
+        let params = CredentialRecordDeleteParams {
+            key: key.to_string(),
+        };
+        self.dispatch_call(
+            METHOD_CREDENTIALS_RECORDS_DELETE,
+            params,
+            Duration::from_secs(10),
+            |result: Result<CredentialRecordMutationResult, ConnectionError>| match result {
+                Ok(metadata) => UiMessage::PluginOperationDone {
+                    label: "Credential deleted".to_string(),
+                    value: serde_json::json!({
+                        "key": metadata.metadata.key,
+                        "configured": metadata.metadata.configured,
+                    }),
+                },
+                Err(err) => UiMessage::Toast(format!("Credential delete failed: {}", err)),
+            },
+        );
     }
 
 }

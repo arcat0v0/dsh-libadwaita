@@ -20,6 +20,12 @@ pub struct ConversationView {
     welcome_bubble: gtk4::Box,
     status_label: gtk4::Label,
     title_label: gtk4::Label,
+    breadcrumb: gtk4::Label,
+    jobs_popover: gtk4::Popover,
+    jobs_box: gtk4::Box,
+    jobs_output: gtk4::Label,
+    transcript_scroll: gtk4::ScrolledWindow,
+    on_load_older: Rc<RefCell<Option<Box<dyn Fn()>>>>,
     live_handle: RefCell<Option<AssistantLiveHandle>>,
     rendered_count: Cell<usize>,
     active_cwd: Rc<RefCell<PathBuf>>,
@@ -56,6 +62,13 @@ impl ConversationView {
             .css_classes(["title-4"])
             .build();
         session_header.append(&title_label);
+
+        let breadcrumb = gtk4::Label::builder()
+            .label("")
+            .css_classes(["dim-label", "caption"])
+            .halign(gtk4::Align::Start)
+            .build();
+        session_header.append(&breadcrumb);
 
         let title_activate = Rc::new(RefCell::new(None::<Box<dyn Fn()>>));
         let title_click = gtk4::GestureClick::new();
@@ -94,6 +107,36 @@ impl ConversationView {
         });
         session_header.append(&open_terminal_btn);
 
+        let jobs_button = gtk4::MenuButton::builder()
+            .label("Jobs")
+            .css_classes(["flat"])
+            .build();
+        let jobs_popover = gtk4::Popover::builder().build();
+        let jobs_outer = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Vertical)
+            .spacing(4)
+            .margin_start(8)
+            .margin_end(8)
+            .margin_top(8)
+            .margin_bottom(8)
+            .build();
+        let jobs_box = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Vertical)
+            .spacing(4)
+            .build();
+        jobs_outer.append(&jobs_box);
+        let jobs_output = gtk4::Label::builder()
+            .label("")
+            .wrap(true)
+            .selectable(true)
+            .xalign(0.0)
+            .css_classes(["monospace", "caption"])
+            .build();
+        jobs_outer.append(&jobs_output);
+        jobs_popover.set_child(Some(&jobs_outer));
+        jobs_button.set_popover(Some(&jobs_popover));
+        session_header.append(&jobs_button);
+
         let status_label = gtk4::Label::builder()
             .label("Idle")
             .css_classes(["dim-label", "caption"])
@@ -112,6 +155,18 @@ impl ConversationView {
             .vexpand(true)
             .hscrollbar_policy(gtk4::PolicyType::Never)
             .build();
+
+        let load_slot_for_scroll: Rc<RefCell<Option<Box<dyn Fn()>>>> =
+            Rc::new(RefCell::new(None));
+        let load_slot_clone = load_slot_for_scroll.clone();
+        let adjustment = transcript_scroll.vadjustment();
+        adjustment.connect_value_changed(move |adj| {
+            if adj.value() <= 8.0 {
+                if let Some(handler) = load_slot_clone.borrow().as_ref() {
+                    handler();
+                }
+            }
+        });
 
         let transcript_box = gtk4::Box::builder()
             .orientation(gtk4::Orientation::Vertical)
@@ -212,6 +267,12 @@ impl ConversationView {
             welcome_bubble,
             status_label,
             title_label,
+            breadcrumb,
+            jobs_popover,
+            jobs_box,
+            jobs_output,
+            transcript_scroll,
+            on_load_older: load_slot_for_scroll,
             live_handle: RefCell::new(None),
             rendered_count: Cell::new(0),
             active_cwd,
@@ -271,6 +332,107 @@ impl ConversationView {
 
     pub fn update_todo(&self, items: &[crate::protocol::TodoItem]) {
         self.todo_dock.update(items);
+    }
+
+    pub fn set_on_load_older<F: Fn() + 'static>(&self, handler: F) {
+        *self.on_load_older.borrow_mut() = Some(Box::new(handler));
+    }
+
+    pub fn transcript_adjustment(&self) -> gtk4::Adjustment {
+        self.transcript_scroll.vadjustment()
+    }
+
+    pub fn rerender_transcript(&self, transcript: &ConversationTranscript) {
+        while let Some(child) = self.transcript_box.first_child() {
+            self.transcript_box.remove(&child);
+        }
+        self.live_handle.borrow_mut().take();
+        self.rendered_count.set(0);
+        self.update_transcript(transcript);
+    }
+
+    pub fn set_history_loading(&self, loading: bool) {
+        let existing = self
+            .transcript_box
+            .first_child()
+            .filter(|child| child.widget_name() == "history-loading");
+        if loading {
+            if existing.is_none() {
+                let row = gtk4::Label::builder()
+                    .label("Loading earlier messages…")
+                    .css_classes(["dim-label", "caption"])
+                    .build();
+                row.set_widget_name("history-loading");
+                self.transcript_box.prepend(&row);
+            }
+        } else if let Some(row) = existing {
+            self.transcript_box.remove(&row);
+        }
+    }
+
+    pub fn set_breadcrumb(&self, text: &str) {
+        self.breadcrumb.set_label(text);
+    }
+
+    pub fn set_jobs(&self, jobs: &[crate::protocol::JobWireView]) {
+        while let Some(child) = self.jobs_box.first_child() {
+            self.jobs_box.remove(&child);
+        }
+        if jobs.is_empty() {
+            let row = gtk4::Label::builder()
+                .label("No background jobs")
+                .css_classes(["dim-label", "caption"])
+                .halign(gtk4::Align::Start)
+                .build();
+            self.jobs_box.append(&row);
+            return;
+        }
+        for job in jobs {
+            let row = gtk4::Box::builder()
+                .orientation(gtk4::Orientation::Horizontal)
+                .spacing(6)
+                .build();
+            let label = gtk4::Button::builder()
+                .label(format!("{} · {}", job.label, job.status))
+                .css_classes(["flat"])
+                .action_name("win.follow-job")
+                .build();
+            label.set_action_target_value(Some(&job.id.to_variant()));
+            row.append(&label);
+            let kill = gtk4::Button::builder()
+                .label("Kill")
+                .css_classes(["flat", "destructive-action"])
+                .action_name("win.kill-job")
+                .build();
+            kill.set_action_target_value(Some(&job.id.to_variant()));
+            row.append(&kill);
+            self.jobs_box.append(&row);
+        }
+    }
+
+    pub fn show_job_follow(&self, follow: &crate::protocol::JobFollowResult) {
+        let text = follow
+            .chunks
+            .iter()
+            .map(|chunk| chunk.text.as_str())
+            .collect::<String>();
+        if follow.lossy {
+            self.jobs_output
+                .set_label(&format!("[earlier output lost]\n{}", text));
+        } else {
+            self.jobs_output.set_label(&text);
+        }
+        self.jobs_popover.popup();
+    }
+
+    pub fn job_output_append(&self, chunks: &[crate::protocol::JobChunkWire]) {
+        let addition = chunks
+            .iter()
+            .map(|chunk| chunk.text.as_str())
+            .collect::<String>();
+        let existing = self.jobs_output.label().to_string();
+        self.jobs_output
+            .set_label(&format!("{}{}", existing, addition));
     }
 
     pub fn clear_session(&self) {
