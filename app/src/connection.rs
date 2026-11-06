@@ -114,6 +114,7 @@ pub enum IncomingNotification {
     SessionStatus(SessionStatusNotificationParams),
     SessionTitle(SessionTitleNotificationParams),
     UserQuestionCancelled(UserQuestionCancelledParams),
+    SessionInbox(SessionInboxNotificationParams),
     Unknown {
         method: String,
         params: serde_json::Value,
@@ -173,6 +174,16 @@ impl IncomingNotification {
                     }
                 }
             }
+            NOTIFICATION_SESSION_INBOX => {
+                if let Ok(parsed) = serde_json::from_value(params.clone()) {
+                    Self::SessionInbox(parsed)
+                } else {
+                    Self::Unknown {
+                        method: method.to_string(),
+                        params,
+                    }
+                }
+            }
             _ => Self::Unknown {
                 method: method.to_string(),
                 params,
@@ -180,7 +191,6 @@ impl IncomingNotification {
         }
     }
 }
-
 pub trait ApprovalResponder: Send + Sync {
     fn respond(&self, req: ApprovalRequestParams) -> Pin<Box<dyn Future<Output = ApprovalOutcome> + Send>>;
 }
@@ -215,6 +225,7 @@ struct Inner {
     pending_requests: Mutex<HashMap<RequestId, oneshot::Sender<Result<serde_json::Value, ConnectionError>>>>,
     outbound_tx: mpsc::Sender<String>,
     notification_tx: broadcast::Sender<IncomingNotification>,
+    closed_tx: broadcast::Sender<()>,
     approval_responder: RwLock<Option<Arc<dyn ApprovalResponder>>>,
     user_question_responder: RwLock<Option<Arc<dyn UserQuestionResponder>>>,
     default_timeout: Duration,
@@ -253,6 +264,7 @@ impl BridgeConnection {
     {
         let (outbound_tx, outbound_rx) = mpsc::channel(128);
         let (notification_tx, _) = broadcast::channel(512);
+        let (closed_tx, _) = broadcast::channel(8);
 
         let inner = Arc::new(Inner {
             state: AtomicU8::new(ConnectionState::Connected as u8),
@@ -260,6 +272,7 @@ impl BridgeConnection {
             pending_requests: Mutex::new(HashMap::new()),
             outbound_tx,
             notification_tx,
+            closed_tx,
             approval_responder: RwLock::new(None),
             user_question_responder: RwLock::new(None),
             default_timeout,
@@ -272,6 +285,10 @@ impl BridgeConnection {
 
     pub fn state(&self) -> ConnectionState {
         ConnectionState::from(self.inner.state.load(Ordering::Acquire))
+    }
+
+    pub fn subscribe_closed(&self) -> broadcast::Receiver<()> {
+        self.inner.closed_tx.subscribe()
     }
 
     pub fn set_approval_responder<R: ApprovalResponder + 'static>(&self, responder: R) {
@@ -365,6 +382,7 @@ impl BridgeConnection {
 
     pub async fn close(&self) -> Result<(), ConnectionError> {
         self.inner.state.store(ConnectionState::Closing as u8, Ordering::Release);
+        let _ = self.inner.closed_tx.send(());
         let mut pending = self.inner.pending_requests.lock().await;
         for (_, sender) in pending.drain() {
             let _ = sender.send(Err(ConnectionError::Closed));
@@ -448,6 +466,7 @@ impl BridgeConnection {
             }
 
             inner_clone.state.store(ConnectionState::Closed as u8, Ordering::Release);
+            let _ = inner_clone.closed_tx.send(());
             let mut pending = inner_clone.pending_requests.lock().await;
             for (_, sender) in pending.drain() {
                 let _ = sender.send(Err(ConnectionError::Closed));

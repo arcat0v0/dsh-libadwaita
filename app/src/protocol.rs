@@ -14,12 +14,22 @@ pub const METHOD_SESSION_PROMPT: &str = "libadwaita/session/prompt";
 pub const METHOD_SESSION_CANCEL: &str = "libadwaita/session/cancel";
 pub const METHOD_SESSION_RELEASE: &str = "libadwaita/session/release";
 pub const METHOD_SESSION_ARCHIVE: &str = "libadwaita/session/archive";
+pub const METHOD_SESSION_RENAME: &str = "libadwaita/session/rename";
+pub const METHOD_SESSION_FORK: &str = "libadwaita/session/fork";
+pub const METHOD_QUEUE_LIST: &str = "libadwaita/session/queue/list";
+pub const METHOD_QUEUE_EDIT: &str = "libadwaita/session/queue/edit";
+pub const METHOD_QUEUE_REMOVE: &str = "libadwaita/session/queue/remove";
+pub const METHOD_QUEUE_STEER: &str = "libadwaita/session/queue/steer";
 pub const METHOD_SESSION_WORKDIR_GET: &str = "libadwaita/session/workdir/get";
 pub const METHOD_SESSION_MODEL_GET: &str = "libadwaita/session/model/get";
 pub const METHOD_SESSION_MODEL_SET: &str = "libadwaita/session/model/set";
 pub const METHOD_MODEL_CATALOG: &str = "libadwaita/model/catalog";
 pub const METHOD_SETTINGS_GET: &str = "libadwaita/settings/get";
 pub const METHOD_SETTINGS_MUTATE: &str = "libadwaita/settings/mutate";
+pub const METHOD_COMMAND_LIST: &str = "libadwaita/command/list";
+pub const METHOD_COMMAND_EXECUTE: &str = "libadwaita/command/execute";
+pub const METHOD_SKILL_LIST: &str = "libadwaita/skill/list";
+pub const METHOD_REFERENCE_LIST: &str = "libadwaita/reference/list";
 pub const METHOD_PLUGIN_LIST: &str = "libadwaita/plugin/list";
 pub const METHOD_PLUGIN_ENABLE: &str = "libadwaita/plugin/enable";
 pub const METHOD_PLUGIN_DISABLE: &str = "libadwaita/plugin/disable";
@@ -37,6 +47,7 @@ pub const NOTIFICATION_AGENT_STREAM: &str = "agent.stream";
 pub const NOTIFICATION_SESSION_STATUS: &str = "session.status";
 pub const NOTIFICATION_SESSION_TITLE: &str = "session.title";
 pub const NOTIFICATION_USER_QUESTION_CANCELLED: &str = "user-question.cancelled";
+pub const NOTIFICATION_SESSION_INBOX: &str = "session.inbox";
 
 pub const ERR_PARSE_ERROR: i64 = -32700;
 pub const ERR_INVALID_REQUEST: i64 = -32600;
@@ -56,6 +67,14 @@ pub const ERR_MODEL_NOT_CONFIGURED: i64 = -32008;
 pub const ERR_SEQUENCE_GAP_UNRECOVERABLE: i64 = -32009;
 pub const ERR_RESTART_REQUIRED: i64 = -32010;
 pub const ERR_WORKDIR_UNAVAILABLE: i64 = -32011;
+pub const ERR_TITLE_INVALID: i64 = -32012;
+pub const ERR_QUEUE_ITEM_NOT_FOUND: i64 = -32013;
+pub const ERR_QUEUE_STEER_UNAVAILABLE: i64 = -32014;
+pub const ERR_COMMANDS_UNAVAILABLE: i64 = -32015;
+pub const ERR_COMMAND_NOT_FOUND: i64 = -32016;
+pub const ERR_SKILLS_UNAVAILABLE: i64 = -32017;
+pub const ERR_REFERENCES_UNAVAILABLE: i64 = -32018;
+pub const ERR_FORK_UNAVAILABLE: i64 = -32019;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BridgeErrorCode {
@@ -76,6 +95,14 @@ pub enum BridgeErrorCode {
     SequenceGapUnrecoverable,
     RestartRequired,
     WorkdirUnavailable,
+    TitleInvalid,
+    QueueItemNotFound,
+    QueueSteerUnavailable,
+    CommandsUnavailable,
+    CommandNotFound,
+    SkillsUnavailable,
+    ReferencesUnavailable,
+    ForkUnavailable,
     Unknown(i64),
 }
 
@@ -99,6 +126,14 @@ impl BridgeErrorCode {
             ERR_SEQUENCE_GAP_UNRECOVERABLE => Self::SequenceGapUnrecoverable,
             ERR_RESTART_REQUIRED => Self::RestartRequired,
             ERR_WORKDIR_UNAVAILABLE => Self::WorkdirUnavailable,
+            ERR_TITLE_INVALID => Self::TitleInvalid,
+            ERR_QUEUE_ITEM_NOT_FOUND => Self::QueueItemNotFound,
+            ERR_QUEUE_STEER_UNAVAILABLE => Self::QueueSteerUnavailable,
+            ERR_COMMANDS_UNAVAILABLE => Self::CommandsUnavailable,
+            ERR_COMMAND_NOT_FOUND => Self::CommandNotFound,
+            ERR_SKILLS_UNAVAILABLE => Self::SkillsUnavailable,
+            ERR_REFERENCES_UNAVAILABLE => Self::ReferencesUnavailable,
+            ERR_FORK_UNAVAILABLE => Self::ForkUnavailable,
             other => Self::Unknown(other),
         }
     }
@@ -122,6 +157,14 @@ impl BridgeErrorCode {
             Self::SequenceGapUnrecoverable => ERR_SEQUENCE_GAP_UNRECOVERABLE,
             Self::RestartRequired => ERR_RESTART_REQUIRED,
             Self::WorkdirUnavailable => ERR_WORKDIR_UNAVAILABLE,
+            Self::TitleInvalid => ERR_TITLE_INVALID,
+            Self::QueueItemNotFound => ERR_QUEUE_ITEM_NOT_FOUND,
+            Self::QueueSteerUnavailable => ERR_QUEUE_STEER_UNAVAILABLE,
+            Self::CommandsUnavailable => ERR_COMMANDS_UNAVAILABLE,
+            Self::CommandNotFound => ERR_COMMAND_NOT_FOUND,
+            Self::SkillsUnavailable => ERR_SKILLS_UNAVAILABLE,
+            Self::ReferencesUnavailable => ERR_REFERENCES_UNAVAILABLE,
+            Self::ForkUnavailable => ERR_FORK_UNAVAILABLE,
             Self::Unknown(code) => code,
         }
     }
@@ -816,6 +859,222 @@ pub struct SessionArchiveResult {
     #[serde(rename = "sessionId")]
     pub session_id: String,
     pub archived: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRenameParams {
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRenameResult {
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+    pub title: String,
+    pub source: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionForkParams {
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub at_seq: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub increase_title: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionForkResult {
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+    pub header: SessionHeader,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum QueuePlacement {
+    #[serde(rename = "queued")]
+    Queued,
+    #[serde(rename = "steering")]
+    Steering,
+    #[serde(rename = "context")]
+    Context,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueItem {
+    pub id: String,
+    pub placement: QueuePlacement,
+    pub content: Vec<serde_json::Value>,
+}
+
+impl QueueItem {
+    pub fn text(&self) -> String {
+        let mut parts = Vec::new();
+        for block in &self.content {
+            if block["type"] == "text" {
+                if let Some(text) = block["text"].as_str() {
+                    parts.push(text);
+                }
+            }
+        }
+        parts.join("\n")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueListParams {
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueListResult {
+    pub items: Vec<QueueItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueEditParams {
+    pub session_id: String,
+    pub item_id: String,
+    pub content: Vec<PromptContentBlock>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueRemoveParams {
+    pub session_id: String,
+    pub item_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueSteerParams {
+    pub session_id: String,
+    pub item_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueMutationResult {
+    pub accepted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandInput {
+    pub hint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandDescriptor {
+    pub name: String,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input: Option<CommandInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandListParams {
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandListResult {
+    pub commands: Vec<CommandDescriptor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandExecuteParams {
+    pub session_id: String,
+    pub command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandExecuteResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_id: Option<String>,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_event_seq: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillListParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInvocation {
+    pub model_invocable: bool,
+    pub user_invocable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillSummaryItem {
+    pub name: String,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub when_to_use: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub source: String,
+    pub provider: String,
+    pub invocation: SkillInvocation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillListResult {
+    pub skills: Vec<SkillSummaryItem>,
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferenceListParams {
+    pub session_id: String,
+    pub query: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferenceCandidate {
+    pub path: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferenceListResult {
+    pub candidates: Vec<ReferenceCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionInboxNotificationParams {
+    pub session_id: String,
+    pub items: Vec<QueueItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -5,6 +5,7 @@ pub mod connection;
 pub mod credentials;
 pub mod protocol;
 pub mod session;
+pub mod session_state;
 pub mod supervisor;
 pub mod transcript;
 pub mod ui;

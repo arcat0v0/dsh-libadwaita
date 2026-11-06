@@ -194,6 +194,30 @@ impl Sidebar {
                 .margin_bottom(4)
                 .build();
 
+            let rename_btn = gtk4::Button::builder()
+                .label("Rename")
+                .css_classes(["flat"])
+                .action_name("win.rename-session")
+                .build();
+            rename_btn.set_action_target_value(Some(&item.id.to_variant()));
+            let pop_clone_rename = popover.clone();
+            rename_btn.connect_clicked(move |_| {
+                pop_clone_rename.popdown();
+            });
+            pop_box.append(&rename_btn);
+
+            let close_btn = gtk4::Button::builder()
+                .label("Close View")
+                .css_classes(["flat"])
+                .action_name("win.close-session")
+                .build();
+            close_btn.set_action_target_value(Some(&item.id.to_variant()));
+            let pop_clone_close = popover.clone();
+            close_btn.connect_clicked(move |_| {
+                pop_clone_close.popdown();
+            });
+            pop_box.append(&close_btn);
+
             let archive_btn = gtk4::Button::builder()
                 .label("Archive")
                 .css_classes(["flat"])

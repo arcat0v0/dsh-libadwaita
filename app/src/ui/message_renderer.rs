@@ -391,6 +391,7 @@ pub fn build_assistant_message(
     reasoning: Option<&str>,
     tool_calls: &[ToolCallItem],
     is_live: bool,
+    seq: Option<i64>,
 ) -> (gtk4::Box, AssistantLiveHandle) {
     let row = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Horizontal)
@@ -488,6 +489,27 @@ pub fn build_assistant_message(
         .margin_bottom(6)
         .build();
     bubble.append(&spinner);
+
+    if !is_live {
+        if let Some(message_seq) = seq {
+            let actions_box = gtk4::Box::builder()
+                .orientation(gtk4::Orientation::Horizontal)
+                .spacing(6)
+                .halign(gtk4::Align::End)
+                .margin_end(10)
+                .margin_bottom(8)
+                .build();
+            let fork_btn = gtk4::Button::builder()
+                .icon_name("view-more-symbolic")
+                .tooltip_text("Fork from here")
+                .css_classes(["flat", "circular"])
+                .build();
+            fork_btn.set_action_name(Some("win.fork-session"));
+            fork_btn.set_action_target_value(Some(&message_seq.to_variant()));
+            actions_box.append(&fork_btn);
+            bubble.append(&actions_box);
+        }
+    }
 
     row.append(&bubble);
 
@@ -658,6 +680,7 @@ pub fn render_block(block: &RenderBlock) -> (gtk4::Box, Option<AssistantLiveHand
             reasoning,
             tool_calls,
             is_live,
+            seq,
             ..
         } => {
             let (widget, handle) = build_assistant_message(
@@ -665,6 +688,7 @@ pub fn render_block(block: &RenderBlock) -> (gtk4::Box, Option<AssistantLiveHand
                 reasoning.as_deref(),
                 tool_calls,
                 *is_live,
+                *seq,
             );
             (widget, Some(handle))
         }

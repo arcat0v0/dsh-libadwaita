@@ -21,8 +21,10 @@ pub struct MainWindow {
     controller: RefCell<Option<Rc<SessionController>>>,
     shortcuts_window: Rc<RefCell<Option<gtk4::ShortcutsWindow>>>,
     startup_banner: adw::Banner,
+    content_stack: gtk4::Stack,
+    startup_page: adw::StatusPage,
+    startup_spinner: gtk4::Spinner,
 }
-
 impl MainWindow {
     pub fn new(app: &adw::Application) -> Self {
         let sidebar = Rc::new(Sidebar::new());
@@ -84,10 +86,27 @@ impl MainWindow {
             .revealed(false)
             .build();
 
+        let startup_spinner = gtk4::Spinner::builder()
+            .spinning(true)
+            .width_request(36)
+            .height_request(36)
+            .build();
+        let startup_page = adw::StatusPage::builder()
+            .title("Starting dsh")
+            .description("Connecting to the local harness")
+            .child(&startup_spinner)
+            .build();
+        let content_stack = gtk4::Stack::builder()
+            .transition_type(gtk4::StackTransitionType::Crossfade)
+            .build();
+        content_stack.add_named(&startup_page, Some("startup"));
+        content_stack.add_named(&split_view, Some("main"));
+        content_stack.set_visible_child_name("startup");
+
         let toolbar_view = adw::ToolbarView::new();
         toolbar_view.add_top_bar(&header_bar);
         toolbar_view.add_top_bar(&startup_banner);
-        toolbar_view.set_content(Some(&split_view));
+        toolbar_view.set_content(Some(&content_stack));
 
         let toast_overlay = adw::ToastOverlay::new();
         toast_overlay.set_child(Some(&toolbar_view));
@@ -165,6 +184,9 @@ impl MainWindow {
             controller: RefCell::new(None),
             shortcuts_window,
             startup_banner,
+            content_stack,
+            startup_page,
+            startup_spinner,
         }
     }
 
@@ -205,6 +227,48 @@ impl MainWindow {
             }
         });
         self.window.add_action(&archive_session_action);
+
+        let ctrl_rename = Rc::downgrade(&controller);
+        let rename_session_action = gtk4::gio::SimpleAction::new(
+            "rename-session",
+            Some(&gtk4::glib::VariantTy::STRING),
+        );
+        rename_session_action.connect_activate(move |_, param| {
+            if let Some(id) = param.and_then(|p| p.get::<String>()) {
+                if let Some(c) = ctrl_rename.upgrade() {
+                    c.open_rename_for_id(&id);
+                }
+            }
+        });
+        self.window.add_action(&rename_session_action);
+
+        let ctrl_close_view = Rc::downgrade(&controller);
+        let close_session_action = gtk4::gio::SimpleAction::new(
+            "close-session",
+            Some(&gtk4::glib::VariantTy::STRING),
+        );
+        close_session_action.connect_activate(move |_, param| {
+            if let Some(id) = param.and_then(|p| p.get::<String>()) {
+                if let Some(c) = ctrl_close_view.upgrade() {
+                    c.close_session(&id);
+                }
+            }
+        });
+        self.window.add_action(&close_session_action);
+
+        let ctrl_fork = Rc::downgrade(&controller);
+        let fork_session_action = gtk4::gio::SimpleAction::new(
+            "fork-session",
+            Some(&gtk4::glib::VariantTy::INT64),
+        );
+        fork_session_action.connect_activate(move |_, param| {
+            if let Some(at_seq) = param.and_then(|p| p.get::<i64>()) {
+                if let Some(c) = ctrl_fork.upgrade() {
+                    c.open_fork_dialog(at_seq);
+                }
+            }
+        });
+        self.window.add_action(&fork_session_action);
 
         let ctrl_model = Rc::downgrade(&controller);
         self.model_btn.connect_clicked(move |btn| {
@@ -273,5 +337,17 @@ impl MainWindow {
 
     pub fn startup_banner(&self) -> &adw::Banner {
         &self.startup_banner
+    }
+
+    pub fn content_stack(&self) -> &gtk4::Stack {
+        &self.content_stack
+    }
+
+    pub fn startup_page(&self) -> &adw::StatusPage {
+        &self.startup_page
+    }
+
+    pub fn startup_spinner(&self) -> &gtk4::Spinner {
+        &self.startup_spinner
     }
 }

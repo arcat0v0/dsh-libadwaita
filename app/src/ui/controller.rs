@@ -2,6 +2,7 @@ use crate::connection::{ApprovalResponder, BridgeConnection, IncomingNotificatio
 use crate::credentials::{should_show_onboarding, CredentialStore, DEFAULT_PROVIDER};
 use crate::protocol::*;
 use crate::session::{SessionModel, SessionStatus};
+use crate::session_state::{default_state_path, SessionState};
 use crate::supervisor::{resolve_bridge_bundle_path, HarnessSupervisor, SupervisorConfig};
 use crate::ui::approval_dialog::{show_approval_dialog, show_user_question_dialog};
 use crate::ui::conversation::ConversationView;
@@ -10,16 +11,19 @@ use crate::ui::desktop::{
     withdraw_notification,
 };
 use crate::ui::onboarding::show_onboarding_dialog;
+use crate::ui::session_dialogs::{show_fork_dialog, show_rename_dialog};
 use crate::ui::sidebar::Sidebar;
+use crate::ui::trigger_popup::{show_trigger_popup, TriggerOption};
 use crate::ui::window::MainWindow;
 use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
@@ -57,6 +61,20 @@ pub enum UiMessage {
         connection: BridgeConnection,
     },
     SupervisorStartFailed(String),
+    ConnectionLost,
+    SessionReleased,
+    SessionForked(String),
+    SessionRenamed {
+        session_id: String,
+        title: String,
+    },
+    QueueUpdated {
+        session_id: String,
+        items: Vec<QueueItem>,
+    },
+    CommandsLoaded(Vec<CommandDescriptor>),
+    ReferencesLoaded(Vec<ReferenceCandidate>),
+    SkillsLoaded(Vec<SkillSummaryItem>),
 }
 
 struct ApprovalHandler {
@@ -105,12 +123,19 @@ pub struct SessionController {
     ui_sender: UnboundedSender<UiMessage>,
     credential_store: CredentialStore,
     startup_banner: adw::Banner,
+    content_stack: gtk4::Stack,
+    startup_page: adw::StatusPage,
+    startup_spinner: gtk4::Spinner,
+    session_state: Rc<RefCell<SessionState>>,
+    state_path: PathBuf,
+    restore_pending: Rc<Cell<bool>>,
+    session_titles: Rc<RefCell<HashMap<String, String>>>,
     running_sessions: Rc<RefCell<HashSet<String>>>,
     turn_start_times: Rc<RefCell<HashMap<String, Instant>>>,
     background_hold: Rc<RefCell<Option<gtk4::gio::ApplicationHoldGuard>>>,
     background_session: Rc<RefCell<Option<String>>>,
+    self_weak: RefCell<Weak<SessionController>>,
 }
-
 impl SessionController {
     pub fn new(
         main_window: &MainWindow,
@@ -121,6 +146,11 @@ impl SessionController {
         let credential_store = CredentialStore::new();
         let startup_banner = main_window.startup_banner().clone();
         let banner_for_retry = startup_banner.clone();
+        let content_stack = main_window.content_stack().clone();
+        let startup_page = main_window.startup_page().clone();
+        let startup_spinner = main_window.startup_spinner().clone();
+        let state_path = default_state_path();
+        let session_state = Rc::new(RefCell::new(SessionState::load(&state_path)));
 
         let controller = Rc::new(Self {
             connection: Arc::new(RwLock::new(None)),
@@ -140,15 +170,71 @@ impl SessionController {
             ui_sender,
             credential_store,
             startup_banner,
+            content_stack,
+            startup_page,
+            startup_spinner,
+            session_state,
+            state_path,
+            restore_pending: Rc::new(Cell::new(false)),
+            session_titles: Rc::new(RefCell::new(HashMap::new())),
             running_sessions: Rc::new(RefCell::new(HashSet::new())),
             turn_start_times: Rc::new(RefCell::new(HashMap::new())),
             background_hold: Rc::new(RefCell::new(None)),
             background_session: Rc::new(RefCell::new(None)),
+            self_weak: RefCell::new(Weak::new()),
         });
+
+        *controller.self_weak.borrow_mut() = Rc::downgrade(&controller);
 
         controller.setup_ui_receiver(ui_receiver, Rc::downgrade(&controller));
         controller.setup_composer();
         controller.setup_double_esc();
+
+        let weak_title = Rc::downgrade(&controller);
+        controller
+            .conversation_view
+            .set_title_double_click_handler(move || {
+                if let Some(ctrl) = weak_title.upgrade() {
+                    ctrl.open_rename_for_active();
+                }
+            });
+
+        let weak_edit = Rc::downgrade(&controller);
+        controller.conversation_view.queue_dock().set_on_edit(
+            move |item_id, text| {
+                if let Some(ctrl) = weak_edit.upgrade() {
+                    ctrl.queue_edit(&item_id, &text);
+                }
+            },
+        );
+
+        let weak_remove = Rc::downgrade(&controller);
+        controller.conversation_view.queue_dock().set_on_remove(
+            move |item_id| {
+                if let Some(ctrl) = weak_remove.upgrade() {
+                    ctrl.queue_remove(&item_id);
+                }
+            },
+        );
+
+        let weak_steer = Rc::downgrade(&controller);
+        controller.conversation_view.queue_dock().set_on_steer_item(
+            move |item_id| {
+                if let Some(ctrl) = weak_steer.upgrade() {
+                    ctrl.queue_steer_item(&item_id);
+                }
+            },
+        );
+
+        let weak_steer_all = Rc::downgrade(&controller);
+        controller
+            .conversation_view
+            .queue_dock()
+            .set_on_steer_all(move |ids| {
+                if let Some(ctrl) = weak_steer_all.upgrade() {
+                    ctrl.queue_steer_all(ids);
+                }
+            });
 
         let ctrl_weak_banner = Rc::downgrade(&controller);
         banner_for_retry.connect_button_clicked(move |banner| {
@@ -167,13 +253,22 @@ impl SessionController {
 
     pub fn bootstrap_supervisor(&self) {
         let ui_sender = self.ui_sender.clone();
+        let supervisor_store = self.supervisor.clone();
 
         tokio_runtime().spawn(async move {
-            let mut config = SupervisorConfig::default();
-            config.dsh_bin = std::env::var("DSH_BIN").unwrap_or_else(|_| "dsh".to_string());
-            config.profile_config.bridge_bundle_path_or_url = resolve_bridge_bundle_path();
+            let existing = supervisor_store.read().await.clone();
+            let supervisor = if let Some(existing) = existing {
+                let _ = existing.stop().await;
+                existing
+            } else {
+                let mut config = SupervisorConfig::default();
+                config.dsh_bin =
+                    std::env::var("DSH_BIN").unwrap_or_else(|_| "dsh".to_string());
+                config.profile_config.bridge_bundle_path_or_url =
+                    resolve_bridge_bundle_path();
+                Arc::new(HarnessSupervisor::new(config))
+            };
 
-            let supervisor = Arc::new(HarnessSupervisor::new(config));
             match supervisor.start().await {
                 Ok(_) => {
                     if let Some(connection) = supervisor.connection().await {
@@ -192,6 +287,565 @@ impl SessionController {
                 }
             }
         });
+    }
+
+    fn weak_self(&self) -> Weak<SessionController> {
+        self.self_weak.borrow().clone()
+    }
+
+    fn active_session_id(&self) -> Option<String> {
+        self.active_session
+            .borrow()
+            .as_ref()
+            .map(|session| session.id.clone())
+    }
+
+    fn show_ready(&self) {
+        self.content_stack.set_visible_child_name("main");
+        self.startup_spinner.stop();
+        self.startup_banner.set_revealed(false);
+    }
+
+    fn show_startup_error(&self, message: &str) {
+        self.content_stack.set_visible_child_name("startup");
+        self.startup_spinner.stop();
+        self.startup_page.set_title("dsh failed to start");
+        self.startup_page.set_description(Some(message));
+        self.startup_banner.set_title("dsh failed to start");
+        self.startup_banner.set_button_label(Some("Retry"));
+        self.startup_banner.set_revealed(true);
+    }
+
+    fn show_connection_lost(&self) {
+        self.startup_banner.set_title("dsh connection lost");
+        self.startup_banner.set_button_label(Some("Reconnect"));
+        self.startup_banner.set_revealed(true);
+        self.conversation_view.set_disconnected();
+    }
+
+    fn mark_restore_pending(&self) {
+        self.restore_pending.set(true);
+    }
+
+    fn cache_session_title(&self, session_id: &str, title: &str) {
+        self.session_titles
+            .borrow_mut()
+            .insert(session_id.to_string(), title.to_string());
+    }
+
+    fn session_title_for(&self, session_id: &str) -> String {
+        if let Some(session) = self.active_session.borrow().as_ref() {
+            if session.id == session_id {
+                return session.title.clone();
+            }
+        }
+        self.session_titles
+            .borrow()
+            .get(session_id)
+            .cloned()
+            .unwrap_or_else(|| "Session".to_string())
+    }
+
+    fn handle_session_list_loaded(&self, sessions: &[SessionListItem]) {
+        for item in sessions {
+            self.cache_session_title(&item.id, &item.title);
+        }
+        if !self.restore_pending.get() || self.active_session.borrow().is_some() {
+            return;
+        }
+        self.restore_pending.set(false);
+        let saved_id = self.session_state.borrow().last_session_id.clone();
+        let target = saved_id
+            .filter(|id| sessions.iter().any(|item| &item.id == id))
+            .or_else(|| sessions.first().map(|item| item.id.clone()));
+        if let Some(id) = target {
+            self.follow_session(&id);
+        }
+    }
+
+    fn persist_session(&self, session_id: &str, cwd: &str) {
+        let mut state = self.session_state.borrow_mut();
+        state.last_session_id = Some(session_id.to_string());
+        state.last_cwd = Some(cwd.to_string());
+        let _ = state.save(&self.state_path);
+    }
+
+    fn clear_persisted_session(&self) {
+        let mut state = self.session_state.borrow_mut();
+        state.last_session_id = None;
+        state.last_cwd = None;
+        let _ = state.save(&self.state_path);
+    }
+
+    pub fn open_rename_for_active(&self) {
+        if let Some(session_id) = self.active_session_id() {
+            self.open_rename_for_id(&session_id);
+        }
+    }
+
+    pub fn open_rename_for_id(&self, session_id: &str) {
+        let title = self.session_title_for(session_id);
+        let weak = self.weak_self();
+        let session_id = session_id.to_string();
+        show_rename_dialog(&self.window, &title, move |new_title| {
+            if let Some(ctrl) = weak.upgrade() {
+                ctrl.rename_session(&session_id, &new_title);
+            }
+        });
+    }
+
+    pub fn rename_session(&self, session_id: &str, title: &str) {
+        let params = SessionRenameParams {
+            session_id: session_id.to_string(),
+            title: title.to_string(),
+        };
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            if let Some(conn) = conn_opt {
+                match conn
+                    .call::<SessionRenameParams, SessionRenameResult>(
+                        METHOD_SESSION_RENAME,
+                        params,
+                        Duration::from_secs(5),
+                    )
+                    .await
+                {
+                    Ok(result) => {
+                        let _ = ui_sender.send(UiMessage::SessionRenamed {
+                            session_id: result.session_id,
+                            title: result.title,
+                        });
+                    }
+                    Err(err) => {
+                        let _ = ui_sender
+                            .send(UiMessage::Toast(format!("Rename failed: {}", err)));
+                    }
+                }
+            }
+        });
+    }
+
+    fn apply_rename(&self, session_id: &str, title: &str) {
+        self.cache_session_title(session_id, title);
+        let mut active = self.active_session.borrow_mut();
+        if let Some(session) = active.as_mut() {
+            if session.id == session_id {
+                session.title = title.to_string();
+                self.window_title.set_subtitle(title);
+                self.conversation_view.set_title(title);
+            }
+        }
+    }
+
+    pub fn open_fork_dialog(&self, at_seq: i64) {
+        let session_opt = self.active_session.borrow();
+        let Some(session) = session_opt.as_ref() else {
+            return;
+        };
+        let session_id = session.id.clone();
+        let title = session.title.clone();
+        drop(session_opt);
+        let weak = self.weak_self();
+        show_fork_dialog(&self.window, &title, at_seq, move || {
+            if let Some(ctrl) = weak.upgrade() {
+                ctrl.fork_session(&session_id, at_seq);
+            }
+        });
+    }
+
+    pub fn fork_session(&self, session_id: &str, at_seq: i64) {
+        let params = SessionForkParams {
+            session_id: session_id.to_string(),
+            at_seq: Some(at_seq),
+            increase_title: Some(true),
+        };
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            if let Some(conn) = conn_opt {
+                match conn
+                    .call::<SessionForkParams, SessionForkResult>(
+                        METHOD_SESSION_FORK,
+                        params,
+                        Duration::from_secs(15),
+                    )
+                    .await
+                {
+                    Ok(result) => {
+                        let _ = ui_sender.send(UiMessage::SessionForked(result.session_id));
+                    }
+                    Err(err) => {
+                        let _ = ui_sender
+                            .send(UiMessage::Toast(format!("Fork failed: {}", err)));
+                    }
+                }
+            }
+        });
+    }
+
+    pub fn refresh_queue(&self, session_id: &str) {
+        let session_id_for_ui = session_id.to_string();
+        let params = QueueListParams {
+            session_id: session_id.to_string(),
+        };
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            if let Some(conn) = conn_opt {
+                if let Ok(result) = conn
+                    .call::<QueueListParams, QueueListResult>(
+                        METHOD_QUEUE_LIST,
+                        params,
+                        Duration::from_secs(5),
+                    )
+                    .await
+                {
+                    let _ = ui_sender.send(UiMessage::QueueUpdated {
+                        session_id: session_id_for_ui,
+                        items: result.items,
+                    });
+                }
+            }
+        });
+    }
+
+    pub fn queue_edit(&self, item_id: &str, text: &str) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        let params = QueueEditParams {
+            session_id,
+            item_id: item_id.to_string(),
+            content: vec![PromptContentBlock::Text {
+                text: text.to_string(),
+            }],
+        };
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            if let Some(conn) = conn_opt {
+                if let Err(err) = conn
+                    .call::<QueueEditParams, QueueMutationResult>(
+                        METHOD_QUEUE_EDIT,
+                        params,
+                        Duration::from_secs(5),
+                    )
+                    .await
+                {
+                    let _ = ui_sender
+                        .send(UiMessage::Toast(format!("Queue edit failed: {}", err)));
+                }
+            }
+        });
+    }
+
+    pub fn queue_remove(&self, item_id: &str) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        let params = QueueRemoveParams {
+            session_id,
+            item_id: item_id.to_string(),
+        };
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            if let Some(conn) = conn_opt {
+                if let Err(err) = conn
+                    .call::<QueueRemoveParams, QueueMutationResult>(
+                        METHOD_QUEUE_REMOVE,
+                        params,
+                        Duration::from_secs(5),
+                    )
+                    .await
+                {
+                    let _ = ui_sender
+                        .send(UiMessage::Toast(format!("Queue remove failed: {}", err)));
+                }
+            }
+        });
+    }
+
+    pub fn queue_steer_item(&self, item_id: &str) {
+        self.queue_steer_all(vec![item_id.to_string()]);
+    }
+
+    pub fn queue_steer_all(&self, item_ids: Vec<String>) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        if item_ids.is_empty() {
+            return;
+        }
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            if let Some(conn) = conn_opt {
+                for item_id in item_ids {
+                    let params = QueueSteerParams {
+                        session_id: session_id.clone(),
+                        item_id,
+                    };
+                    if let Err(err) = conn
+                        .call::<QueueSteerParams, QueueMutationResult>(
+                            METHOD_QUEUE_STEER,
+                            params,
+                            Duration::from_secs(5),
+                        )
+                        .await
+                    {
+                        let _ = ui_sender
+                            .send(UiMessage::Toast(format!("Steer failed: {}", err)));
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    pub fn send_prompt(&self, text: &str) {
+        self.send_prompt_with_mode(text, "prompt");
+    }
+
+    pub fn send_prompt_with_mode(&self, text: &str, mode: &str) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        let params = SessionPromptParams {
+            session_id,
+            content_blocks: vec![PromptContentBlock::Text {
+                text: text.to_string(),
+            }],
+            mode: Some(mode.to_string()),
+        };
+        let conn_arc = self.connection.clone();
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            if let Some(conn) = conn_opt {
+                let _ = conn
+                    .call::<SessionPromptParams, SessionPromptResult>(
+                        METHOD_SESSION_PROMPT,
+                        params,
+                        Duration::from_secs(10),
+                    )
+                    .await;
+            }
+        });
+    }
+
+    pub fn submit_text(&self, text: &str, steer: bool) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if trimmed.starts_with('/') {
+            self.execute_command_line(trimmed);
+            return;
+        }
+        let running = self
+            .active_session
+            .borrow()
+            .as_ref()
+            .map(|session| session.status == SessionStatus::Running)
+            .unwrap_or(false);
+        let mode = if running && steer { "steer" } else { "prompt" };
+        self.send_prompt_with_mode(text, mode);
+    }
+
+    pub fn fetch_commands(&self) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        let params = CommandListParams { session_id };
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            if let Some(conn) = conn_opt {
+                if let Ok(result) = conn
+                    .call::<CommandListParams, CommandListResult>(
+                        METHOD_COMMAND_LIST,
+                        params,
+                        Duration::from_secs(5),
+                    )
+                    .await
+                {
+                    let _ = ui_sender.send(UiMessage::CommandsLoaded(result.commands));
+                }
+            }
+        });
+    }
+
+    pub fn fetch_references(&self) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        let params = ReferenceListParams {
+            session_id,
+            query: String::new(),
+        };
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            if let Some(conn) = conn_opt {
+                if let Ok(result) = conn
+                    .call::<ReferenceListParams, ReferenceListResult>(
+                        METHOD_REFERENCE_LIST,
+                        params,
+                        Duration::from_secs(5),
+                    )
+                    .await
+                {
+                    let _ = ui_sender.send(UiMessage::ReferencesLoaded(result.candidates));
+                }
+            }
+        });
+    }
+
+    pub fn fetch_skills(&self) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        let params = SkillListParams {
+            session_id: Some(session_id),
+            cwd: None,
+        };
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            if let Some(conn) = conn_opt {
+                if let Ok(result) = conn
+                    .call::<SkillListParams, SkillListResult>(
+                        METHOD_SKILL_LIST,
+                        params,
+                        Duration::from_secs(5),
+                    )
+                    .await
+                {
+                    let _ = ui_sender.send(UiMessage::SkillsLoaded(result.skills));
+                }
+            }
+        });
+    }
+
+    pub fn execute_command_line(&self, text: &str) {
+        let rest = text.trim().trim_start_matches('/');
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        let command = parts.next().unwrap_or_default();
+        let args = parts.next().unwrap_or_default();
+        if !command.is_empty() {
+            self.execute_command(command, args);
+        }
+    }
+
+    pub fn execute_command(&self, command: &str, args: &str) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        let params = CommandExecuteParams {
+            session_id,
+            command: command.to_string(),
+            args: if args.trim().is_empty() {
+                None
+            } else {
+                Some(args.trim().to_string())
+            },
+        };
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            if let Some(conn) = conn_opt {
+                match conn
+                    .call::<CommandExecuteParams, CommandExecuteResult>(
+                        METHOD_COMMAND_EXECUTE,
+                        params,
+                        Duration::from_secs(10),
+                    )
+                    .await
+                {
+                    Ok(result) => {
+                        if let Some(text) = result.text {
+                            let message = if result.kind == "error" {
+                                format!("Command failed: {}", text)
+                            } else {
+                                text
+                            };
+                            let _ = ui_sender.send(UiMessage::Toast(message));
+                        }
+                    }
+                    Err(err) => {
+                        let _ = ui_sender
+                            .send(UiMessage::Toast(format!("Command failed: {}", err)));
+                    }
+                }
+            }
+        });
+    }
+
+    pub fn set_composer_text(&self, text: &str) {
+        let buffer = self.conversation_view.composer().text_view().buffer();
+        buffer.set_text(text);
+        buffer.place_cursor(&buffer.end_iter());
+        self.conversation_view.composer().text_view().grab_focus();
+    }
+
+    pub fn insert_composer_text(&self, text: &str) {
+        let buffer = self.conversation_view.composer().text_view().buffer();
+        let mut end = buffer.end_iter();
+        buffer.insert(&mut end, text);
+        self.conversation_view.composer().text_view().grab_focus();
+    }
+
+    pub fn close_session(&self, session_id: &str) {
+        let Some(active_id) = self.active_session_id() else {
+            return;
+        };
+        if active_id != session_id {
+            return;
+        }
+        let params = SessionReleaseParams {
+            session_id: session_id.to_string(),
+        };
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            if let Some(conn) = conn_opt {
+                match conn
+                    .call::<SessionReleaseParams, SessionReleaseResult>(
+                        METHOD_SESSION_RELEASE,
+                        params,
+                        Duration::from_secs(5),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        let _ = ui_sender.send(UiMessage::SessionReleased);
+                    }
+                    Err(err) => {
+                        let _ = ui_sender
+                            .send(UiMessage::Toast(format!("Close failed: {}", err)));
+                    }
+                }
+            }
+        });
+    }
+
+    fn clear_active_session_ui(&self) {
+        *self.active_session.borrow_mut() = None;
+        self.conversation_view.clear_session();
+        self.window_title.set_subtitle("New Session");
+        self.clear_persisted_session();
     }
 
     pub fn running_session_info(&self) -> Option<(String, String)> {
@@ -343,6 +997,13 @@ impl SessionController {
             }
         });
 
+        let mut closed_rx = conn.subscribe_closed();
+        let ui_sender_closed = self.ui_sender.clone();
+        tokio_runtime().spawn(async move {
+            let _ = closed_rx.recv().await;
+            let _ = ui_sender_closed.send(UiMessage::ConnectionLost);
+        });
+
         let conn_for_cred = conn.clone();
         let ui_sender_for_cred = self.ui_sender.clone();
         let store_for_cred = self.credential_store.clone();
@@ -406,7 +1067,7 @@ impl SessionController {
             .title("Select Project Directory")
             .build();
 
-        let controller_weak = Rc::downgrade(&Rc::new(self.clone_ref()));
+        let controller_weak = self.weak_self();
         dialog.select_folder(
             Some(&self.window),
             None::<&gtk4::gio::Cancellable>,
@@ -517,45 +1178,6 @@ impl SessionController {
         self.load_session_list();
     }
 
-    pub fn send_prompt(&self, text: &str) {
-        let current_sess_id = {
-            self.active_session
-                .borrow()
-                .as_ref()
-                .map(|s| s.id.clone())
-        };
-
-        let sess_id = match current_sess_id {
-            Some(id) => id,
-            None => {
-                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                self.create_session(&home);
-                return;
-            }
-        };
-
-        let prompt_params = SessionPromptParams {
-            session_id: sess_id,
-            content_blocks: vec![PromptContentBlock::Text {
-                text: text.to_string(),
-            }],
-            mode: Some("prompt".to_string()),
-        };
-
-        let conn_arc = self.connection.clone();
-        tokio_runtime().spawn(async move {
-            let conn_opt = conn_arc.read().await.clone();
-            if let Some(conn) = conn_opt {
-                let _ = conn
-                    .call::<SessionPromptParams, SessionPromptResult>(
-                        METHOD_SESSION_PROMPT,
-                        prompt_params,
-                        Duration::from_secs(10),
-                    )
-                    .await;
-            }
-        });
-    }
 
     pub fn cancel_current_turn(&self) {
         let sess_id_opt = self
@@ -642,7 +1264,7 @@ impl SessionController {
             ("deepseek", "deepseek-reasoner"),
         ];
 
-        let controller_weak = Rc::downgrade(&Rc::new(self.clone_ref()));
+        let controller_weak = self.weak_self();
 
         for (prov, mdl) in models {
             let btn = gtk4::Button::builder()
@@ -790,6 +1412,9 @@ impl SessionController {
                         show_user_question_dialog(&win, req, tx);
                     }
                     UiMessage::SessionListLoaded(sessions) => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.handle_session_list_loaded(&sessions);
+                        }
                         sidebar.load_sessions(&sessions);
                     }
                     UiMessage::SessionFollowed(follow) => {
@@ -805,6 +1430,7 @@ impl SessionController {
                         window_title.set_subtitle(&title);
                         conv_view.set_title(&title);
                         conv_view.set_cwd(&cwd);
+                        conv_view.select_panel("conversation");
                         conv_view.set_status(if status == "running" {
                             "Running"
                         } else {
@@ -813,6 +1439,8 @@ impl SessionController {
 
                         if let Some(ctrl) = ctrl_weak.upgrade() {
                             ctrl.handle_follow_status(&session_id, &status);
+                            ctrl.persist_session(&session_id, &cwd);
+                            ctrl.refresh_queue(&session_id);
                         }
 
                         let sess_model = SessionModel::from_follow(follow);
@@ -845,6 +1473,9 @@ impl SessionController {
                                 }
                             }
                             IncomingNotification::SessionTitle(p) => {
+                                if let Some(ctrl) = ctrl_weak.upgrade() {
+                                    ctrl.cache_session_title(&p.session_id, &p.title);
+                                }
                                 let mut sess_guard = active_sess.borrow_mut();
                                 if let Some(sess) = sess_guard.as_mut() {
                                     if p.session_id == sess.id {
@@ -852,6 +1483,16 @@ impl SessionController {
                                         window_title.set_subtitle(&p.title);
                                         conv_view.set_title(&p.title);
                                     }
+                                }
+                            }
+                            IncomingNotification::SessionInbox(p) => {
+                                let matches_active = active_sess
+                                    .borrow()
+                                    .as_ref()
+                                    .map(|sess| sess.id == p.session_id)
+                                    .unwrap_or(false);
+                                if matches_active {
+                                    conv_view.update_queue(&p.items);
                                 }
                             }
                             _ => {}
@@ -871,6 +1512,7 @@ impl SessionController {
                     }
                     UiMessage::SupervisorRestarted(new_conn) => {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.show_ready();
                             ctrl.set_connection(new_conn);
                             let sess_id_opt = {
                                 active_sess
@@ -889,17 +1531,120 @@ impl SessionController {
                         connection,
                     } => {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
-                            ctrl.startup_banner.set_revealed(false);
+                            ctrl.show_ready();
+                            ctrl.mark_restore_pending();
                             ctrl.set_supervisor(supervisor);
                             ctrl.set_connection(connection);
                         }
                     }
                     UiMessage::SupervisorStartFailed(message) => {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
-                            ctrl.startup_banner
-                                .set_title(&format!("dsh failed to start: {}", message));
-                            ctrl.startup_banner.set_revealed(true);
+                            ctrl.show_startup_error(&message);
                         }
+                    }
+                    UiMessage::ConnectionLost => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.show_connection_lost();
+                        }
+                    }
+                    UiMessage::SessionReleased => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.clear_active_session_ui();
+                        }
+                    }
+                    UiMessage::SessionForked(session_id) => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.follow_session(&session_id);
+                        }
+                    }
+                    UiMessage::SessionRenamed {
+                        session_id,
+                        title,
+                    } => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.apply_rename(&session_id, &title);
+                        }
+                    }
+                    UiMessage::QueueUpdated {
+                        session_id,
+                        items,
+                    } => {
+                        let matches_active = active_sess
+                            .borrow()
+                            .as_ref()
+                            .map(|sess| sess.id == session_id)
+                            .unwrap_or(false);
+                        if matches_active {
+                            conv_view.update_queue(&items);
+                        }
+                    }
+                    UiMessage::CommandsLoaded(commands) => {
+                        let options: Vec<TriggerOption> = commands
+                            .iter()
+                            .map(|command| TriggerOption {
+                                label: format!("/{}", command.name),
+                                description: command.description.clone(),
+                                value: command.name.clone(),
+                            })
+                            .collect();
+                        let commands_for_select = commands;
+                        let ctrl_weak_select = ctrl_weak.clone();
+                        let anchor = conv_view.composer().text_view().clone();
+                        show_trigger_popup(&anchor, "Commands", options, move |value| {
+                            if let Some(ctrl) = ctrl_weak_select.upgrade() {
+                                if let Some(command) =
+                                    commands_for_select.iter().find(|c| c.name == value)
+                                {
+                                    if command.input.is_some() {
+                                        ctrl.set_composer_text(&format!("/{} ", command.name));
+                                    } else {
+                                        ctrl.set_composer_text("");
+                                        ctrl.execute_command(&command.name, "");
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    UiMessage::ReferencesLoaded(candidates) => {
+                        let options: Vec<TriggerOption> = candidates
+                            .iter()
+                            .map(|candidate| TriggerOption {
+                                label: format!("@{}", candidate.path),
+                                description: candidate.kind.clone(),
+                                value: candidate.path.clone(),
+                            })
+                            .collect();
+                        let candidates_for_select = candidates;
+                        let ctrl_weak_select = ctrl_weak.clone();
+                        let anchor = conv_view.composer().text_view().clone();
+                        show_trigger_popup(&anchor, "References", options, move |value| {
+                            if let Some(ctrl) = ctrl_weak_select.upgrade() {
+                                let suffix = candidates_for_select
+                                    .iter()
+                                    .find(|candidate| candidate.path == value)
+                                    .filter(|candidate| candidate.kind == "directory")
+                                    .map(|_| "/")
+                                    .unwrap_or(" ");
+                                ctrl.insert_composer_text(&format!("@{}{}", value, suffix));
+                            }
+                        });
+                    }
+                    UiMessage::SkillsLoaded(skills) => {
+                        let options: Vec<TriggerOption> = skills
+                            .iter()
+                            .map(|skill| TriggerOption {
+                                label: format!("#{}", skill.name),
+                                description: skill.description.clone(),
+                                value: skill.name.clone(),
+                            })
+                            .collect();
+                        let ctrl_weak_select = ctrl_weak.clone();
+                        let anchor = conv_view.composer().text_view().clone();
+                        show_trigger_popup(&anchor, "Skills", options, move |value| {
+                            if let Some(ctrl) = ctrl_weak_select.upgrade() {
+                                ctrl.insert_composer_text(&format!("#{} ", value));
+                            }
+                        });
                     }
                 }
             }
@@ -909,7 +1654,7 @@ impl SessionController {
     fn setup_composer(&self) {
         let composer = self.conversation_view.composer();
         let text_view = composer.text_view().clone();
-        let controller_weak = Rc::downgrade(&Rc::new(self.clone_ref()));
+        let controller_weak = self.weak_self();
 
         let c_weak_send = controller_weak.clone();
         let tv_send = text_view.clone();
@@ -931,7 +1676,7 @@ impl SessionController {
                     let text = buf.text(&start, &end, false).to_string();
                     if !text.trim().is_empty() {
                         buf.set_text("");
-                        c.send_prompt(&text);
+                        c.submit_text(&text, false);
                     }
                 }
             }
@@ -944,49 +1689,59 @@ impl SessionController {
             }
         });
 
-        let enter_controller = gtk4::EventControllerKey::new();
         let c_weak_enter = controller_weak.clone();
         let tv_enter = text_view.clone();
+        let enter_controller = gtk4::EventControllerKey::new();
         enter_controller.connect_key_pressed(move |_, key, _, modifier| {
             if key == gtk4::gdk::Key::Return || key == gtk4::gdk::Key::KP_Enter {
-                let has_modifier = modifier
-                    .contains(gtk4::gdk::ModifierType::SHIFT_MASK)
-                    || modifier.contains(gtk4::gdk::ModifierType::CONTROL_MASK)
-                    || modifier.contains(gtk4::gdk::ModifierType::ALT_MASK)
+                if modifier.contains(gtk4::gdk::ModifierType::SHIFT_MASK) {
+                    return gtk4::glib::Propagation::Proceed;
+                }
+                let steer = modifier.contains(gtk4::gdk::ModifierType::CONTROL_MASK)
                     || modifier.contains(gtk4::gdk::ModifierType::SUPER_MASK)
                     || modifier.contains(gtk4::gdk::ModifierType::META_MASK);
-
-                if !has_modifier {
-                    if let Some(c) = c_weak_enter.upgrade() {
-                        let is_running = {
-                            c.active_session
-                                .borrow()
-                                .as_ref()
-                                .map(|s| s.status == SessionStatus::Running)
-                                .unwrap_or(false)
-                        };
-                        if !is_running {
-                            let buf = tv_enter.buffer();
-                            let (start, end) = buf.bounds();
-                            let text = buf.text(&start, &end, false).to_string();
-                            if !text.trim().is_empty() {
-                                buf.set_text("");
-                                c.send_prompt(&text);
-                            }
-                        }
+                if let Some(c) = c_weak_enter.upgrade() {
+                    let buf = tv_enter.buffer();
+                    let (start, end) = buf.bounds();
+                    let text = buf.text(&start, &end, false).to_string();
+                    if !text.trim().is_empty() {
+                        buf.set_text("");
+                        c.submit_text(&text, steer);
                     }
-                    return gtk4::glib::Propagation::Stop;
                 }
+                return gtk4::glib::Propagation::Stop;
             }
             gtk4::glib::Propagation::Proceed
         });
         text_view.add_controller(enter_controller);
+
+        let c_weak_trigger = controller_weak.clone();
+        let trigger_controller = gtk4::EventControllerKey::new();
+        trigger_controller.connect_key_pressed(move |_, key, _, modifier| {
+            let has_modifier = modifier.contains(gtk4::gdk::ModifierType::CONTROL_MASK)
+                || modifier.contains(gtk4::gdk::ModifierType::ALT_MASK)
+                || modifier.contains(gtk4::gdk::ModifierType::SUPER_MASK)
+                || modifier.contains(gtk4::gdk::ModifierType::META_MASK);
+            if !has_modifier {
+                if let Some(c) = c_weak_trigger.upgrade() {
+                    if key == gtk4::gdk::Key::slash {
+                        c.fetch_commands();
+                    } else if key == gtk4::gdk::Key::at {
+                        c.fetch_references();
+                    } else if key == gtk4::gdk::Key::numbersign {
+                        c.fetch_skills();
+                    }
+                }
+            }
+            gtk4::glib::Propagation::Proceed
+        });
+        text_view.add_controller(trigger_controller);
     }
 
     fn setup_double_esc(&self) {
         let key_controller = gtk4::EventControllerKey::new();
         let last_esc = Rc::new(RefCell::new(None::<Instant>));
-        let controller_weak = Rc::downgrade(&Rc::new(self.clone_ref()));
+        let controller_weak = self.weak_self();
 
         key_controller.connect_key_pressed(move |_, key, _, _| {
             if key == gtk4::gdk::Key::Escape {
@@ -1013,25 +1768,4 @@ impl SessionController {
             .add_controller(key_controller);
     }
 
-    fn clone_ref(&self) -> Self {
-        Self {
-            connection: self.connection.clone(),
-            supervisor: self.supervisor.clone(),
-            active_session: self.active_session.clone(),
-            active_model: self.active_model.clone(),
-            active_provider: self.active_provider.clone(),
-            window: self.window.clone(),
-            sidebar: self.sidebar.clone(),
-            conversation_view: self.conversation_view.clone(),
-            window_title: self.window_title.clone(),
-            toast_overlay: self.toast_overlay.clone(),
-            ui_sender: self.ui_sender.clone(),
-            credential_store: self.credential_store.clone(),
-            startup_banner: self.startup_banner.clone(),
-            running_sessions: self.running_sessions.clone(),
-            turn_start_times: self.turn_start_times.clone(),
-            background_hold: self.background_hold.clone(),
-            background_session: self.background_session.clone(),
-        }
-    }
 }

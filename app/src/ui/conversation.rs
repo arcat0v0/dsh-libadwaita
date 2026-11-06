@@ -1,7 +1,9 @@
+use crate::protocol::QueueItem;
 use crate::transcript::{ConversationTranscript, RenderBlock};
 use crate::ui::composer::Composer;
 use crate::ui::desktop::{open_path_in_default_app, open_terminal_in_dir};
 use crate::ui::message_renderer::{render_block, AssistantLiveHandle};
+use crate::ui::queue_dock::QueueDock;
 use gtk4::prelude::*;
 use libadwaita as adw;
 use std::cell::{Cell, RefCell};
@@ -11,12 +13,15 @@ use std::rc::Rc;
 pub struct ConversationView {
     stack: gtk4::Stack,
     composer: Composer,
+    queue_dock: QueueDock,
     transcript_box: gtk4::Box,
+    welcome_bubble: gtk4::Box,
     status_label: gtk4::Label,
     title_label: gtk4::Label,
     live_handle: RefCell<Option<AssistantLiveHandle>>,
     rendered_count: Cell<usize>,
     active_cwd: Rc<RefCell<PathBuf>>,
+    title_activate: Rc<RefCell<Option<Box<dyn Fn()>>>>,
 }
 
 impl ConversationView {
@@ -49,6 +54,19 @@ impl ConversationView {
             .css_classes(["title-4"])
             .build();
         session_header.append(&title_label);
+
+        let title_activate = Rc::new(RefCell::new(None::<Box<dyn Fn()>>));
+        let title_click = gtk4::GestureClick::new();
+        title_click.set_button(1);
+        let title_activate_for_click = title_activate.clone();
+        title_click.connect_pressed(move |_, n_press, _, _| {
+            if n_press == 2 {
+                if let Some(handler) = title_activate_for_click.borrow().as_ref() {
+                    handler();
+                }
+            }
+        });
+        title_label.add_controller(title_click);
 
         let open_folder_btn = gtk4::Button::builder()
             .label("Open Folder")
@@ -158,6 +176,9 @@ impl ConversationView {
 
         conversation_box.append(&view_stack);
 
+        let queue_dock = QueueDock::new();
+        conversation_box.append(queue_dock.widget());
+
         let composer = Composer::new();
         conversation_box.append(composer.widget());
 
@@ -180,12 +201,15 @@ impl ConversationView {
         Self {
             stack,
             composer,
+            queue_dock,
             transcript_box,
+            welcome_bubble,
             status_label,
             title_label,
             live_handle: RefCell::new(None),
             rendered_count: Cell::new(0),
             active_cwd,
+            title_activate,
         }
     }
 
@@ -195,6 +219,14 @@ impl ConversationView {
 
     pub fn composer(&self) -> &Composer {
         &self.composer
+    }
+
+    pub fn queue_dock(&self) -> &QueueDock {
+        &self.queue_dock
+    }
+
+    pub fn set_title_double_click_handler<F: Fn() + 'static>(&self, handler: F) {
+        *self.title_activate.borrow_mut() = Some(Box::new(handler));
     }
 
     pub fn transcript_box(&self) -> &gtk4::Box {
@@ -210,8 +242,33 @@ impl ConversationView {
         self.composer.set_is_running(status == "Running");
     }
 
+    pub fn set_disconnected(&self) {
+        let current = self.status_label.label().to_string();
+        if current == "Running" || current == "Running (paused)" {
+            self.status_label.set_label("Running (paused)");
+        } else {
+            self.status_label.set_label("Disconnected");
+        }
+    }
+
     pub fn set_cwd(&self, cwd: &str) {
         *self.active_cwd.borrow_mut() = PathBuf::from(cwd);
+    }
+
+    pub fn update_queue(&self, items: &[QueueItem]) {
+        self.queue_dock.update(items);
+    }
+
+    pub fn clear_session(&self) {
+        while let Some(child) = self.transcript_box.first_child() {
+            self.transcript_box.remove(&child);
+        }
+        self.transcript_box.append(&self.welcome_bubble);
+        self.live_handle.borrow_mut().take();
+        self.rendered_count.set(0);
+        self.set_title("New Session");
+        self.set_status("Idle");
+        self.queue_dock.update(&[]);
     }
 
     pub fn select_panel(&self, panel_name: &str) {
