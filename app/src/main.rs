@@ -10,8 +10,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 fn main() -> adw::glib::ExitCode {
-    configure_system_style();
-
     let application = adw::Application::builder().application_id(APP_ID).build();
 
     application.connect_startup(|_| configure_system_style());
