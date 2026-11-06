@@ -1,3 +1,4 @@
+use crate::protocol::SessionListItem;
 use gtk4::prelude::*;
 use libadwaita::prelude::*;
 use libadwaita as adw;
@@ -162,6 +163,56 @@ impl Sidebar {
 
     pub fn new_session_button(&self) -> &gtk4::Button {
         &self.new_session_btn
+    }
+
+    pub fn load_sessions(&self, sessions: &[SessionListItem]) {
+        while let Some(child) = self.session_list.first_child() {
+            self.session_list.remove(&child);
+        }
+
+        for item in sessions {
+            let row = adw::ActionRow::builder()
+                .title(&item.title)
+                .subtitle(&item.cwd)
+                .activatable(true)
+                .action_name("win.select-session")
+                .build();
+            row.set_action_target_value(Some(&item.id.to_variant()));
+
+            let menu_btn = gtk4::MenuButton::builder()
+                .icon_name("view-more-symbolic")
+                .css_classes(["flat", "circular"])
+                .valign(gtk4::Align::Center)
+                .build();
+
+            let popover = gtk4::Popover::builder().build();
+            let pop_box = gtk4::Box::builder()
+                .orientation(gtk4::Orientation::Vertical)
+                .margin_start(4)
+                .margin_end(4)
+                .margin_top(4)
+                .margin_bottom(4)
+                .build();
+
+            let archive_btn = gtk4::Button::builder()
+                .label("Archive")
+                .css_classes(["flat"])
+                .action_name("win.archive-session")
+                .build();
+            archive_btn.set_action_target_value(Some(&item.id.to_variant()));
+
+            let pop_clone = popover.clone();
+            archive_btn.connect_clicked(move |_| {
+                pop_clone.popdown();
+            });
+
+            pop_box.append(&archive_btn);
+            popover.set_child(Some(&pop_box));
+            menu_btn.set_popover(Some(&popover));
+
+            row.add_suffix(&menu_btn);
+            self.session_list.append(&row);
+        }
     }
 }
 

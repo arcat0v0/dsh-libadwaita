@@ -1,24 +1,28 @@
+use crate::ui::controller::SessionController;
 use crate::ui::conversation::ConversationView;
 use crate::ui::right_dock::RightDock;
 use crate::ui::settings::show_settings_dialog;
 use crate::ui::sidebar::Sidebar;
 use gtk4::prelude::*;
 use libadwaita as adw;
+use std::cell::RefCell;
 use std::rc::Rc;
 
 pub struct MainWindow {
     window: adw::ApplicationWindow,
     toast_overlay: adw::ToastOverlay,
     split_view: adw::OverlaySplitView,
-    sidebar: Sidebar,
+    sidebar: Rc<Sidebar>,
     conversation_view: Rc<ConversationView>,
     right_dock: RightDock,
     window_title: adw::WindowTitle,
+    model_btn: gtk4::Button,
+    controller: RefCell<Option<Rc<SessionController>>>,
 }
 
 impl MainWindow {
     pub fn new(app: &adw::Application) -> Self {
-        let sidebar = Sidebar::new();
+        let sidebar = Rc::new(Sidebar::new());
         let conversation_view = Rc::new(ConversationView::new());
         let right_dock = RightDock::new();
 
@@ -46,7 +50,7 @@ impl MainWindow {
 
         let window_title = adw::WindowTitle::builder()
             .title("dsh")
-            .subtitle("Implementing Bridge Protocol")
+            .subtitle("New Session")
             .build();
         header_bar.set_title_widget(Some(&window_title));
 
@@ -95,24 +99,6 @@ impl MainWindow {
         });
         window.add_action(&toggle_sidebar_action);
 
-        let toast_overlay_weak = toast_overlay.downgrade();
-        let conv_weak = Rc::downgrade(&conversation_view);
-        let title_weak = window_title.downgrade();
-        let new_session_action = gtk4::gio::SimpleAction::new("new-session", None);
-        new_session_action.connect_activate(move |_, _| {
-            if let Some(to) = toast_overlay_weak.upgrade() {
-                to.add_toast(adw::Toast::new("Started new session"));
-            }
-            if let Some(cv) = conv_weak.upgrade() {
-                cv.set_title("New Session");
-                cv.select_panel("conversation");
-            }
-            if let Some(wt) = title_weak.upgrade() {
-                wt.set_subtitle("New Session");
-            }
-        });
-        window.add_action(&new_session_action);
-
         let conv_plugins = Rc::downgrade(&conversation_view);
         let show_plugins_action = gtk4::gio::SimpleAction::new("show-plugins", None);
         show_plugins_action.connect_activate(move |_, _| {
@@ -148,7 +134,57 @@ impl MainWindow {
             conversation_view,
             right_dock,
             window_title,
+            model_btn,
+            controller: RefCell::new(None),
         }
+    }
+
+    pub fn set_controller(&self, controller: Rc<SessionController>) {
+        let ctrl_new = Rc::downgrade(&controller);
+        let new_session_action = gtk4::gio::SimpleAction::new("new-session", None);
+        new_session_action.connect_activate(move |_, _| {
+            if let Some(c) = ctrl_new.upgrade() {
+                c.prompt_new_session_portal();
+            }
+        });
+        self.window.add_action(&new_session_action);
+
+        let ctrl_select = Rc::downgrade(&controller);
+        let select_session_action = gtk4::gio::SimpleAction::new(
+            "select-session",
+            Some(&gtk4::glib::VariantTy::STRING),
+        );
+        select_session_action.connect_activate(move |_, param| {
+            if let Some(id) = param.and_then(|p| p.get::<String>()) {
+                if let Some(c) = ctrl_select.upgrade() {
+                    c.follow_session(&id);
+                }
+            }
+        });
+        self.window.add_action(&select_session_action);
+
+        let ctrl_archive = Rc::downgrade(&controller);
+        let archive_session_action = gtk4::gio::SimpleAction::new(
+            "archive-session",
+            Some(&gtk4::glib::VariantTy::STRING),
+        );
+        archive_session_action.connect_activate(move |_, param| {
+            if let Some(id) = param.and_then(|p| p.get::<String>()) {
+                if let Some(c) = ctrl_archive.upgrade() {
+                    c.archive_session(&id);
+                }
+            }
+        });
+        self.window.add_action(&archive_session_action);
+
+        let ctrl_model = Rc::downgrade(&controller);
+        self.model_btn.connect_clicked(move |btn| {
+            if let Some(c) = ctrl_model.upgrade() {
+                c.open_model_picker(btn);
+            }
+        });
+
+        *self.controller.borrow_mut() = Some(controller);
     }
 
     pub fn window(&self) -> &adw::ApplicationWindow {
@@ -163,11 +199,11 @@ impl MainWindow {
         self.toast_overlay.add_toast(adw::Toast::new(message));
     }
 
-    pub fn sidebar(&self) -> &Sidebar {
+    pub fn sidebar(&self) -> &Rc<Sidebar> {
         &self.sidebar
     }
 
-    pub fn conversation_view(&self) -> &ConversationView {
+    pub fn conversation_view_rc(&self) -> &Rc<ConversationView> {
         &self.conversation_view
     }
 

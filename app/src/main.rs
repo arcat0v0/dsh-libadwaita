@@ -1,3 +1,4 @@
+use dsh_libadwaita::ui::controller::SessionController;
 use dsh_libadwaita::ui::settings::show_settings_dialog;
 use dsh_libadwaita::ui::window::MainWindow;
 use dsh_libadwaita::APP_ID;
@@ -24,6 +25,12 @@ fn main() -> adw::glib::ExitCode {
 
     application.connect_activate(|application| {
         let main_window = MainWindow::new(application);
+        let controller = SessionController::new(
+            &main_window,
+            main_window.sidebar().clone(),
+            main_window.conversation_view_rc().clone(),
+        );
+        main_window.set_controller(controller);
         main_window.present();
     });
 

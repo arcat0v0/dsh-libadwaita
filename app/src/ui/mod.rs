@@ -1,4 +1,6 @@
+pub mod approval_dialog;
 pub mod composer;
+pub mod controller;
 pub mod conversation;
 pub mod message_renderer;
 pub mod right_dock;
