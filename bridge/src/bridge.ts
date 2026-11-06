@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { type Context, Service } from '@deepseek-ai/cordis';
 import { buildForkSeed } from '@deepseek-ai/dsh-session/fork';
 import type { BridgeCredentials } from './credentials.js';
@@ -13,7 +15,29 @@ import {
   type CommandListParams,
   type CommandListResult,
   DSH_PINNED_VERSION,
+  type FileEntry,
+  type FilesListParams,
+  type FilesListResult,
+  type FilesReadBytesParams,
+  type FilesReadBytesResult,
+  type FilesReadParams,
+  type FilesReadResult,
+  type FilesStatParams,
+  type FilesStatResult,
+  type GoalEditParams,
+  type GoalGetParams,
+  type GoalGetResult,
+  type GoalMutationParams,
+  type GoalMutationResult,
+  type GoalUpdatedNotification,
+  type GoalView,
   type ModelCatalogResult,
+  type PermissionCatalogResult,
+  type PermissionGetParams,
+  type PermissionGetResult,
+  type PermissionSetParams,
+  type PermissionSetResult,
+  type PermissionUpdatedNotification,
   type PluginListResult,
   type PluginToggleResult,
   type QueueEditParams,
@@ -56,16 +80,28 @@ import {
   type SessionTitleSnapshot,
   type SessionWorkdirGetParams,
   type SessionWorkdirGetResult,
+  type SettingsDescribeParams,
+  type SettingsDescribeResult,
+  type SettingsDescriptor,
   type SettingsGetParams,
   type SettingsGetResult,
   type SettingsMutateParams,
   type SettingsMutateResult,
+  type SettingsUpdatedNotification,
   type SkillListParams,
   type SkillListResult,
   type StreamChunk,
   type TodoItem,
   type WorkspaceChangesParams,
   type WorkspaceChangesResult,
+  type WorkspaceCreateParams,
+  type WorkspaceCreateResult,
+  type WorkspaceListResult,
+  type WorkspaceRemoveParams,
+  type WorkspaceRemoveResult,
+  type WorkspaceRenameParams,
+  type WorkspaceRenameResult,
+  type WorkspaceView,
 } from './types.js';
 
 function latestCompletedPrefixBoundary(events: readonly SessionEvent[]): number | undefined {
@@ -130,6 +166,25 @@ interface AgentLike {
   steer: (message: object) => void;
   followup: (message: object) => void;
   cancel: (cause: object, options?: object) => void;
+}
+
+interface WorkspaceRecordLike {
+  id: string;
+  path: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  sessionIds: readonly string[];
+  setTitle: (title: string) => Promise<void>;
+  status: () => Promise<'ok' | 'missing-dir'>;
+}
+
+interface GoalServiceLike {
+  get: (agent: AgentLike) => GoalView | undefined;
+  edit: (agent: AgentLike, ref: object, request: object) => GoalView;
+  pause: (agent: AgentLike, ref: object) => GoalView;
+  resume: (agent: AgentLike, ref: object) => GoalView;
+  clear: (agent: AgentLike, ref: object) => object;
 }
 
 export interface BridgeConfig {
@@ -240,6 +295,72 @@ export class BridgeService extends Service {
             });
           }
         }
+
+        if (ev.type === 'goal/change') {
+          const agents = this.ctx.get('agents') as unknown as {
+            get: (id: string) => AgentLike | undefined;
+          };
+          const goals = this.ctx.get('goals') as unknown as {
+            get: (agent: AgentLike) => GoalView | undefined;
+          };
+          const agent = agents?.get(s.id);
+          if (agent) {
+            const notification: GoalUpdatedNotification = {
+              sessionId: s.id,
+              goal: goals?.get(agent) ?? null,
+            };
+            this.server.notify('goal.updated', notification);
+          }
+        }
+
+        if (
+          ev.type === 'permission/preset' ||
+          ev.type === 'sandbox/mode' ||
+          ev.type === 'approval/policy'
+        ) {
+          const sessions = this.ctx.get('sessions') as unknown as {
+            get: (id: string) => SessionLike | undefined;
+          };
+          const permissions = this.ctx.get('permissionPresets') as unknown as {
+            current: (session: SessionLike) => string;
+          };
+          const current = sessions?.get(s.id);
+          if (current && permissions?.current) {
+            const notification: PermissionUpdatedNotification = {
+              sessionId: s.id,
+              currentValue: permissions.current(current),
+            };
+            this.server.notify('permission.updated', notification);
+          }
+        }
+      }
+    });
+
+    this.ctx.on('settings/document-updated', (namespace: string, revision: number) => {
+      const notification: SettingsUpdatedNotification = { namespace, revision };
+      this.server.notify('settings.updated', notification);
+    });
+
+    this.ctx.on('goal/activation-changed', (payload: unknown) => {
+      if (!payload || typeof payload !== 'object') return;
+      const p = payload as {
+        sessionId?: string;
+        goal?: { id?: string; revision?: number; activation?: string };
+      };
+      if (!p.sessionId) return;
+      const agents = this.ctx.get('agents') as unknown as {
+        get: (id: string) => AgentLike | undefined;
+      };
+      const goals = this.ctx.get('goals') as unknown as {
+        get: (agent: AgentLike) => GoalView | undefined;
+      };
+      const agent = agents?.get(p.sessionId);
+      if (agent) {
+        const notification: GoalUpdatedNotification = {
+          sessionId: p.sessionId,
+          goal: goals?.get(agent) ?? null,
+        };
+        this.server.notify('goal.updated', notification);
       }
     });
 
@@ -372,8 +493,42 @@ export class BridgeService extends Service {
         return this.handleModelCatalog();
       case 'libadwaita/settings/get':
         return this.handleSettingsGet(params as unknown as SettingsGetParams);
+      case 'libadwaita/settings/describe':
+        return this.handleSettingsDescribe(params as unknown as SettingsDescribeParams);
       case 'libadwaita/settings/mutate':
         return this.handleSettingsMutate(params as unknown as SettingsMutateParams);
+      case 'libadwaita/workspace/list':
+        return this.handleWorkspaceList();
+      case 'libadwaita/workspace/create':
+        return this.handleWorkspaceCreate(params as unknown as WorkspaceCreateParams);
+      case 'libadwaita/workspace/rename':
+        return this.handleWorkspaceRename(params as unknown as WorkspaceRenameParams);
+      case 'libadwaita/workspace/remove':
+        return this.handleWorkspaceRemove(params as unknown as WorkspaceRemoveParams);
+      case 'libadwaita/permission/catalog':
+        return this.handlePermissionCatalog();
+      case 'libadwaita/permission/get':
+        return this.handlePermissionGet(params as unknown as PermissionGetParams);
+      case 'libadwaita/permission/set':
+        return this.handlePermissionSet(params as unknown as PermissionSetParams);
+      case 'libadwaita/goal/get':
+        return this.handleGoalGet(params as unknown as GoalGetParams);
+      case 'libadwaita/goal/edit':
+        return this.handleGoalEdit(params as unknown as GoalEditParams);
+      case 'libadwaita/goal/pause':
+        return this.handleGoalMutation('pause', params as unknown as GoalMutationParams);
+      case 'libadwaita/goal/resume':
+        return this.handleGoalMutation('resume', params as unknown as GoalMutationParams);
+      case 'libadwaita/goal/clear':
+        return this.handleGoalMutation('clear', params as unknown as GoalMutationParams);
+      case 'libadwaita/files/list':
+        return this.handleFilesList(params as unknown as FilesListParams);
+      case 'libadwaita/files/stat':
+        return this.handleFilesStat(params as unknown as FilesStatParams);
+      case 'libadwaita/files/read':
+        return this.handleFilesRead(params as unknown as FilesReadParams);
+      case 'libadwaita/files/readBytes':
+        return this.handleFilesReadBytes(params as unknown as FilesReadBytesParams);
       case 'libadwaita/plugin/list':
         return this.handlePluginList();
       case 'libadwaita/plugin/enable':
@@ -1196,41 +1351,510 @@ export class BridgeService extends Service {
     };
   }
 
-  private async handleSettingsGet(params: SettingsGetParams): Promise<SettingsGetResult> {
+  private settingsDescriptors(params: SettingsDescribeParams): SettingsDescriptor[] {
     const settings = this.ctx.get('settings') as unknown as {
-      describe?: (opt: object) => Array<{ ns: string; value: unknown }>;
+      describe?: (options: object) => SettingsDescriptor[];
     };
-    if (!settings?.describe) {
-      return { settings: {} };
-    }
-
-    const descriptors = settings.describe({ redactSecrets: true });
-    const dict: Record<string, unknown> = {};
+    if (!settings?.describe) return [];
     const keys = params.keys ? new Set(params.keys) : undefined;
+    return settings
+      .describe({ redactSecrets: true })
+      .filter((descriptor) => !keys || keys.has(descriptor.ns));
+  }
 
-    for (const d of descriptors) {
-      if (!keys || keys.has(d.ns)) {
-        dict[d.ns] = d.value;
-      }
+  private async handleSettingsGet(params: SettingsGetParams): Promise<SettingsGetResult> {
+    const dict: Record<string, unknown> = {};
+    for (const descriptor of this.settingsDescriptors(params)) {
+      dict[descriptor.ns] = descriptor.value;
     }
     return { settings: dict };
   }
 
+  private async handleSettingsDescribe(
+    params: SettingsDescribeParams,
+  ): Promise<SettingsDescribeResult> {
+    return { namespaces: this.settingsDescriptors(params) };
+  }
+
   private async handleSettingsMutate(params: SettingsMutateParams): Promise<SettingsMutateResult> {
     const settings = this.ctx.get('settings') as unknown as {
-      update?: (ns: string, patch: object) => Promise<void>;
-      describe?: (opt: object) => Array<{ ns: string; value: unknown }>;
+      update?: (ns: string, patch: object, expectedRevision?: number) => Promise<void>;
     };
-
     if (settings?.update) {
-      for (const [ns, val] of Object.entries(params.patch)) {
-        if (val && typeof val === 'object') {
-          await settings.update(ns, val as object);
+      try {
+        if (params.namespace) {
+          await settings.update(params.namespace, params.patch, params.expectedRevision);
+        } else {
+          for (const [ns, value] of Object.entries(params.patch)) {
+            if (value && typeof value === 'object') {
+              await settings.update(ns, value as object, params.expectedRevision);
+            }
+          }
         }
+      } catch (error) {
+        if (error instanceof Error && 'code' in error && error.code === 'SETTINGS_CONFLICT') {
+          const conflict = error as Error & {
+            expected?: number;
+            actual?: number;
+          };
+          throw new BridgeError(BRIDGE_ERROR_CODES.SETTINGS_CONFLICT, error.message, {
+            expected: conflict.expected,
+            actual: conflict.actual,
+            namespace: params.namespace,
+          });
+        }
+        throw error;
       }
     }
-
     return this.handleSettingsGet({});
+  }
+
+  private async waitForService<T>(name: string, timeoutMs = 15_000): Promise<T | undefined> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const service = this.ctx.get(name) as T | undefined;
+      if (service) return service;
+      if (Date.now() > deadline) return undefined;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+
+  private async workspaceRegistry(): Promise<
+    | {
+        list: () => WorkspaceRecordLike[];
+        get: (id: string) => WorkspaceRecordLike | undefined;
+        create: (path: string, title?: string) => Promise<WorkspaceRecordLike>;
+        resolveByPath: (path: string) => Promise<WorkspaceRecordLike | undefined>;
+        delete: (id: string) => Promise<boolean>;
+      }
+    | undefined
+  > {
+    return this.waitForService('workspaceRegistry');
+  }
+
+  private async workspaceView(workspace: WorkspaceRecordLike): Promise<WorkspaceView> {
+    let status: 'ok' | 'missing-dir' | undefined;
+    try {
+      status = await workspace.status();
+    } catch {}
+    return {
+      id: workspace.id,
+      path: workspace.path,
+      title: workspace.title,
+      createdAt: workspace.createdAt,
+      updatedAt: workspace.updatedAt,
+      sessionIds: [...workspace.sessionIds],
+      ...(status === undefined ? {} : { status }),
+    };
+  }
+
+  private async handleWorkspaceList(): Promise<WorkspaceListResult> {
+    const registry = await this.workspaceRegistry();
+    if (!registry) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.WORKSPACE_UNAVAILABLE,
+        'workspace registry is not available',
+      );
+    }
+    return {
+      workspaces: await Promise.all(
+        registry.list().map((workspace) => this.workspaceView(workspace)),
+      ),
+    };
+  }
+
+  private async handleWorkspaceCreate(
+    params: WorkspaceCreateParams,
+  ): Promise<WorkspaceCreateResult> {
+    const registry = await this.workspaceRegistry();
+    if (!registry) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.WORKSPACE_UNAVAILABLE,
+        'workspace registry is not available',
+      );
+    }
+    if (!params.path) {
+      throw new BridgeError(-32602, 'workspace/create requires path');
+    }
+    const existing = await registry.resolveByPath(params.path);
+    if (existing) {
+      return { workspace: await this.workspaceView(existing), created: false };
+    }
+    const workspace = await registry.create(params.path, params.title);
+    return { workspace: await this.workspaceView(workspace), created: true };
+  }
+
+  private async handleWorkspaceRename(
+    params: WorkspaceRenameParams,
+  ): Promise<WorkspaceRenameResult> {
+    const registry = await this.workspaceRegistry();
+    if (!registry) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.WORKSPACE_UNAVAILABLE,
+        'workspace registry is not available',
+      );
+    }
+    const workspace = registry.get(params.workspaceId);
+    if (!workspace) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.WORKSPACE_NOT_FOUND,
+        `workspace not found: ${params.workspaceId}`,
+        { workspaceId: params.workspaceId },
+      );
+    }
+    if (
+      params.title !== workspace.title &&
+      registry
+        .list()
+        .some((candidate) => candidate.id !== workspace.id && candidate.title === params.title)
+    ) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.WORKSPACE_NAME_CONFLICT,
+        `workspace title already in use: ${params.title}`,
+      );
+    }
+    await workspace.setTitle(params.title);
+    return { workspace: await this.workspaceView(workspace) };
+  }
+
+  private async handleWorkspaceRemove(
+    params: WorkspaceRemoveParams,
+  ): Promise<WorkspaceRemoveResult> {
+    const registry = await this.workspaceRegistry();
+    if (!registry) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.WORKSPACE_UNAVAILABLE,
+        'workspace registry is not available',
+      );
+    }
+    const deleted = await registry.delete(params.workspaceId);
+    if (!deleted) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.WORKSPACE_NOT_FOUND,
+        `workspace not found: ${params.workspaceId}`,
+        { workspaceId: params.workspaceId },
+      );
+    }
+    return { deleted: true };
+  }
+
+  private permissionService():
+    | {
+        catalog: () => PermissionCatalogResult;
+        current: (session: SessionLike) => string;
+        set: (session: SessionLike, preset: string) => void;
+      }
+    | undefined {
+    return this.ctx.get('permissionPresets') as
+      | {
+          catalog: () => PermissionCatalogResult;
+          current: (session: SessionLike) => string;
+          set: (session: SessionLike, preset: string) => void;
+        }
+      | undefined;
+  }
+
+  private async handlePermissionCatalog(): Promise<PermissionCatalogResult> {
+    const permissions = this.permissionService();
+    if (!permissions) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.PERMISSIONS_UNAVAILABLE,
+        'permission preset service is not available',
+      );
+    }
+    return permissions.catalog();
+  }
+
+  private async handlePermissionGet(params: PermissionGetParams): Promise<PermissionGetResult> {
+    const permissions = this.permissionService();
+    if (!permissions) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.PERMISSIONS_UNAVAILABLE,
+        'permission preset service is not available',
+      );
+    }
+    const { session } = await this.resolveSessionEntry(params.sessionId);
+    return {
+      currentValue: permissions.current(session),
+      catalog: permissions.catalog(),
+    };
+  }
+
+  private async handlePermissionSet(params: PermissionSetParams): Promise<PermissionSetResult> {
+    const permissions = this.permissionService();
+    if (!permissions) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.PERMISSIONS_UNAVAILABLE,
+        'permission preset service is not available',
+      );
+    }
+    const { session } = await this.resolveSessionEntry(params.sessionId);
+    permissions.set(session, params.preset);
+    return { currentValue: permissions.current(session) };
+  }
+
+  private goalView(goal: GoalView | undefined): GoalView | null {
+    if (!goal) return null;
+    return {
+      id: goal.id,
+      revision: goal.revision,
+      objective: goal.objective,
+      phase: goal.phase,
+      ...(goal.blockedReason === undefined ? {} : { blockedReason: goal.blockedReason }),
+      maxGoalRounds: goal.maxGoalRounds,
+      roundsStarted: goal.roundsStarted,
+      createdAt: goal.createdAt,
+      updatedAt: goal.updatedAt,
+      activation: goal.activation,
+    };
+  }
+
+  private async requireGoalAgent(
+    sessionId: string,
+  ): Promise<{ agent: AgentLike; goals: GoalServiceLike }> {
+    const goals = this.ctx.get('goals') as GoalServiceLike | undefined;
+    if (!goals) {
+      throw new BridgeError(BRIDGE_ERROR_CODES.GOAL_UNAVAILABLE, 'goal service is not available');
+    }
+    const { agent } = await this.resolveSessionEntry(sessionId);
+    if (!agent) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.SESSION_NOT_FOUND,
+        `session not found: ${sessionId}`,
+      );
+    }
+    return { agent, goals };
+  }
+
+  private async handleGoalGet(params: GoalGetParams): Promise<GoalGetResult> {
+    const { agent, goals } = await this.requireGoalAgent(params.sessionId);
+    return { goal: this.goalView(goals.get(agent)) };
+  }
+
+  private async handleGoalEdit(params: GoalEditParams): Promise<GoalMutationResult> {
+    const { agent, goals } = await this.requireGoalAgent(params.sessionId);
+    try {
+      const goal = goals.edit(agent, params.ref, {
+        ...(params.objective === undefined ? {} : { objective: params.objective }),
+        ...(params.maxGoalRounds === undefined ? {} : { maxGoalRounds: params.maxGoalRounds }),
+      });
+      return { goal: this.goalView(goal) };
+    } catch (error) {
+      throw this.goalError(error);
+    }
+  }
+
+  private async handleGoalMutation(
+    action: 'pause' | 'resume' | 'clear',
+    params: GoalMutationParams,
+  ): Promise<GoalMutationResult> {
+    const { agent, goals } = await this.requireGoalAgent(params.sessionId);
+    try {
+      if (action === 'clear') {
+        goals.clear(agent, params.ref);
+        return { goal: null };
+      }
+      const goal = goals[action](agent, params.ref);
+      return { goal: this.goalView(goal) };
+    } catch (error) {
+      throw this.goalError(error);
+    }
+  }
+
+  private goalError(error: unknown): BridgeError {
+    if (error instanceof Error && 'code' in error) {
+      return new BridgeError(BRIDGE_ERROR_CODES.GOAL_INVALID, error.message, {
+        code: error.code,
+      });
+    }
+    return new BridgeError(
+      BRIDGE_ERROR_CODES.GOAL_INVALID,
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+
+  private async resolveFileScope(
+    sessionId: string,
+    requestedPath: string,
+  ): Promise<{ root: string; target: string; display: string }> {
+    const { session } = await this.resolveSessionEntry(sessionId);
+    const workingDirectory = this.ctx.get('workingDirectory') as unknown as {
+      get: (session: SessionLike) => string;
+    };
+    const root = workingDirectory?.get(session) ?? session.header.cwd;
+    if (!root) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.WORKDIR_UNAVAILABLE,
+        'session has no working directory',
+      );
+    }
+    let rootReal: string;
+    try {
+      rootReal = await fs.realpath(root);
+    } catch {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.WORKDIR_UNAVAILABLE,
+        `working directory is unavailable: ${root}`,
+      );
+    }
+    let target: string;
+    try {
+      target = await fs.realpath(path.resolve(rootReal, requestedPath));
+    } catch (error) {
+      if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
+        throw new BridgeError(
+          BRIDGE_ERROR_CODES.FILE_NOT_FOUND,
+          `file not found: ${requestedPath}`,
+        );
+      }
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.FILE_ACCESS_DENIED,
+        `cannot access: ${requestedPath}`,
+      );
+    }
+    if (target !== rootReal && !target.startsWith(`${rootReal}${path.sep}`)) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.FILE_ACCESS_DENIED,
+        `path escapes session working directory: ${requestedPath}`,
+      );
+    }
+    return {
+      root: rootReal,
+      target,
+      display: path.relative(rootReal, target) || '.',
+    };
+  }
+
+  private fileKind(entry: {
+    isFile(): boolean;
+    isDirectory(): boolean;
+    isSymbolicLink(): boolean;
+  }): FileEntry['kind'] {
+    if (entry.isSymbolicLink()) return 'symlink';
+    if (entry.isDirectory()) return 'directory';
+    if (entry.isFile()) return 'file';
+    return 'other';
+  }
+
+  private async handleFilesList(params: FilesListParams): Promise<FilesListResult> {
+    const scope = await this.resolveFileScope(params.sessionId, params.path ?? '.');
+    let stat: Awaited<ReturnType<typeof fs.stat>>;
+    try {
+      stat = await fs.stat(scope.target);
+    } catch {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.FILE_NOT_FOUND,
+        `file not found: ${params.path ?? '.'}`,
+      );
+    }
+    if (!stat.isDirectory()) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.FILE_ACCESS_DENIED,
+        `not a directory: ${params.path ?? '.'}`,
+      );
+    }
+    const entries: FileEntry[] = [];
+    for (const entry of await fs.readdir(scope.target, { withFileTypes: true })) {
+      if (entries.length >= 2_000) break;
+      const entryPath = path.join(scope.target, entry.name);
+      let size = 0;
+      try {
+        size = (await fs.lstat(entryPath)).size;
+      } catch {}
+      entries.push({
+        name: entry.name,
+        path: path.relative(scope.root, entryPath).split(path.sep).join('/'),
+        kind: this.fileKind(entry),
+        size,
+      });
+    }
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    return { path: scope.display, entries };
+  }
+
+  private async handleFilesStat(params: FilesStatParams): Promise<FilesStatResult> {
+    const scope = await this.resolveFileScope(params.sessionId, params.path);
+    let stat: Awaited<ReturnType<typeof fs.lstat>>;
+    try {
+      stat = await fs.lstat(scope.target);
+    } catch {
+      throw new BridgeError(BRIDGE_ERROR_CODES.FILE_NOT_FOUND, `file not found: ${params.path}`);
+    }
+    return {
+      path: scope.display,
+      kind: this.fileKind(stat),
+      size: stat.size,
+      mtime: stat.mtimeMs,
+    };
+  }
+
+  private async handleFilesRead(params: FilesReadParams): Promise<FilesReadResult> {
+    const scope = await this.resolveFileScope(params.sessionId, params.path);
+    let stat: Awaited<ReturnType<typeof fs.stat>>;
+    try {
+      stat = await fs.stat(scope.target);
+    } catch {
+      throw new BridgeError(BRIDGE_ERROR_CODES.FILE_NOT_FOUND, `file not found: ${params.path}`);
+    }
+    if (!stat.isFile()) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.FILE_ACCESS_DENIED,
+        `not a regular file: ${params.path}`,
+      );
+    }
+    const requested = params.maxBytes ?? 1_048_576;
+    const maxBytes = Math.min(Math.max(requested, 1), 8_388_608);
+    const truncated = stat.size > maxBytes;
+    const handle = await fs.open(scope.target, 'r');
+    let buffer: Buffer;
+    try {
+      buffer = Buffer.alloc(Math.min(stat.size, maxBytes));
+      await handle.read(buffer, 0, buffer.length, 0);
+    } finally {
+      await handle.close();
+    }
+    const text = buffer.toString('utf8');
+    if (buffer.includes(0) || text.includes('\uFFFD')) {
+      return { kind: 'binary', path: scope.display, size: stat.size };
+    }
+    return {
+      kind: 'text',
+      path: scope.display,
+      text,
+      size: stat.size,
+      truncated,
+    };
+  }
+
+  private async handleFilesReadBytes(params: FilesReadBytesParams): Promise<FilesReadBytesResult> {
+    const scope = await this.resolveFileScope(params.sessionId, params.path);
+    let stat: Awaited<ReturnType<typeof fs.stat>>;
+    try {
+      stat = await fs.stat(scope.target);
+    } catch {
+      throw new BridgeError(BRIDGE_ERROR_CODES.FILE_NOT_FOUND, `file not found: ${params.path}`);
+    }
+    if (!stat.isFile()) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.FILE_ACCESS_DENIED,
+        `not a regular file: ${params.path}`,
+      );
+    }
+    const requested = params.maxBytes ?? 16_777_216;
+    const maxBytes = Math.min(Math.max(requested, 1), 16_777_216);
+    if (stat.size > maxBytes) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.FILE_TOO_LARGE,
+        `file exceeds ${maxBytes} bytes: ${params.path}`,
+        { size: stat.size, maxBytes },
+      );
+    }
+    const buffer = await fs.readFile(scope.target);
+    return {
+      path: scope.display,
+      data: buffer.toString('base64'),
+      size: buffer.length,
+    };
   }
 
   private async handlePluginList(): Promise<PluginListResult> {

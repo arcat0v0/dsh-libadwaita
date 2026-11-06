@@ -22,6 +22,16 @@ export const BRIDGE_ERROR_CODES = {
   SKILLS_UNAVAILABLE: -32017,
   REFERENCES_UNAVAILABLE: -32018,
   FORK_UNAVAILABLE: -32019,
+  SETTINGS_CONFLICT: -32020,
+  WORKSPACE_NOT_FOUND: -32021,
+  WORKSPACE_NAME_CONFLICT: -32022,
+  WORKSPACE_UNAVAILABLE: -32023,
+  PERMISSIONS_UNAVAILABLE: -32024,
+  GOAL_UNAVAILABLE: -32025,
+  GOAL_INVALID: -32026,
+  FILE_NOT_FOUND: -32027,
+  FILE_ACCESS_DENIED: -32028,
+  FILE_TOO_LARGE: -32029,
 } as const;
 
 export class BridgeError extends Error {
@@ -269,7 +279,9 @@ export interface SettingsGetResult {
 }
 
 export interface SettingsMutateParams {
+  namespace?: string;
   patch: Record<string, unknown>;
+  expectedRevision?: number;
 }
 
 export interface SettingsMutateResult {
@@ -537,6 +549,211 @@ export interface SessionInboxNotification {
   items: QueueItem[];
 }
 
+export interface WorkspaceView {
+  id: string;
+  path: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  sessionIds: string[];
+  status?: 'ok' | 'missing-dir';
+}
+
+export interface WorkspaceListResult {
+  workspaces: WorkspaceView[];
+}
+
+export interface WorkspaceCreateParams {
+  path: string;
+  title?: string;
+}
+
+export interface WorkspaceCreateResult {
+  workspace: WorkspaceView;
+  created: boolean;
+}
+
+export interface WorkspaceRenameParams {
+  workspaceId: string;
+  title: string;
+}
+
+export interface WorkspaceRenameResult {
+  workspace: WorkspaceView;
+}
+
+export interface WorkspaceRemoveParams {
+  workspaceId: string;
+}
+
+export interface WorkspaceRemoveResult {
+  deleted: boolean;
+}
+
+export interface SettingsDescriptor {
+  ns: string;
+  autoGenerate: boolean;
+  schema: unknown;
+  value: unknown;
+  base?: unknown;
+  user?: unknown;
+  revision: number;
+  secrets?: unknown;
+}
+
+export interface SettingsDescribeParams {
+  keys?: string[];
+}
+
+export interface SettingsDescribeResult {
+  namespaces: SettingsDescriptor[];
+}
+
+export interface SettingsUpdatedNotification {
+  namespace: string;
+  revision: number;
+}
+
+export interface PresetOptionItem {
+  value: string;
+  name: string;
+  description?: string;
+}
+
+export interface PermissionCatalogResult {
+  options: PresetOptionItem[];
+  defaultOptions: PresetOptionItem[];
+  defaultPreset: string;
+}
+
+export interface PermissionGetParams {
+  sessionId: string;
+}
+
+export interface PermissionGetResult {
+  currentValue: string;
+  catalog: PermissionCatalogResult;
+}
+
+export interface PermissionSetParams {
+  sessionId: string;
+  preset: string;
+}
+
+export interface PermissionSetResult {
+  currentValue: string;
+}
+
+export interface PermissionUpdatedNotification {
+  sessionId: string;
+  currentValue: string;
+}
+
+export interface GoalRef {
+  id: string;
+  revision: number;
+}
+
+export interface GoalView extends GoalRef {
+  objective: string;
+  phase: 'active' | 'paused' | 'blocked' | 'complete';
+  blockedReason?: { code: string; message: string };
+  maxGoalRounds: number;
+  roundsStarted: number;
+  createdAt: number;
+  updatedAt: number;
+  activation: 'armed' | 'disarmed';
+}
+
+export interface GoalGetParams {
+  sessionId: string;
+}
+
+export interface GoalGetResult {
+  goal: GoalView | null;
+}
+
+export interface GoalEditParams {
+  sessionId: string;
+  ref: GoalRef;
+  objective?: string;
+  maxGoalRounds?: number;
+}
+
+export interface GoalMutationParams {
+  sessionId: string;
+  ref: GoalRef;
+}
+
+export interface GoalMutationResult {
+  goal: GoalView | null;
+}
+
+export interface GoalUpdatedNotification {
+  sessionId: string;
+  goal: GoalView | null;
+}
+
+export interface FilesListParams {
+  sessionId: string;
+  path?: string;
+}
+
+export interface FileEntry {
+  name: string;
+  path: string;
+  kind: 'file' | 'directory' | 'symlink' | 'other';
+  size: number;
+}
+
+export interface FilesListResult {
+  path: string;
+  entries: FileEntry[];
+}
+
+export interface FilesStatParams {
+  sessionId: string;
+  path: string;
+}
+
+export interface FilesStatResult {
+  path: string;
+  kind: 'file' | 'directory' | 'symlink' | 'other';
+  size: number;
+  mtime: number;
+}
+
+export interface FilesReadParams {
+  sessionId: string;
+  path: string;
+  maxBytes?: number;
+}
+
+export type FilesReadResult =
+  | {
+      kind: 'text';
+      path: string;
+      text: string;
+      size: number;
+      truncated: boolean;
+    }
+  | {
+      kind: 'binary';
+      path: string;
+      size: number;
+    };
+
+export interface FilesReadBytesParams {
+  sessionId: string;
+  path: string;
+  maxBytes?: number;
+}
+
+export interface FilesReadBytesResult {
+  path: string;
+  data: string;
+  size: number;
+}
 declare module '@deepseek-ai/cordis' {
   interface Events {
     'approval/request'(req: unknown, next: () => Promise<unknown>): Promise<unknown>;
@@ -544,5 +761,7 @@ declare module '@deepseek-ai/cordis' {
     'agent/assistant-stream'(payload: unknown): void;
     'session/event'(session: unknown, event: unknown): void;
     'agent/status'(payload: unknown): void;
+    'settings/document-updated'(namespace: string, revision: number): void;
+    'goal/activation-changed'(payload: unknown): void;
   }
 }

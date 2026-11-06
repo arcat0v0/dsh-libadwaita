@@ -213,7 +213,24 @@ GUI 连接 Socket 后的第一个请求必须为 `libadwaita/initialize`。在�
 | `libadwaita/session/model/set` | 切换会话模型路由配置 | `agent.model.select` |
 | `libadwaita/model/catalog` | 查询可用模型与 Provider 目录 | `ctx.llm.catalog` / Provider 列表 |
 | `libadwaita/settings/get` | 读取全局设置项配置表 | `ctx.settings.get` |
-| `libadwaita/settings/mutate` | 原子修改配置表项 | `ctx.settings.mutate` |
+| `libadwaita/settings/mutate` | 原子修改配置表项（支持 expectedRevision） | `ctx.settings.update` |
+| `libadwaita/settings/describe` | 读取设置命名空间 schema/值/revision（脱敏） | `ctx.settings.describe({redactSecrets:true})` |
+| `libadwaita/workspace/list` | 列出持久化工作区 | `ctx.workspaceRegistry.list` |
+| `libadwaita/workspace/create` | 按 cwd 幂等创建工作区 | `ctx.workspaceRegistry.resolveByPath/create` |
+| `libadwaita/workspace/rename` | 重命名工作区显示标题 | `Workspace.setTitle` |
+| `libadwaita/workspace/remove` | 移除工作区记录（不动会话） | `ctx.workspaceRegistry.delete` |
+| `libadwaita/permission/catalog` | 读取权限预设目录 | `ctx.permissionPresets.catalog()` |
+| `libadwaita/permission/get` | 读取会话当前权限预设 | `ctx.permissionPresets.current(session)` |
+| `libadwaita/permission/set` | 切换会话权限预设 | `ctx.permissionPresets.set(session, preset)` |
+| `libadwaita/goal/get` | 读取会话当前 goal | `ctx.goals.get(agent)` |
+| `libadwaita/goal/edit` | 编辑 goal 目标/轮次上限 | `ctx.goals.edit` |
+| `libadwaita/goal/pause` | 暂停 goal | `ctx.goals.pause` |
+| `libadwaita/goal/resume` | 恢复 goal | `ctx.goals.resume` |
+| `libadwaita/goal/clear` | 清除 goal | `ctx.goals.clear` |
+| `libadwaita/files/list` | 列出会话 cwd 内目录项 | bridge 本地安全文件访问 |
+| `libadwaita/files/stat` | 查询文件元数据 | bridge 本地安全文件访问 |
+| `libadwaita/files/read` | 读取会话 cwd 内文本文件 | bridge 本地安全文件访问 |
+| `libadwaita/files/readBytes` | 读取会话 cwd 内字节文件 | bridge 本地安全文件访问 |
 | `libadwaita/plugin/list` | 查询已安装与已启用的插件 | `ctx.pluginManager.list` |
 | `libadwaita/plugin/enable` | 启用插件（返回 restart-required） | `ctx.pluginManager.setPluginEnabled` |
 | `libadwaita/plugin/disable` | 禁用插件（返回 restart-required） | `ctx.pluginManager.setPluginEnabled` |
@@ -459,14 +476,40 @@ Bridge 直接投影上游 `agent.inbox`：`nextTurn` 为等待独立 turn 的排
 ### 6.5 全局设置读写
 
 #### `libadwaita/settings/get`
-- **说明**：获取当前 profile 下的完整设置文档。
-- **请求参数**：`{ "keys"?: string[] }`（可选过滤指定 key 前缀）
-- **响应结果**：`{ "settings": Record<string, unknown> }`
+- **说明**：获取当前 profile 下的设置值（永远脱敏）。
+- **请求参数**：`{ "keys"?: string[] }`（可选过滤命名空间）
+- **响应结果**：`{ "settings": Record<string, unknown> }`，键为 settings 命名空间。
+
+#### `libadwaita/settings/describe`
+- **说明**：返回设置命名空间的完整描述，用于动态表单。调用上游 `ctx.settings.describe({ redactSecrets: true })`；secret 字段已被上游标记并替换，协议层绝不返回明文。
+- **请求参数**：`{ "keys"?: string[] }`
+- **响应结果（`SettingsDescribeResult`）**：
+  | 字段 | 类型 | 必选 | 说明 |
+  |---|---|---|---|
+  | `namespaces` | `SettingsDescriptor[]` | 是 | 描述符列表 |
+
+`SettingsDescriptor` 结构：
+| 字段 | 类型 | 必选 | 说明 |
+|---|---|---|---|
+| `ns` | `string` | 是 | 命名空间（对应 profile 行 id） |
+| `autoGenerate` | `boolean` | 是 | 是否自动生成设置页 |
+| `schema` | `unknown` | 是 | 上游表单 JSON Schema |
+| `value` | `unknown` | 是 | 脱敏后的当前值 |
+| `base` | `unknown` | 否 | 继承层值 |
+| `user` | `unknown` | 否 | 用户层值 |
+| `revision` | `number` | 是 | 当前修订号；`mutate` 冲突检测依据 |
+| `secrets` | `unknown` | 否 | 上游 secret 标记位 |
 
 #### `libadwaita/settings/mutate`
-- **说明**：原子更新设置。底层委托给 `ctx.settings.mutate`。
-- **请求参数**：`{ "patch": Record<string, unknown> }`
-- **响应结果**：`{ "settings": Record<string, unknown> }`
+- **说明**：原子更新设置。支持两种形态：单命名空间 `namespace + patch`（`patch` 为该命名空间的字段合并表），或多命名空间 `patch` 映射表（键为命名空间，值为字段合并表）。`expectedRevision` 可选；提供时底层委托 `ctx.settings.update(ns, patch, expectedRevision)`，命名空间自上次 describe 以来发生变更则拒绝。
+- **请求参数（`SettingsMutateParams`）**：
+  | 字段 | 类型 | 必选 | 说明 |
+  |---|---|---|---|
+  | `namespace` | `string` | 否 | 单命名空间写；提供时 `patch` 为该命名空间字段 |
+  | `patch` | `Record<string, unknown>` | 是 | 字段合并表或命名空间映射 |
+  | `expectedRevision` | `number` | 否 | CAS 期望修订号 |
+- **响应结果**：`{ "settings": Record<string, unknown> }`（脱敏后的完整设置）
+- **错误**：修订冲突返回 `-32020 SETTINGS_CONFLICT`，`data` 含 `expected` 与 `actual`。
 
 ### 6.6 插件管理（HMR 禁用场景与 `restart-required`）
 
@@ -648,6 +691,143 @@ Bridge 直接投影上游 `agent.inbox`：`nextTurn` 为等待独立 turn 的排
   |---|---|---|---|
   | `candidates` | `Array<{ path: string, kind: 'file' \| 'directory' }>` | 是 | 确定性路径候选；目录保持补全打开 |
 - **错误**：服务未挂载时返回 `-32018 REFERENCES_UNAVAILABLE`。
+
+### 6.10 工作区持久化、权限、Goal 与会话内文件
+
+#### `libadwaita/workspace/list`
+
+- **说明**：列出持久化工作区记录。上游 `ctx.workspaceRegistry` 由 bridge bundle 显式挂载 `@deepseek-ai/dsh-workspace` 提供（base 默认不挂载）。`status` 为实时目录检查：`ok` 或 `missing-dir`。
+- **请求参数**：无参数。
+- **响应结果（`WorkspaceListResult`）**：
+  | 字段 | 类型 | 必选 | 说明 |
+  |---|---|---|---|
+  | `workspaces` | `WorkspaceView[]` | 是 | 工作区列表 |
+
+`WorkspaceView` 结构：
+| 字段 | 类型 | 必选 | 说明 |
+|---|---|---|---|
+| `id` | `string` | 是 | 稳定工作区 id（uuid） |
+| `path` | `string` | 是 | 规范化目录绝对路径 |
+| `title` | `string` | 是 | 显示标题 |
+| `createdAt` / `updatedAt` | `string` | 是 | ISO-8601 时间 |
+| `sessionIds` | `string[]` | 是 | 已校验归属的会话 id 列表 |
+| `status` | `'ok' \| 'missing-dir'` | 否 | 目录实时状态 |
+- **错误**：服务不可用 `-32023 WORKSPACE_UNAVAILABLE`。
+
+#### `libadwaita/workspace/create`
+
+- **说明**：按 cwd 幂等创建工作区。先 `resolveByPath`；存在则返回 `created:false`。
+- **请求参数**：`{ "path": string, "title"?: string }`
+- **响应结果**：`{ "workspace": WorkspaceView, "created": boolean }`
+- **错误**：路径不存在或非目录时返回上游错误（映射为 `-32023`）。
+
+#### `libadwaita/workspace/rename`
+
+- **说明**：重命名工作区显示标题。与 Web UI 一致，不允许与其它工作区重名。
+- **请求参数**：`{ "workspaceId": string, "title": string }`
+- **响应结果**：`{ "workspace": WorkspaceView }`
+- **错误**：未知工作区 `-32021 WORKSPACE_NOT_FOUND`；重名 `-32022 WORKSPACE_NAME_CONFLICT`。
+
+#### `libadwaita/workspace/remove`
+
+- **说明**：移除工作区记录。不会删除或归档任何会话日志。
+- **请求参数**：`{ "workspaceId": string }`
+- **响应结果**：`{ "deleted": true }`
+- **错误**：未知工作区 `-32021`。
+
+#### `libadwaita/permission/catalog`
+
+- **说明**：读取进程级权限预设目录。调用上游 `ctx.permissionPresets.catalog()`（base 默认挂载 `permission` 行）。
+- **请求参数**：无参数。
+- **响应结果（`PermissionCatalogResult`）**：
+  | 字段 | 类型 | 必选 | 说明 |
+  |---|---|---|---|
+  | `options` | `PresetOptionItem[]` | 是 | 当前可选预设 |
+  | `defaultOptions` | `PresetOptionItem[]` | 是 | 可作为未来会话默认值的预设 |
+  | `defaultPreset` | `string` | 是 | 配置缺省时的生效默认 |
+
+`PresetOptionItem` 结构：`{ "value": string, "name": string, "description"?: string }`
+- **错误**：服务未挂载 `-32024 PERMISSIONS_UNAVAILABLE`。
+
+#### `libadwaita/permission/get`
+
+- **说明**：读取会话当前权限值（配置预设、动态 `auto` 或派生 `custom`）。
+- **请求参数**：`{ "sessionId": string }`
+- **响应结果**：`{ "currentValue": string, "catalog": PermissionCatalogResult }`
+
+#### `libadwaita/permission/set`
+
+- **说明**：为会话选择权限预设。写入 `permission/preset` 持久事件，并通过 `permission.updated` 通知推送新值。
+- **请求参数**：`{ "sessionId": string, "preset": string }`
+- **响应结果**：`{ "currentValue": string }`
+- **错误**：未知预设抛出上游错误（映射为 `-32024` 上下文错误信息）。
+
+#### `libadwaita/goal/get`
+
+- **说明**：读取会话当前 goal。上游 `ctx.goals` 为 base 默认服务。
+- **请求参数**：`{ "sessionId": string }`
+- **响应结果**：`{ "goal": GoalView \| null }`
+
+`GoalView` 结构：
+| 字段 | 类型 | 必选 | 说明 |
+|---|---|---|---|
+| `id` | `string` | 是 | goal id |
+| `revision` | `number` | 是 | 每次持久变更递增；CAS 依据 |
+| `objective` | `string` | 是 | 目标文本 |
+| `phase` | `'active' \| 'paused' \| 'blocked' \| 'complete'` | 是 | 持久阶段 |
+| `blockedReason` | `object` | 否 | 仅 `blocked` 时存在 |
+| `maxGoalRounds` | `number` | 是 | 自动延续轮次上限 |
+| `roundsStarted` | `number` | 是 | 已开始的最高轮次 |
+| `createdAt` / `updatedAt` | `number` | 是 | 毫秒时间戳 |
+| `activation` | `'armed' \| 'disarmed'` | 是 | 进程内自动延续状态 |
+- **错误**：服务未挂载 `-32025 GOAL_UNAVAILABLE`。
+
+#### `libadwaita/goal/edit` / `goal/pause` / `goal/resume` / `goal/clear`
+
+- **说明**：以 `{ id, revision }` 作为 CAS 引用执行目标编辑、暂停、恢复与清除。`clear` 成功后返回 `{ "goal": null }`。
+- **请求参数**：`{ "sessionId": string, "ref": GoalRef, ... }`；`edit` 额外接受 `objective?` 与 `maxGoalRounds?`。
+- **响应结果**：`{ "goal": GoalView \| null }`
+- **错误**：服务未挂载 `-32025`；引用过期、无当前 goal 或非法状态迁移映射为 `-32026 GOAL_INVALID`，`data.code` 保留上游错误码（如 `GOAL_NOT_FOUND`）。
+
+#### `libadwaita/files/list`
+
+- **说明**：列出会话当前工作目录内的目录项。该方法使用 **bridge 本地安全文件访问**（非上游 workspaceFiles 服务）：以会话 cwd 的 `realpath` 为根，目标路径同样 `realpath` 后必须位于根内，拒绝逃逸与失效符号链接。
+- **请求参数**：`{ "sessionId": string, "path"?: string }`（`path` 缺省为 `"."`，可为根内相对或绝对路径）
+- **响应结果（`FilesListResult`）**：
+  | 字段 | 类型 | 必选 | 说明 |
+  |---|---|---|---|
+  | `path` | `string` | 是 | 根内显示路径 |
+  | `entries` | `FileEntry[]` | 是 | 按名称排序；上限 2000 条 |
+
+`FileEntry` 结构：`{ "name": string, "path": string, "kind": 'file' | 'directory' | 'symlink' | 'other', "size": number }`
+- **错误**：目录不存在 `-32027 FILE_NOT_FOUND`；非目录 `-32028 FILE_ACCESS_DENIED`。
+
+#### `libadwaita/files/stat`
+
+- **说明**：查询根内路径元数据（`lstat`，不跟随符号链接）。
+- **请求参数**：`{ "sessionId": string, "path": string }`
+- **响应结果**：`{ "path": string, "kind": ..., "size": number, "mtime": number }`
+- **错误**：`-32027` / `-32028`。
+
+#### `libadwaita/files/read`
+
+- **说明**：读取根内文本文件。默认最多读取 1 MiB（`maxBytes` 上限 8 MiB）；超出时 `truncated:true`。包含 NUL 字节或非法 UTF-8 时返回 `{ "kind": "binary", "size": ... }`，绝不返回二进制文本。
+- **请求参数**：`{ "sessionId": string, "path": string, "maxBytes"?: number }`
+- **响应结果（`FilesReadResult`）**：
+  | 字段 | 类型 | 必选 | 说明 |
+  |---|---|---|---|
+| `kind` | `'text' \| 'binary'` | 是 | 内容分类 |
+| `path` | `string` | 是 | 根内显示路径 |
+| `text` | `string` | `text` 时 | 文本内容 |
+| `size` | `number` | 是 | 原始文件大小 |
+| `truncated` | `boolean` | `text` 时 | 是否被 `maxBytes` 截断 |
+
+#### `libadwaita/files/readBytes`
+
+- **说明**：读取根内文件字节并以 base64 返回。默认上限 16 MiB，超限拒绝（不截断）。
+- **请求参数**：`{ "sessionId": string, "path": string, "maxBytes"?: number }`
+- **响应结果**：`{ "path": string, "data": string, "size": number }`
+- **错误**：`-32027`；非普通文件 `-32028`；超过上限 `-32029 FILE_TOO_LARGE`。
 ---
 
 ## 7. 服务端推流通知（Server-to-Client Notifications）
@@ -842,6 +1022,58 @@ Bridge 直接投影上游 `agent.inbox`：`nextTurn` 为等待独立 turn 的排
 ```
 - `items` 与 `libadwaita/session/queue/list` 的返回结构完全一致。
 
+### 7.7 `settings.updated`：设置命名空间变更通知
+
+当 profile 设置文档发生外部或桥内变更时推送（上游 `settings/document-updated` 事件）。
+
+#### 载荷（`SettingsUpdatedNotification`）
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "settings.updated",
+  "params": { "namespace": "agent-loop", "revision": 1 }
+}
+```
+
+### 7.8 `permission.updated`：会话权限变更通知
+
+当已 follow 的会话记录 `permission/preset`、`sandbox/mode` 或 `approval/policy` 事件时推送当前权限值。
+
+#### 载荷（`PermissionUpdatedNotification`）
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "permission.updated",
+  "params": { "sessionId": "sess-uuid", "currentValue": "workspace-write" }
+}
+```
+
+### 7.9 `goal.updated`：会话 Goal 变更通知
+
+当已 follow 的会话发生 `goal/change` 事件或 goal 激活状态变化时推送完整 `GoalView`；清除后 `goal` 为 `null`。
+
+#### 载荷（`GoalUpdatedNotification`）
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "goal.updated",
+  "params": {
+    "sessionId": "sess-uuid",
+    "goal": {
+      "id": "goal-uuid",
+      "revision": 2,
+      "objective": "Ship batch B safely",
+      "phase": "active",
+      "maxGoalRounds": 256,
+      "roundsStarted": 0,
+      "createdAt": 1762419200000,
+      "updatedAt": 1762419201000,
+      "activation": "armed"
+    }
+  }
+}
+```
+
 ---
 
 ## 8. 双向交互请求（Server-to-Client Requests）与 Fail-Closed 语义
@@ -999,6 +1231,16 @@ Bridge 直接投影上游 `agent.inbox`：`nextTurn` 为等待独立 turn 的排
 | `-32017` | `SKILLS_UNAVAILABLE` | `skills` 服务未在当前组合中挂载 |
 | `-32018` | `REFERENCES_UNAVAILABLE` | `fileReferences` 服务未在当前组合中挂载 |
 | `-32019` | `FORK_UNAVAILABLE` | 指定边界不存在、无已完成 turn 或创建子会话失败 |
+| `-32020` | `SETTINGS_CONFLICT` | 设置命名空间 `expectedRevision` 与当前修订不一致（`data` 含 expected/actual） |
+| `-32021` | `WORKSPACE_NOT_FOUND` | 指定工作区 id 不存在 |
+| `-32022` | `WORKSPACE_NAME_CONFLICT` | 工作区标题与其它记录冲突 |
+| `-32023` | `WORKSPACE_UNAVAILABLE` | `workspaceRegistry` 服务不可用或路径不合法 |
+| `-32024` | `PERMISSIONS_UNAVAILABLE` | `permissionPresets` 服务不可用或预设无效 |
+| `-32025` | `GOAL_UNAVAILABLE` | `goals` 服务未挂载 |
+| `-32026` | `GOAL_INVALID` | Goal 引用过期、无当前 goal 或非法状态迁移 |
+| `-32027` | `FILE_NOT_FOUND` | 会话 cwd 内目标路径不存在 |
+| `-32028` | `FILE_ACCESS_DENIED` | 路径逃逸会话 cwd、符号链接逃逸或目标类型不合法 |
+| `-32029` | `FILE_TOO_LARGE` | 文件超过读取上限 |
 
 ---
 
@@ -1104,6 +1346,8 @@ Bridge 直接投影上游 `agent.inbox`：`nextTurn` 为等待独立 turn 的排
 4. **不暴露明文凭据回读**：`credentials/status` 与任何其他方法绝不返回明文 secret，阻断密码泄露链条。
 5. **不内联 Web Host 私有 RPC**：不模拟 Web 端构建生成的 Typert 私有 mux 通道，所有通信完全收敛在 bridge 定义的标准命名空间中。
 
+6. **G20 Agent Preset 目录暂为 base 阻塞缺口**：上游 `AgentPresetRegistry`（`packages/preset/agent-preset-registry`）仅在 `packages/bundle/web-app` 挂载（`cordis.patch.yml` 第 598 行）；其 preset 声明（`packages/bundle/web-app/presets/standard.patch.yml`）会再次挂载 bash/fs/skill/goal 等工具插件，与 base 已全局挂载的行冲突。为遵守"不伪造、不重复挂载"原则，本协议暂不定义 `libadwaita/agent-preset/*`，GUI 的 Agent Preset 卡（映射表 S16）标记为缺失，直至上游提供 base 安全的注册表组合。
+
 ---
 
 ## 12. 上游源码引用与映射依据
@@ -1132,3 +1376,7 @@ Bridge 直接投影上游 `agent.inbox`：`nextTurn` 为等待独立 turn 的排
 | **Slash 命令** | `packages/interaction/commands/src/index.ts`; `packages/interaction/commands/src/types.ts` | `CommandsService.list/execute`, `CommandDescriptor`, `CommandExecution` |
 | **Skill 目录** | `packages/skill/skill/src/index.ts`; `packages/skill/skill-filesystem/src/index.ts` | `skills.snapshot/list`, `SkillSummary`, `SkillInvocationPolicy` |
 | **文件引用候选** | `packages/context/file-reference/src/index.ts`; `packages/context/file-reference-local/src/index.ts` | `FileReferenceService.list`, `FileReferenceCandidate` |
+| **工作区持久化** | `packages/workspace/workspace/src/index.ts`; `packages/api/workspace-controller/src/commands.ts` | `WorkspaceRegistry.create/list/delete/resolveByPath`, `Workspace.setTitle/status` |
+| **设置表单** | `packages/settings/settings/src/index.ts` | `SettingsForms.describe/update`, `SettingsDescriptor`, `SettingsConflictError` |
+| **权限预设** | `packages/interaction/permission-presets/src/index.ts`; `packages/interaction/permission-presets/src/types.ts` | `PermissionPresetService.catalog/current/set`, `PermissionCatalog`, `PresetOption` |
+| **Goal 状态机** | `packages/goal/goal/src/index.ts`; `packages/goal/goal/src/types.ts` | `GoalService.get/edit/pause/resume/clear`, `GoalView`, `GoalRef` |

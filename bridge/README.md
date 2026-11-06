@@ -67,7 +67,7 @@ $XDG_DATA_HOME/dsh-libadwaita/
 #### 关键行 ID 与覆盖语义
 - **`id: hmr`**（模块名 `'@deepseek-ai/dsh-hmr'`）：在生产配置中显式禁用 config-only HMR，保证运行期长连接观察到的服务拓扑稳定，不被动态重载中断。
 - **`id: credentials`**（模块名 `'@deepseek-ai/dsh-credentials-local'`）：必须禁用。上游该行会在本地磁盘 `$DSH_HOME` 写入明文 `.credentials.yaml` 文件；将其禁用后，bridge bundle 挂载的内存凭据提供方接管 `ctx.credentials`，完全杜绝磁盘秘钥泄露。
-- **bridge bundle 自身 patch**：`bridge/cordis.patch.yml` 在 `@deepseek-ai/dsh-base` 之上插入 `tool-ask-user`、`file-reference-local`、`bridge-credentials` 与 `bridge` 四行。GUI 无需在 profile 用户层重复声明这些行。
+- **bridge bundle 自身 patch**：`bridge/cordis.patch.yml` 在 `@deepseek-ai/dsh-base` 之上插入 `tool-ask-user`、`file-reference-local`、`workspace`、`bridge-credentials` 与 `bridge` 五行。GUI 无需在 profile 用户层重复声明这些行。
 
 ### 1.4 测试 Profile 补丁（仅供测试，禁止进生产）
 

@@ -3,6 +3,8 @@
       name: '@deepseek-ai/dsh-tool-ask-user'
     - id: file-reference-local
       name: '@deepseek-ai/dsh-file-reference-local'
+    - id: workspace
+      name: '@deepseek-ai/dsh-workspace'
     - id: bridge-credentials
       name: '@dsh-libadwaita/bridge/credentials'
     - id: bridge
