@@ -312,6 +312,37 @@ pub fn set_socket_permissions_0600(path: &Path) -> Result<(), SupervisorError> {
     Ok(())
 }
 
+const SYSTEM_BUNDLE_DSH: &str = "/usr/lib/dsh-libadwaita/bridge/node_modules/.bin/dsh";
+
+pub fn resolve_dsh_bin(
+    env_value: Option<String>,
+    path_has_dsh: bool,
+    system_bundle_dsh_exists: bool,
+) -> String {
+    if let Some(value) = env_value {
+        return value;
+    }
+    if path_has_dsh {
+        return "dsh".to_string();
+    }
+    if system_bundle_dsh_exists {
+        return SYSTEM_BUNDLE_DSH.to_string();
+    }
+    "dsh".to_string()
+}
+
+fn path_has_dsh_executable() -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        let candidate = dir.join("dsh");
+        std::fs::metadata(&candidate)
+            .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct SupervisorConfig {
     pub dsh_home: PathBuf,
@@ -341,7 +372,11 @@ impl Default for SupervisorConfig {
             }
         };
 
-        let dsh_bin = std::env::var("DSH_BIN").unwrap_or_else(|_| "dsh".to_string());
+        let dsh_bin = resolve_dsh_bin(
+            std::env::var("DSH_BIN").ok(),
+            path_has_dsh_executable(),
+            Path::new(SYSTEM_BUNDLE_DSH).exists(),
+        );
 
         Self {
             dsh_home,

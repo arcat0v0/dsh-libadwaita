@@ -3,6 +3,32 @@ use dsh_libadwaita::supervisor::*;
 use std::path::PathBuf;
 use std::time::Duration;
 
+#[test]
+fn resolve_dsh_bin_prefers_env_override() {
+    assert_eq!(
+        resolve_dsh_bin(Some("/opt/dsh".to_string()), true, true),
+        "/opt/dsh"
+    );
+}
+
+#[test]
+fn resolve_dsh_bin_prefers_path_over_system_bundle() {
+    assert_eq!(resolve_dsh_bin(None, true, true), "dsh");
+}
+
+#[test]
+fn resolve_dsh_bin_uses_system_bundle_when_path_missing() {
+    assert_eq!(
+        resolve_dsh_bin(None, false, true),
+        "/usr/lib/dsh-libadwaita/bridge/node_modules/.bin/dsh"
+    );
+}
+
+#[test]
+fn resolve_dsh_bin_falls_back_when_nothing_available() {
+    assert_eq!(resolve_dsh_bin(None, false, false), "dsh");
+}
+
 struct MockLlmServer {
     port: u16,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,

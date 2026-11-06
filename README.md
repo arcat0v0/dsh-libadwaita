@@ -83,7 +83,7 @@ PATH="$PWD/bridge/node_modules/.bin:$PATH" cargo run --manifest-path app/Cargo.t
 gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.StartServiceByName io.github.deepseek_ai.DshLibadwaita 0
 ```
 
-安装包把 `dsh` 放到 `/usr/lib/dsh-libadwaita/bridge/node_modules/.bin/dsh`，但不安装 `/usr/bin/dsh`；若会话 PATH 中没有独立的 `dsh`，先设置 `DSH_BIN=/usr/lib/dsh-libadwaita/bridge/node_modules/.bin/dsh`，否则三种入口都会显示 Retry banner。
+安装包把 `dsh` 放到 `/usr/lib/dsh-libadwaita/bridge/node_modules/.bin/dsh`，但不安装 `/usr/bin/dsh`。未设置 `DSH_BIN` 时，supervisor 先按 `PATH` 查找可执行的 `dsh`，找不到再自动使用该安装路径；因此桌面图标、`gtk-launch` 与 D-Bus 激活无需手动 export。`DSH_BIN` 仍是显式覆盖；只有 PATH 和系统 bundle 都不可用时才回退到 `dsh` 并显示 Retry banner。
 
 本机未执行 `pacman -U` 或系统安装；`desktop-file-validate packaging/io.github.deepseek_ai.DshLibadwaita.desktop` 退出码为 0（仅提示 `Categories` 含多个主类）。`gtk-launch` 与上面的 `gdbus ... StartServiceByName` 命令使用临时 XDG 数据目录、私有 D-Bus 会话和指向开发二进制的临时 service 文件验证过，二者都在总线上注册了 `io.github.deepseek_ai.DshLibadwaita`。
 
@@ -91,7 +91,7 @@ gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/
 
 | 变量 | 作用 |
 |---|---|
-| `DSH_BIN` | `HarnessSupervisor` 启动的 dsh 可执行文件；默认值是 `dsh`，即从 `PATH` 查找。以 `.js` 结尾时改为 `node <file>`。 |
+| `DSH_BIN` | 显式覆盖 dsh 可执行文件。未设置时依次探测：PATH 中的可执行 `dsh` → `/usr/lib/dsh-libadwaita/bridge/node_modules/.bin/dsh` → 字符串 `dsh`（失败时显示 Retry）。以 `.js` 结尾时改为 `node <file>`。 |
 | `DSH_BRIDGE_BUNDLE` | 覆盖受管 profile 的 bridge bundle 路径；未设置时优先使用存在的 `/usr/lib/dsh-libadwaita/bridge`，否则使用编译时的 `../bridge`。 |
 | `DSH_HOME` | 不是 GUI 的用户覆盖项；supervisor 把 `$XDG_DATA_HOME/dsh-libadwaita`（未设置 `XDG_DATA_HOME` 时为 `$HOME/.local/share/dsh-libadwaita`）作为 `DSH_HOME` 注入 dsh 子进程，与 `~/.dsh` 隔离。 |
 | `XDG_RUNTIME_DIR` | supervisor 在其下创建 `dsh-libadwaita/`（`0700`）和 `dsh-<app-pid>-<ns>.sock`（`0600`），并把该子目录作为 dsh 子进程的 `XDG_RUNTIME_DIR`。 |
@@ -102,7 +102,8 @@ gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/
 
 ### 故障排查
 
-- 缺 dsh：检查 `DSH_BIN` 或 `PATH`；开发模式确认 `pnpm -C bridge install && pnpm -C bridge build` 已生成 `bridge/node_modules/.bin/dsh`，安装模式按上文设置 `DSH_BIN`。
+- 缺 dsh：检查 `DSH_BIN` 或 `PATH`；开发模式确认 `pnpm -C bridge install && pnpm -C bridge build` 已生成 `bridge/node_modules/.bin/dsh`；安装模式确认 `/usr/lib/dsh-libadwaita/bridge/node_modules/.bin/dsh` 存在，或显式设置 `DSH_BIN`。
+- 无头/私有 D-Bus 会话：没有可激活的 `org.a11y.atspi.Registry` 时，GTK 输出 `Gtk-CRITICAL **: ... Unable to register the application: ... Could not activate remote peer 'org.a11y.atspi.Registry': unit failed`；这类会话用 `GTK_A11Y=none NO_AT_BRIDGE=1` 启动，普通桌面会话不受影响。
 - 版本不匹配：`libadwaita/initialize` 要求 `PROTOCOL_VERSION = 1`，不一致时 supervisor 停止 dsh 并显示 `Protocol version mismatch` 与 Retry；确认 `@deepseek-ai/dsh` `0.2.2-rc.1` 与 `bridge/package.json` 的 `engines.dsh` 一致，并重建 bridge。
 - profile 首启生成：`ensure_managed_profile` 在 `$DSH_HOME/profiles/libadwaita/` 写入 `package.json`、`cordis.patch.yml` 与 bridge 符号链接，patch 禁用 `hmr` 和本地凭据插件；不要到 `~/.dsh` 找配置，排查时改用独立的 `XDG_DATA_HOME`。
 - 关闭窗口后台继续：有运行中的 session 时，关闭请求只隐藏窗口，并用 `ApplicationHoldGuard` 与后台通知维持进程；点击通知的 `app.activate` 可重新呈现窗口。
