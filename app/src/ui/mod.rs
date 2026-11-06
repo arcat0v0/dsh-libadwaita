@@ -13,4 +13,5 @@ pub mod session_dialogs;
 pub mod settings;
 pub mod sidebar;
 pub mod trigger_popup;
+pub mod todo_dock;
 pub mod window;

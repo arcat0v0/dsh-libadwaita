@@ -4,8 +4,9 @@ use crate::ui::composer::Composer;
 use crate::ui::desktop::{open_path_in_default_app, open_terminal_in_dir};
 use crate::ui::message_renderer::{render_block, AssistantLiveHandle};
 use crate::ui::queue_dock::QueueDock;
-use gtk4::prelude::*;
+use crate::ui::todo_dock::TodoDock;
 use libadwaita as adw;
+use gtk4::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -14,6 +15,7 @@ pub struct ConversationView {
     stack: gtk4::Stack,
     composer: Composer,
     queue_dock: QueueDock,
+    todo_dock: TodoDock,
     transcript_box: gtk4::Box,
     welcome_bubble: gtk4::Box,
     status_label: gtk4::Label,
@@ -179,6 +181,9 @@ impl ConversationView {
         let queue_dock = QueueDock::new();
         conversation_box.append(queue_dock.widget());
 
+        let todo_dock = TodoDock::new();
+        conversation_box.append(todo_dock.widget());
+
         let composer = Composer::new();
         conversation_box.append(composer.widget());
 
@@ -202,6 +207,7 @@ impl ConversationView {
             stack,
             composer,
             queue_dock,
+            todo_dock,
             transcript_box,
             welcome_bubble,
             status_label,
@@ -257,6 +263,14 @@ impl ConversationView {
 
     pub fn update_queue(&self, items: &[QueueItem]) {
         self.queue_dock.update(items);
+    }
+
+    pub fn todo_dock(&self) -> &TodoDock {
+        &self.todo_dock
+    }
+
+    pub fn update_todo(&self, items: &[crate::protocol::TodoItem]) {
+        self.todo_dock.update(items);
     }
 
     pub fn clear_session(&self) {
