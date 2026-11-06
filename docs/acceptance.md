@@ -2,7 +2,7 @@
 
 日期：2026-11-06  
 基线：`docs/dsh-web-feature-inventory.md` 与 `docs/web-ui-map.md` 的 N/M/C/A/S/P/O 编号，共 132 行。  
-实现基线：bridge `33b486a`、app `5f4546e`；bridge 39 项测试、app 78 项测试均通过。
+实现基线：bridge `33b486a`、app `ccdfc1f`；bridge 39 项测试、app 82 项测试均通过。
 判定只依据当前仓库代码接线与可执行证据，不依据计划、映射表预期或上游 Web 的理论能力。
 
 ## 0. 验收口径
@@ -15,7 +15,7 @@
 
 测试证据：
 
-- `cargo test --manifest-path app/Cargo.toml`：78 passed。
+- `cargo test --manifest-path app/Cargo.toml`：82 passed。
 - `npm test --prefix bridge`：39 passed。
 - `app/tests/supervisor_dsh_tests.rs::test_real_dsh_lifecycle_and_session_create`：真实 dsh 启动、握手、会话创建、停止与重启。
 - `bridge/tests/integration/gap-batch-d.spec.ts`：真实 dsh terminal 与 schedule 生命周期。
@@ -198,7 +198,7 @@
 | O13 | 自动化计划任务 CRUD/运行/历史/时钟 | 已实现 | `SchedulesPage` 调 `schedule/catalog|create|edit|run|history|delete`，提供 New/Run/History/Edit/Delete 对话框，`schedule.changed` 刷新；无 delivery limits、暂停/恢复与目标会话时钟标记。 |
 | O14 | PWA/manifest/子路径挂载 | 有意不移植 | 使用 `AdwApplication`、应用 id、`.desktop` 与 GApplication 激活，不实现 PWA/URL scope。 |
 | O15 | 系统通知与提示音 | 部分实现 | GNotification 完成/后台通知与撤回保留；General 的 Desktop Notifications 开关持久化并同时约束 turn-complete、后台继续与关闭窗口通知；无提示音。 |
-| O16 | 测试支撑包 | 已实现 | `app/tests/` 14 个 Rust 测试文件共 78 项，`bridge/tests/` 7 个 suite 共 39 项；产品窗口无测试入口。 |
+| O16 | 测试支撑包 | 已实现 | `app/tests/` 14 个 Rust 测试文件共 82 项，`bridge/tests/` 7 个 suite 共 39 项；产品窗口无测试入口。 |
 
 ## 9. G01–G29 当前缺口账本
 
