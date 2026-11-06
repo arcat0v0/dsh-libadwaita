@@ -6,6 +6,8 @@ use crate::ui::message_renderer::{render_block, AssistantLiveHandle};
 use crate::ui::goal_bar::GoalBar;
 use crate::ui::queue_dock::QueueDock;
 use crate::ui::schedules::SchedulesPage;
+use crate::ui::trajectory::TrajectoryView;
+use crate::ui_prefs::TranscriptView;
 use crate::ui::todo_dock::TodoDock;
 use libadwaita as adw;
 use gtk4::prelude::*;
@@ -37,6 +39,10 @@ pub struct ConversationView {
     live_handle: RefCell<Option<AssistantLiveHandle>>,
     schedules_page: SchedulesPage,
     trajectory_page: adw::ViewStackPage,
+    trajectory_view: TrajectoryView,
+    view_mode: Cell<TranscriptView>,
+    on_view_mode: Rc<RefCell<Option<Box<dyn Fn(TranscriptView)>>>>,
+    view_dropdown: gtk4::DropDown,
     rendered_count: Cell<usize>,
     active_cwd: Rc<RefCell<PathBuf>>,
     title_activate: Rc<RefCell<Option<Box<dyn Fn()>>>>,
@@ -174,6 +180,28 @@ impl ConversationView {
         context_button.set_popover(Some(&context_popover));
         session_header.append(&context_button);
 
+        let view_model = gtk4::StringList::new(&["Concise", "Standard", "Detailed", "Expanded"]);
+        let view_dropdown = gtk4::DropDown::builder()
+            .model(&view_model)
+            .selected(1)
+            .tooltip_text("Transcript detail level")
+            .build();
+        session_header.append(&view_dropdown);
+        let on_view_mode: Rc<RefCell<Option<Box<dyn Fn(TranscriptView)>>>> =
+            Rc::new(RefCell::new(None));
+        let view_callback = on_view_mode.clone();
+        view_dropdown.connect_selected_notify(move |dropdown| {
+            let mode = match dropdown.selected() {
+                0 => TranscriptView::Concise,
+                2 => TranscriptView::Detailed,
+                3 => TranscriptView::Expanded,
+                _ => TranscriptView::Standard,
+            };
+            if let Some(callback) = view_callback.borrow().as_ref() {
+                callback(mode);
+            }
+        });
+
         let status_label = gtk4::Label::builder()
             .label("Idle")
             .css_classes(["dim-label", "caption"])
@@ -246,12 +274,12 @@ impl ConversationView {
         let chat_page = view_stack.add_titled(&chat_box, Some("chat"), "Chat");
         chat_page.set_icon_name(Some("chat-bubbles-symbolic"));
 
-        let trajectory_page = adw::StatusPage::builder()
-            .title("Trajectory")
-            .description("Agent tool calls and execution trace")
-            .icon_name("view-list-tree-symbolic")
-            .build();
-        let traj_page = view_stack.add_titled(&trajectory_page, Some("trajectory"), "Trajectory");
+        let trajectory_view = TrajectoryView::new();
+        let traj_page = view_stack.add_titled(
+            trajectory_view.widget(),
+            Some("trajectory"),
+            "Trajectory",
+        );
         traj_page.set_icon_name(Some("view-list-tree-symbolic"));
 
         let view_switcher = adw::ViewSwitcher::builder()
@@ -318,6 +346,10 @@ impl ConversationView {
             live_handle: RefCell::new(None),
             schedules_page,
             trajectory_page: traj_page,
+            trajectory_view,
+            view_mode: Cell::new(TranscriptView::Standard),
+            on_view_mode,
+            view_dropdown,
             rendered_count: Cell::new(0),
             active_cwd,
             title_activate,
@@ -326,6 +358,27 @@ impl ConversationView {
 
     pub fn widget(&self) -> &gtk4::Stack {
         &self.stack
+    }
+
+    pub fn set_on_view_mode<F: Fn(TranscriptView) + 'static>(&self, callback: F) {
+        *self.on_view_mode.borrow_mut() = Some(Box::new(callback));
+    }
+
+    pub fn set_view_mode(&self, mode: TranscriptView) {
+        self.view_mode.set(mode);
+        let index = match mode {
+            TranscriptView::Concise => 0,
+            TranscriptView::Standard => 1,
+            TranscriptView::Detailed => 2,
+            TranscriptView::Expanded => 3,
+        };
+        if self.view_dropdown.selected() != index {
+            self.view_dropdown.set_selected(index);
+        }
+    }
+
+    pub fn trajectory_view(&self) -> &TrajectoryView {
+        &self.trajectory_view
     }
 
     pub fn set_trajectory_visible(&self, visible: bool) {
@@ -530,6 +583,80 @@ impl ConversationView {
             .set_label(&format!("{}{}", existing, addition));
     }
 
+    fn render_grouped(&self, blocks: &[RenderBlock]) {
+        while let Some(child) = self.transcript_box.first_child() {
+            self.transcript_box.remove(&child);
+        }
+        self.live_handle.borrow_mut().take();
+        self.rendered_count.set(0);
+        let mode = self.view_mode.get();
+        let mut group: Option<(gtk4::Expander, gtk4::Box, usize)> = None;
+        for block in blocks {
+            let intermediate = matches!(
+                block,
+                RenderBlock::ToolResult { is_error: false, .. }
+                    | RenderBlock::GenericEvent { .. }
+                    | RenderBlock::TodoBlock { .. }
+            );
+            if intermediate {
+                if group.is_none() {
+                    let inner = gtk4::Box::builder()
+                        .orientation(gtk4::Orientation::Vertical)
+                        .spacing(6)
+                        .build();
+                    let expander = gtk4::Expander::builder()
+                        .label("Intermediate steps")
+                        .child(&inner)
+                        .expanded(mode.expands_groups())
+                        .build();
+                    self.transcript_box.append(&expander);
+                    group = Some((expander, inner, 0));
+                }
+                if let Some((expander, inner, count)) = group.as_mut() {
+                    let (widget, handle) = render_block(block);
+                    if let Some(handle) = handle {
+                        *self.live_handle.borrow_mut() = Some(handle);
+                    }
+                    inner.append(&widget);
+                    *count += 1;
+                    expander.set_label(Some(&format!(
+                        "{} intermediate step{}",
+                        *count,
+                        if *count == 1 { "" } else { "s" }
+                    )));
+                }
+            } else {
+                group = None;
+                let (widget, handle) = render_block(block);
+                self.transcript_box.append(&widget);
+                if let Some(handle) = handle {
+                    *self.live_handle.borrow_mut() = Some(handle);
+                }
+            }
+        }
+        self.rendered_count.set(blocks.len());
+        if let Some(last_block) = blocks.last() {
+            if let RenderBlock::AssistantMessage {
+                text,
+                reasoning,
+                is_live,
+                ..
+            } = last_block
+            {
+                if let Some(handle) = self.live_handle.borrow().clone() {
+                    if *is_live {
+                        handle.update_text(text);
+                        if let Some(reasoning) = reasoning {
+                            handle.update_reasoning(reasoning);
+                        }
+                    } else {
+                        handle.finalize();
+                    }
+                }
+            }
+        }
+    }
+
     pub fn clear_session(&self) {
         while let Some(child) = self.transcript_box.first_child() {
             self.transcript_box.remove(&child);
@@ -548,6 +675,11 @@ impl ConversationView {
 
     pub fn update_transcript(&self, transcript: &ConversationTranscript) {
         let blocks = transcript.blocks();
+        if self.view_mode.get().groups_intermediate()
+            && blocks.len() > self.rendered_count.get()
+        {
+            self.render_grouped(blocks);
+        }
         if blocks.is_empty() {
             while let Some(child) = self.transcript_box.first_child() {
                 self.transcript_box.remove(&child);

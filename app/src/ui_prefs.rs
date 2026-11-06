@@ -16,6 +16,31 @@ impl Default for ArchiveFilter {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptView {
+    Concise,
+    Standard,
+    Detailed,
+    Expanded,
+}
+
+impl Default for TranscriptView {
+    fn default() -> Self {
+        Self::Standard
+    }
+}
+
+impl TranscriptView {
+    pub fn groups_intermediate(self) -> bool {
+        self != Self::Expanded
+    }
+
+    pub fn expands_groups(self) -> bool {
+        self == Self::Detailed
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiPrefs {
@@ -31,6 +56,10 @@ pub struct UiPrefs {
     pub font_size: Option<u32>,
     #[serde(default = "default_true")]
     pub developer_tools: bool,
+    #[serde(default)]
+    pub transcript_view: TranscriptView,
+    #[serde(default)]
+    pub plugin_registry: Option<String>,
     #[serde(default)]
     pub dock_tabs: HashMap<String, usize>,
     #[serde(default)]
@@ -50,6 +79,8 @@ impl Default for UiPrefs {
             theme: None,
             font_size: None,
             developer_tools: true,
+            transcript_view: TranscriptView::Standard,
+            plugin_registry: None,
             dock_tabs: HashMap::new(),
             dock_visible: HashMap::new(),
         }

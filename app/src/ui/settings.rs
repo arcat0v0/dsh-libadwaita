@@ -1274,15 +1274,30 @@ pub fn build_preferences_dialog(
         .title("Plugin Inventory")
         .description("Installed bundles and components from the bridge")
         .build();
+    let plugin_search = gtk4::SearchEntry::builder()
+        .placeholder_text("Filter plugins…")
+        .build();
+    plugin_group.add(&plugin_search);
     let plugin_list = gtk4::ListBox::builder()
         .selection_mode(gtk4::SelectionMode::None)
         .css_classes(["boxed-list"])
         .build();
     plugin_group.add(&plugin_list);
     let plugin_refresh = gtk4::Button::builder().label("Refresh").build();
+    let plugin_retry = gtk4::Button::builder().label("Retry").build();
     let plugin_group_actions = adw::ActionRow::builder().title("Inventory actions").build();
+    plugin_group_actions.add_suffix(&plugin_retry);
     plugin_group_actions.add_suffix(&plugin_refresh);
     plugin_group.add(&plugin_group_actions);
+    let registry_values: Rc<RefCell<Vec<Option<String>>>> =
+        Rc::new(RefCell::new(vec![None]));
+    let registry_model = gtk4::StringList::new(&["Default"]);
+    let plugin_registry = adw::ComboRow::builder()
+        .title("Registry")
+        .model(&registry_model)
+        .selected(0)
+        .build();
+    plugin_group.add(&plugin_registry);
     let plugin_spec = adw::EntryRow::builder()
         .title("npm name / local path / Git URL")
         .build();
@@ -1340,6 +1355,10 @@ pub fn build_preferences_dialog(
 
     let plugin_list_for_render = plugin_list.clone();
     let plugin_controller = controller.clone();
+    let plugin_search_text: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+    let plugin_inventory_store: Rc<RefCell<Option<PluginInventoryResult>>> =
+        Rc::new(RefCell::new(None));
+    let plugin_search_for_render = plugin_search_text.clone();
     let render_inventory: Rc<dyn Fn(&PluginInventoryResult)> =
         Rc::new(move |inventory: &PluginInventoryResult| {
             while let Some(child) = plugin_list_for_render.first_child() {
@@ -1351,6 +1370,17 @@ pub fn build_preferences_dialog(
             }
             for plugin in &inventory.plugins {
                 entries.push(("plugin", plugin));
+            }
+            let query = plugin_search_for_render.borrow().to_ascii_lowercase();
+            if !query.is_empty() {
+                entries.retain(|(_, value)| {
+                    value["name"]
+                        .as_str()
+                        .or_else(|| value["id"].as_str())
+                        .unwrap_or_default()
+                        .to_ascii_lowercase()
+                        .contains(&query)
+                });
             }
             if entries.is_empty() {
                 let row = adw::ActionRow::builder()
@@ -1464,6 +1494,58 @@ pub fn build_preferences_dialog(
                     update_dialog.present(Some(&parent_for_update));
                 });
                 row.add_suffix(&update);
+                let details = gtk4::Button::builder()
+                    .label("Details")
+                    .css_classes(["flat"])
+                    .valign(gtk4::Align::Center)
+                    .build();
+                let details_name = name.clone();
+                let details_conn = plugin_controller
+                    .as_ref()
+                    .map(|ctrl| ctrl.connection_handle());
+                let details_parent = plugin_list_for_render.clone();
+                details.connect_clicked(move |_| {
+                    let Some(conn) = details_conn.clone() else {
+                        return;
+                    };
+                    let rx = rpc_receiver::<PluginDetailParams, PluginOperationResult>(
+                        conn,
+                        METHOD_PLUGIN_DETAIL,
+                        PluginDetailParams {
+                            name: details_name.clone(),
+                            language: None,
+                        },
+                        Duration::from_secs(15),
+                    );
+                    let parent = details_parent.clone();
+                    let title_name = details_name.clone();
+                    gtk4::glib::MainContext::default().spawn_local(async move {
+                        let mut rx = rx;
+                        let Some(Ok(result)) = rx.recv().await else {
+                            return;
+                        };
+                        let text = result
+                            .result
+                            .get("document")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string)
+                            .unwrap_or_else(|| {
+                                serde_json::to_string_pretty(&result.result).unwrap_or_default()
+                            });
+                        let dialog = adw::Dialog::builder()
+                            .title(format!("Plugin Detail: {}", title_name))
+                            .content_width(720)
+                            .build();
+                        let content = crate::ui::message_renderer::render_markdown(&text);
+                        let scroll = gtk4::ScrolledWindow::builder()
+                            .vexpand(true)
+                            .child(&content)
+                            .build();
+                        dialog.set_child(Some(&scroll));
+                        dialog.present(Some(&parent));
+                    });
+                });
+                row.add_suffix(&details);
                 plugin_list_for_render.append(&row);
             }
         });
@@ -1474,11 +1556,73 @@ pub fn build_preferences_dialog(
             ctrl.refresh_plugins();
         }
     });
+    let ctrl_retry = controller.clone();
+    plugin_retry.connect_clicked(move |_| {
+        if let Some(ctrl) = &ctrl_retry {
+            ctrl.retry_plugins();
+        }
+    });
+    let ctrl_registry = controller.clone();
+    let registry_values_for_select = registry_values.clone();
+    plugin_registry.connect_selected_notify(move |row| {
+        if let Some(ctrl) = &ctrl_registry {
+            let value = registry_values_for_select
+                .borrow()
+                .get(row.selected() as usize)
+                .cloned()
+                .flatten();
+            ctrl.set_plugin_registry(value);
+        }
+    });
+    if let Some(ctrl) = controller.as_ref() {
+        let initial_registry = ctrl.prefs_snapshot().plugin_registry;
+        let rx = rpc_receiver::<serde_json::Value, PluginOperationResult>(
+            ctrl.connection_handle(),
+            METHOD_PLUGIN_REGISTRIES,
+            serde_json::json!({}),
+            Duration::from_secs(15),
+        );
+        let model_for_ui = registry_model.clone();
+        let values_for_ui = registry_values.clone();
+        let row_for_ui = plugin_registry.clone();
+        gtk4::glib::MainContext::default().spawn_local(async move {
+            let mut rx = rx;
+            let Some(Ok(result)) = rx.recv().await else {
+                return;
+            };
+            let Some(entries) = result.result.as_array() else {
+                return;
+            };
+            for entry in entries {
+                let label = entry
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(|| entry["name"].as_str().map(str::to_string))
+                    .or_else(|| entry["url"].as_str().map(str::to_string))
+                    .or_else(|| entry["id"].as_str().map(str::to_string));
+                let Some(label) = label else {
+                    continue;
+                };
+                let value = entry
+                    .as_str()
+                    .map(str::to_string)
+                    .or_else(|| entry["url"].as_str().map(str::to_string))
+                    .or_else(|| entry["id"].as_str().map(str::to_string));
+                model_for_ui.append(&label);
+                values_for_ui.borrow_mut().push(value.clone());
+                if value.is_some() && value == initial_registry {
+                    let index = model_for_ui.n_items().saturating_sub(1);
+                    row_for_ui.set_selected(index);
+                }
+            }
+        });
+    }
     let ctrl_inspect = controller.clone();
     let spec_for_inspect = plugin_spec.clone();
     inspect_btn.connect_clicked(move |_| {
         if let Some(ctrl) = &ctrl_inspect {
-            ctrl.plugin_inspect(&spec_for_inspect.text());
+            let registry = ctrl.prefs_snapshot().plugin_registry;
+            ctrl.plugin_inspect(&spec_for_inspect.text(), registry);
         }
     });
     let ctrl_install = controller.clone();
@@ -1501,7 +1645,8 @@ pub fn build_preferences_dialog(
         *install_request_for_click.borrow_mut() = Some(request_id.clone());
         cancel_for_install.set_sensitive(true);
         if let Some(ctrl) = &ctrl_install {
-            ctrl.plugin_install(spec.trim(), Some(request_id));
+            let registry = ctrl.prefs_snapshot().plugin_registry;
+            ctrl.plugin_install(spec.trim(), Some(request_id), registry);
         }
     });
     let ctrl_cancel = controller.clone();
@@ -1516,7 +1661,23 @@ pub fn build_preferences_dialog(
         }
     });
 
-    let inventory_cb = render_inventory.clone();
+    let inventory_cb = {
+        let render = render_inventory.clone();
+        let store = plugin_inventory_store.clone();
+        Rc::new(move |inventory: &PluginInventoryResult| {
+            *store.borrow_mut() = Some(inventory.clone());
+            render(inventory);
+        })
+    };
+    let search_for_handler = plugin_search_text.clone();
+    let store_for_search = plugin_inventory_store.clone();
+    let render_for_search = render_inventory.clone();
+    plugin_search.connect_search_changed(move |entry| {
+        *search_for_handler.borrow_mut() = entry.text().to_string();
+        if let Some(inventory) = store_for_search.borrow().as_ref() {
+            render_for_search(inventory);
+        }
+    });
     let cancel_for_state = cancel_install_btn.clone();
     let state_cb = Rc::new({
         let state_label = install_state.clone();

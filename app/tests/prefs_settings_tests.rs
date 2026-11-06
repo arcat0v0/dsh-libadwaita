@@ -61,3 +61,29 @@ fn test_settings_schema_fields_and_find_key() {
     assert_eq!(find_key(&schema, &["enabled"]), Some("enabled".to_string()));
     assert_eq!(find_key(&schema, &["missing"]), None);
 }
+
+#[test]
+fn test_transcript_view_and_registry_persist() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("ui-prefs.json");
+    let mut prefs = UiPrefs::default();
+    prefs.transcript_view = TranscriptView::Expanded;
+    prefs.plugin_registry = Some("https://registry.example".to_string());
+    prefs.save(&path).unwrap();
+    let loaded = UiPrefs::load(&path);
+    assert_eq!(loaded.transcript_view, TranscriptView::Expanded);
+    assert_eq!(
+        loaded.plugin_registry.as_deref(),
+        Some("https://registry.example")
+    );
+}
+
+#[test]
+fn test_transcript_view_grouping_mapping() {
+    assert!(TranscriptView::Concise.groups_intermediate());
+    assert!(TranscriptView::Standard.groups_intermediate());
+    assert!(TranscriptView::Detailed.groups_intermediate());
+    assert!(!TranscriptView::Expanded.groups_intermediate());
+    assert!(TranscriptView::Detailed.expands_groups());
+    assert!(!TranscriptView::Standard.expands_groups());
+}

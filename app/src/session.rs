@@ -1,5 +1,8 @@
 use crate::protocol::*;
 use crate::transcript::*;
+use std::collections::VecDeque;
+
+pub const MAX_RAW_EVENTS: usize = 2000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionStatus {
@@ -34,6 +37,7 @@ pub struct SessionModel {
     pub plan_mode: bool,
     pub todos: Vec<TodoItem>,
     pub last_error_code: Option<String>,
+    pub raw_events: VecDeque<SessionEvent>,
 }
 
 impl SessionModel {
@@ -49,6 +53,7 @@ impl SessionModel {
             plan_mode: false,
             todos: Vec::new(),
             last_error_code: None,
+            raw_events: VecDeque::new(),
         }
     }
 
@@ -73,9 +78,39 @@ impl SessionModel {
             plan_mode: follow.projections.plan_mode,
             todos: follow.projections.todos.unwrap_or_default(),
             last_error_code: None,
+            raw_events: VecDeque::new(),
         }
     }
+    pub fn raw_events(&self) -> &VecDeque<SessionEvent> {
+        &self.raw_events
+    }
+
+    pub fn record_older_events(&mut self, events: Vec<SessionEvent>) {
+        let front_seq = self.raw_events.front().map(|event| event.seq);
+        let older: Vec<SessionEvent> = events
+            .into_iter()
+            .filter(|event| front_seq.map(|seq| event.seq < seq).unwrap_or(true))
+            .collect();
+        for event in older.into_iter().rev() {
+            self.raw_events.push_front(event);
+        }
+        while self.raw_events.len() > MAX_RAW_EVENTS {
+            self.raw_events.pop_back();
+        }
+    }
+
     pub fn handle_event(&mut self, event: SessionEvent) -> Result<TranscriptUpdate, GapDetected> {
+        if self
+            .raw_events
+            .back()
+            .map(|existing| existing.seq != event.seq)
+            .unwrap_or(true)
+        {
+            self.raw_events.push_back(event.clone());
+            while self.raw_events.len() > MAX_RAW_EVENTS {
+                self.raw_events.pop_front();
+            }
+        }
         if event.event_type == "user/message" {
             self.last_error_code = None;
         }

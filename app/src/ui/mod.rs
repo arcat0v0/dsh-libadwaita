@@ -17,4 +17,5 @@ pub mod schedules;
 pub mod trigger_popup;
 pub mod todo_dock;
 pub mod terminal_panel;
+pub mod trajectory;
 pub mod window;

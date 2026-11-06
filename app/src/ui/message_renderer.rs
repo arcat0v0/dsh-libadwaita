@@ -46,6 +46,158 @@ pub fn reopen_question() {
     with_controller(|controller| controller.reopen_question());
 }
 
+fn collect_widget_text(widget: &gtk4::Widget) -> String {
+    if let Some(label) = widget.downcast_ref::<gtk4::Label>() {
+        return label.text().to_string();
+    }
+    let mut parts = Vec::new();
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        parts.push(collect_widget_text(&current));
+        child = current.next_sibling();
+    }
+    parts
+        .into_iter()
+        .filter(|part| !part.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn attach_message_context_menu(widget: &impl IsA<gtk4::Widget>, text: String) {
+    let popover = gtk4::Popover::builder().build();
+    let box_widget = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(2)
+        .margin_start(4)
+        .margin_end(4)
+        .margin_top(4)
+        .margin_bottom(4)
+        .build();
+    let current = Rc::new(RefCell::new(text));
+    let copy = gtk4::Button::builder()
+        .label("Copy")
+        .css_classes(["flat"])
+        .build();
+    let current_copy = current.clone();
+    let pop_copy = popover.clone();
+    copy.connect_clicked(move |_| {
+        if let Some(display) = gtk4::gdk::Display::default() {
+            display.clipboard().set_text(&current_copy.borrow());
+        }
+        pop_copy.popdown();
+    });
+    box_widget.append(&copy);
+    let quote = gtk4::Button::builder()
+        .label("Quote into composer")
+        .css_classes(["flat"])
+        .build();
+    let current_quote = current.clone();
+    let pop_quote = popover.clone();
+    quote.connect_clicked(move |_| {
+        let text = current_quote.borrow().clone();
+        if !text.trim().is_empty() {
+            with_controller(|controller| {
+                controller.insert_composer_text(&format!("> {}\n", text));
+            });
+        }
+        pop_quote.popdown();
+    });
+    box_widget.append(&quote);
+    popover.set_child(Some(&box_widget));
+    popover.set_parent(widget);
+    let gesture = gtk4::GestureClick::new();
+    gesture.set_button(3);
+    gesture.connect_pressed(move |_, _, _, _| {
+        popover.popup();
+    });
+    widget.add_controller(gesture);
+}
+
+fn attach_dynamic_context_menu(
+    widget: &impl IsA<gtk4::Widget>,
+    provider: Rc<dyn Fn() -> String>,
+) {
+    let popover = gtk4::Popover::builder().build();
+    let box_widget = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(2)
+        .margin_start(4)
+        .margin_end(4)
+        .margin_top(4)
+        .margin_bottom(4)
+        .build();
+    let current = Rc::new(RefCell::new(String::new()));
+    let copy = gtk4::Button::builder()
+        .label("Copy")
+        .css_classes(["flat"])
+        .build();
+    let current_copy = current.clone();
+    let pop_copy = popover.clone();
+    copy.connect_clicked(move |_| {
+        if let Some(display) = gtk4::gdk::Display::default() {
+            display.clipboard().set_text(&current_copy.borrow());
+        }
+        pop_copy.popdown();
+    });
+    box_widget.append(&copy);
+    let quote = gtk4::Button::builder()
+        .label("Quote into composer")
+        .css_classes(["flat"])
+        .build();
+    let current_quote = current.clone();
+    let pop_quote = popover.clone();
+    quote.connect_clicked(move |_| {
+        let text = current_quote.borrow().clone();
+        if !text.trim().is_empty() {
+            with_controller(|controller| {
+                controller.insert_composer_text(&format!("> {}\n", text));
+            });
+        }
+        pop_quote.popdown();
+    });
+    box_widget.append(&quote);
+    popover.set_child(Some(&box_widget));
+    popover.set_parent(widget);
+    let gesture = gtk4::GestureClick::new();
+    gesture.set_button(3);
+    let current_for_press = current.clone();
+    let provider_for_press = provider.clone();
+    gesture.connect_pressed(move |_, _, _, _| {
+        *current_for_press.borrow_mut() = provider_for_press();
+        popover.popup();
+    });
+    widget.add_controller(gesture);
+}
+
+fn attach_code_context_menu(view: &sourceview5::View, code: String) {
+    let popover = gtk4::Popover::builder().build();
+    let box_widget = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .margin_start(4)
+        .margin_end(4)
+        .margin_top(4)
+        .margin_bottom(4)
+        .build();
+    let copy = gtk4::Button::builder()
+        .label("Copy Code")
+        .css_classes(["flat"])
+        .build();
+    let pop_copy = popover.clone();
+    copy.connect_clicked(move |_| {
+        if let Some(display) = gtk4::gdk::Display::default() {
+            display.clipboard().set_text(&code);
+        }
+        pop_copy.popdown();
+    });
+    box_widget.append(&copy);
+    popover.set_child(Some(&box_widget));
+    popover.set_parent(view);
+    let gesture = gtk4::GestureClick::new();
+    gesture.set_button(3);
+    gesture.connect_pressed(move |_, _, _, _| popover.popup());
+    view.add_controller(gesture);
+}
+
 fn attach_link_handler(label: &gtk4::Label) {
     label.connect_activate_link(|_, uri| {
         let uri = uri.to_string();
@@ -422,6 +574,7 @@ pub fn build_code_block(lang: &str, code: &str) -> gtk4::Box {
         .hscrollbar_policy(gtk4::PolicyType::Automatic)
         .build();
     scroll.set_child(Some(&view));
+    attach_code_context_menu(&view, code.to_string());
     container.append(&scroll);
 
     container
@@ -500,6 +653,7 @@ pub fn build_user_message(
         .selectable(true)
         .build();
     bubble.append(&label);
+    attach_message_context_menu(&label, text.to_string());
     if !images.is_empty() {
         let gallery = gtk4::FlowBox::builder()
             .selection_mode(gtk4::SelectionMode::None)
@@ -597,6 +751,86 @@ pub fn build_user_message(
 
 pub fn build_attachment_thumbnail(image: &UserImageAttachment) -> gtk4::Button {
     build_user_image(image)
+}
+
+fn build_question_reply(
+    summary: &str,
+    selected: &[String],
+    details: &serde_json::Value,
+) -> gtk4::Box {
+    let row = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .halign(gtk4::Align::End)
+        .margin_start(48)
+        .margin_end(8)
+        .margin_top(4)
+        .margin_bottom(4)
+        .build();
+    let bubble = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(4)
+        .css_classes(["card"])
+        .margin_start(6)
+        .margin_end(6)
+        .margin_top(6)
+        .margin_bottom(6)
+        .build();
+    let header = gtk4::Label::builder()
+        .label("Question reply")
+        .css_classes(["dim-label", "caption"])
+        .halign(gtk4::Align::Start)
+        .build();
+    bubble.append(&header);
+    let question = gtk4::Label::builder()
+        .label(summary)
+        .wrap(true)
+        .selectable(true)
+        .xalign(0.0)
+        .margin_start(10)
+        .margin_end(10)
+        .build();
+    bubble.append(&question);
+    if selected.is_empty() {
+        let empty = gtk4::Label::builder()
+            .label("No selected answers")
+            .css_classes(["dim-label", "caption"])
+            .halign(gtk4::Align::Start)
+            .build();
+        bubble.append(&empty);
+    } else {
+        for answer in selected {
+            let label = gtk4::Label::builder()
+                .label(&format!("• {}", answer))
+                .wrap(true)
+                .selectable(true)
+                .xalign(0.0)
+                .margin_start(10)
+                .margin_end(10)
+                .build();
+            bubble.append(&label);
+        }
+    }
+    let raw = gtk4::Label::builder()
+        .label(serde_json::to_string_pretty(details).unwrap_or_default())
+        .selectable(true)
+        .wrap(true)
+        .xalign(0.0)
+        .css_classes(["monospace", "caption"])
+        .build();
+    let expander = gtk4::Expander::builder()
+        .label("View details")
+        .child(&raw)
+        .build();
+    bubble.append(&expander);
+    let avatar = gtk4::Image::builder()
+        .icon_name("avatar-default-symbolic")
+        .pixel_size(24)
+        .valign(gtk4::Align::Start)
+        .margin_top(8)
+        .build();
+    row.append(&bubble);
+    row.append(&avatar);
+    row
 }
 
 fn build_file_chips(text: &str) -> Option<gtk4::FlowBox> {
@@ -807,6 +1041,11 @@ pub fn build_assistant_message(
         content_box.append(&rendered);
     }
     bubble.append(&content_box);
+    let content_for_menu = content_box.clone();
+    attach_dynamic_context_menu(
+        &content_box,
+        Rc::new(move || collect_widget_text(content_for_menu.upcast_ref())),
+    );
 
     for tc in tool_calls {
         let tool_card = gtk4::Box::builder()
@@ -1141,6 +1380,12 @@ pub fn render_block(block: &RenderBlock) -> (gtk4::Box, Option<AssistantLiveHand
             seq,
             images,
         } => (build_user_message(text, *time, *seq, images), None),
+        RenderBlock::QuestionReply {
+            summary,
+            selected,
+            details,
+            ..
+        } => (build_question_reply(summary, selected, details), None),
         RenderBlock::AssistantMessage {
             text,
             reasoning,

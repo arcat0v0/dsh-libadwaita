@@ -387,3 +387,31 @@ fn test_prepend_events_preserves_existing_blocks() {
     assert_eq!(transcript.blocks().len(), 2);
     assert_eq!(transcript.first_seq(), Some(3));
 }
+
+#[test]
+fn test_question_reply_renders_readonly_block() {
+    let mut transcript = ConversationTranscript::new();
+    let event = SessionEvent {
+        event_type: "user/message".to_string(),
+        seq: 1,
+        time: 10,
+        data: serde_json::json!({
+            "source": {"kind": "user-question-reply", "question": "Proceed?"},
+            "selected": ["Yes"],
+            "content": [{"type": "text", "text": "Yes"}]
+        }),
+        ignorable: None,
+        surface_op: None,
+        source_event_seqs: None,
+    };
+    transcript.apply_event(event).unwrap();
+    match &transcript.blocks()[0] {
+        RenderBlock::QuestionReply {
+            summary, selected, ..
+        } => {
+            assert_eq!(summary, "Proceed?");
+            assert_eq!(selected, &vec!["Yes".to_string()]);
+        }
+        other => panic!("unexpected block: {:?}", other),
+    }
+}

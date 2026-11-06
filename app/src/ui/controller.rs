@@ -163,6 +163,7 @@ pub enum UiMessage {
     GoalLoaded(Option<GoalView>),
     SessionListRefresh,
     RefreshModelCatalog,
+    TrajectorySnapshotLoaded(Vec<SessionEvent>),
 }
 
 #[derive(Clone)]
@@ -400,6 +401,17 @@ impl SessionController {
         controller
             .conversation_view
             .set_trajectory_visible(controller.prefs.borrow().developer_tools);
+        controller
+            .conversation_view
+            .set_view_mode(controller.prefs.borrow().transcript_view);
+        let weak_view = Rc::downgrade(&controller);
+        controller
+            .conversation_view
+            .set_on_view_mode(move |mode| {
+                if let Some(ctrl) = weak_view.upgrade() {
+                    ctrl.set_transcript_view(mode);
+                }
+            });
         if let Some(theme) = controller.prefs.borrow().theme.clone() {
             let manager = adw::StyleManager::default();
             manager.set_color_scheme(match theme.as_str() {
@@ -1613,6 +1625,26 @@ impl SessionController {
         );
     }
 
+    pub fn load_trajectory_snapshot(&self, session_id: &str, latest_seq: i64) {
+        if latest_seq < 0 {
+            return;
+        }
+        self.dispatch_call(
+            METHOD_SESSION_PAGE,
+            SessionPageParams {
+                session_id: session_id.to_string(),
+                from_seq: (latest_seq - 200).max(0),
+                to_seq: Some(latest_seq),
+                limit: Some(200),
+            },
+            Duration::from_secs(10),
+            |result: Result<SessionPageResult, ConnectionError>| match result {
+                Ok(page) => UiMessage::TrajectorySnapshotLoaded(page.events),
+                Err(_) => UiMessage::Toast("Trajectory snapshot unavailable".to_string()),
+            },
+        );
+    }
+
     pub fn load_projections(&self, session_id: &str) {
         self.dispatch_call(
             METHOD_SESSION_PROJECTIONS,
@@ -1699,6 +1731,16 @@ impl SessionController {
 
     pub fn prefs_snapshot(&self) -> UiPrefs {
         self.prefs.borrow().clone()
+    }
+
+    pub fn set_transcript_view(&self, mode: crate::ui_prefs::TranscriptView) {
+        self.prefs.borrow_mut().transcript_view = mode;
+        self.save_prefs();
+        self.conversation_view.set_view_mode(mode);
+        if let Some(session) = self.active_session.borrow().as_ref() {
+            self.conversation_view
+                .rerender_transcript(&session.transcript);
+        }
     }
 
     pub fn set_developer_tools(&self, enabled: bool) {
@@ -2826,6 +2868,7 @@ impl SessionController {
                         let cwd = follow.header.cwd.clone();
                         let status = follow.status.clone();
                         let session_id = follow.header.id.clone();
+                        let latest_seq = follow.latest_seq;
 
                         window_title.set_subtitle(&title);
                         conv_view.set_title(&title);
@@ -2852,6 +2895,9 @@ impl SessionController {
                         *active_sess.borrow_mut() = Some(sess_model);
                         if let Some(sess) = active_sess.borrow().as_ref() {
                             conv_view.composer().set_plan_mode(sess.plan_mode);
+                            conv_view
+                                .trajectory_view()
+                                .set_events(&sess.raw_events().iter().cloned().collect::<Vec<_>>());
                         }
                         if let Some(ctrl) = ctrl_weak.upgrade() {
                             ctrl.right_dock.preview_panel().clear();
@@ -2860,6 +2906,7 @@ impl SessionController {
                             ctrl.update_continue_state();
                             ctrl.right_dock.on_session_followed(&session_id, &cwd);
                             ctrl.restore_dock_for_session(&session_id);
+                            ctrl.load_trajectory_snapshot(&session_id, latest_seq);
                             ctrl.load_projections(&session_id);
                             ctrl.refresh_session_model();
                             ctrl.load_goal(&session_id);
@@ -2874,9 +2921,11 @@ impl SessionController {
                                 let mut sess_guard = active_sess.borrow_mut();
                                 if let Some(sess) = sess_guard.as_mut() {
                                     if p.session_id == sess.id {
+                                        let raw_event = p.event.clone();
                                         let _ = sess.handle_event(p.event);
                                         conv_view.update_transcript(&sess.transcript);
                                         conv_view.composer().set_plan_mode(sess.plan_mode);
+                                        conv_view.trajectory_view().append_event(raw_event);
                                     }
                                 }
                             }
@@ -3215,8 +3264,12 @@ impl SessionController {
                         let distance_from_bottom = adjustment.upper() - adjustment.value();
                         let mut guard = active_sess.borrow_mut();
                         if let Some(session) = guard.as_mut() {
-                            session.transcript.prepend_events(events);
+                            session.transcript.prepend_events(events.clone());
+                            session.record_older_events(events);
                             conv_view.rerender_transcript(&session.transcript);
+                            conv_view
+                                .trajectory_view()
+                                .set_events(&session.raw_events().iter().cloned().collect::<Vec<_>>());
                         }
                         let adjustment = conv_view.transcript_adjustment();
                         adjustment
@@ -3325,6 +3378,15 @@ impl SessionController {
                         toast_overlay.add_toast(adw::Toast::new(
                             "Model switch failed; previous model restored",
                         ));
+                    }
+                    UiMessage::TrajectorySnapshotLoaded(events) => {
+                        let mut guard = active_sess.borrow_mut();
+                        if let Some(session) = guard.as_mut() {
+                            session.record_older_events(events);
+                            conv_view.trajectory_view().set_events(
+                                &session.raw_events().iter().cloned().collect::<Vec<_>>(),
+                            );
+                        }
                     }
                     UiMessage::ProjectionsLoaded(projections) => {
                         if let Some(usage) = projections.token_usage.as_ref() {
@@ -3600,10 +3662,27 @@ impl SessionController {
         );
     }
 
-    pub fn plugin_inspect(&self, spec: &str) {
+    pub fn set_plugin_registry(&self, registry: Option<String>) {
+        self.prefs.borrow_mut().plugin_registry = registry;
+        self.save_prefs();
+    }
+
+    pub fn retry_plugins(&self) {
+        self.dispatch_call(
+            METHOD_PLUGIN_RETRY,
+            serde_json::json!({}),
+            Duration::from_secs(15),
+            |result: Result<PluginInventoryResult, ConnectionError>| match result {
+                Ok(inventory) => UiMessage::PluginInventoryLoaded(inventory),
+                Err(err) => UiMessage::Toast(format!("Plugin retry failed: {}", err)),
+            },
+        );
+    }
+
+    pub fn plugin_inspect(&self, spec: &str, registry: Option<String>) {
         let params = PluginInspectParams {
             spec: spec.to_string(),
-            registry: None,
+            registry,
         };
         self.dispatch_call(
             METHOD_PLUGIN_INSPECT,
@@ -3619,14 +3698,19 @@ impl SessionController {
         );
     }
 
-    pub fn plugin_install(&self, spec: &str, request_id: Option<String>) {
+    pub fn plugin_install(
+        &self,
+        spec: &str,
+        request_id: Option<String>,
+        registry: Option<String>,
+    ) {
         let params = PluginInstallParams {
             spec: spec.to_string(),
             enabled: None,
             save_exact: None,
             request_id,
             approved_builds: None,
-            registry: None,
+            registry,
         };
         self.dispatch_call(
             METHOD_PLUGIN_INSTALL,

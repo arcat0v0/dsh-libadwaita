@@ -17,6 +17,12 @@ pub enum RenderBlock {
         #[serde(default)]
         images: Vec<UserImageAttachment>,
     },
+    QuestionReply {
+        summary: String,
+        selected: Vec<String>,
+        details: serde_json::Value,
+        seq: i64,
+    },
     AssistantMessage {
         text: String,
         reasoning: Option<String>,
@@ -220,6 +226,7 @@ impl ConversationTranscript {
             .iter()
             .filter_map(|block| match block {
                 RenderBlock::UserMessage { seq, .. } if *seq > 0 => Some(*seq),
+                RenderBlock::QuestionReply { seq, .. } if *seq > 0 => Some(*seq),
                 RenderBlock::AssistantMessage { seq: Some(seq), .. } if *seq > 0 => Some(*seq),
                 RenderBlock::ToolResult { seq, .. } if *seq > 0 => Some(*seq),
                 RenderBlock::PlanModeBadge { seq, .. } if *seq > 0 => Some(*seq),
@@ -400,6 +407,30 @@ impl ConversationTranscript {
         match event.event_type.as_str() {
             "user/message" => {
                 let text = Self::extract_user_text(&event.data);
+                let source_kind = event.data["source"]["kind"].as_str().unwrap_or_default();
+                if source_kind == "user-question-reply" {
+                    let summary = event.data["source"]["question"]
+                        .as_str()
+                        .or_else(|| event.data["question"].as_str())
+                        .unwrap_or(&text)
+                        .to_string();
+                    let selected = event.data["selected"]
+                        .as_array()
+                        .map(|values| {
+                            values
+                                .iter()
+                                .filter_map(|value| value.as_str().map(str::to_string))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    self.blocks.push(RenderBlock::QuestionReply {
+                        summary,
+                        selected,
+                        details: event.data.clone(),
+                        seq: event.seq,
+                    });
+                    return Ok(TranscriptUpdate::Appended(self.blocks.len() - 1));
+                }
                 if let Some(index) = self.pending_user.take() {
                     if let Some(RenderBlock::UserMessage {
                         text: block_text,

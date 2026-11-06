@@ -440,6 +440,58 @@ pub fn build_deliverables_card(
     )
 }
 
+pub fn build_control_details_card(name: &str, arguments: &str, result: &str) -> gtk4::Box {
+    let value: serde_json::Value = serde_json::from_str(result).unwrap_or_default();
+    let body = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(4)
+        .margin_start(10)
+        .margin_end(10)
+        .margin_bottom(8)
+        .build();
+    if let Some(object) = value.as_object() {
+        let grid = gtk4::Grid::builder()
+            .column_spacing(10)
+            .row_spacing(4)
+            .build();
+        for (row_index, (key, value)) in object.iter().take(24).enumerate() {
+            let key_label = gtk4::Label::builder()
+                .label(key)
+                .css_classes(["dim-label", "caption"])
+                .xalign(0.0)
+                .build();
+            let value_label = gtk4::Label::builder()
+                .label(match value {
+                    serde_json::Value::String(text) => text.clone(),
+                    other => other.to_string(),
+                })
+                .wrap(true)
+                .selectable(true)
+                .xalign(0.0)
+                .build();
+            grid.attach(&key_label, 0, row_index as i32, 1, 1);
+            grid.attach(&value_label, 1, row_index as i32, 1, 1);
+        }
+        body.append(&grid);
+    } else {
+        body.append(&gtk4::Label::builder()
+            .label(result)
+            .wrap(true)
+            .selectable(true)
+            .xalign(0.0)
+            .build());
+    }
+    build_card_shell(
+        "view-list-symbolic",
+        name,
+        arguments,
+        None,
+        Some(result.to_string()),
+        body.upcast(),
+        false,
+    )
+}
+
 pub fn build_generic_fallback_card(name: &str, arguments: &str, result: &str) -> gtk4::Box {
     let body_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
@@ -518,6 +570,9 @@ pub fn render_tool_result_card(
                 card.append(&thumbnail);
             }
             card
+        }
+        "subagent" | "job" | "schedule" | "goal" | "workflow" | "lsp" => {
+            build_control_details_card(name, args_str, result)
         }
         "exit_plan_mode" => build_plan_card(result, "Plan completed"),
         "ask_user_question" => {
