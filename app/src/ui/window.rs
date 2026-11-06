@@ -121,7 +121,7 @@ impl MainWindow {
         let show_account_action = gtk4::gio::SimpleAction::new("show-account", None);
         show_account_action.connect_activate(move |_, _| {
             if let Some(w) = window_weak.upgrade() {
-                show_settings_dialog(&w);
+                show_settings_dialog(&w, None, None);
             }
         });
         window.add_action(&show_account_action);

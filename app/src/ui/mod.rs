@@ -3,6 +3,7 @@ pub mod composer;
 pub mod controller;
 pub mod conversation;
 pub mod message_renderer;
+pub mod onboarding;
 pub mod right_dock;
 pub mod settings;
 pub mod sidebar;

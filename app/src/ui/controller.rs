@@ -1,8 +1,11 @@
 use crate::connection::{ApprovalResponder, BridgeConnection, IncomingNotification, UserQuestionResponder};
+use crate::credentials::{should_show_onboarding, CredentialStore, DEFAULT_PROVIDER};
 use crate::protocol::*;
 use crate::session::{SessionModel, SessionStatus};
+use crate::supervisor::HarnessSupervisor;
 use crate::ui::approval_dialog::{show_approval_dialog, show_user_question_dialog};
 use crate::ui::conversation::ConversationView;
+use crate::ui::onboarding::show_onboarding_dialog;
 use crate::ui::sidebar::Sidebar;
 use crate::ui::window::MainWindow;
 use gtk4::prelude::*;
@@ -41,6 +44,9 @@ pub enum UiMessage {
     SessionFollowed(SessionFollowResult),
     Notification(IncomingNotification),
     Toast(String),
+    ShowOnboarding,
+    PluginRestartRequired,
+    SupervisorRestarted(BridgeConnection),
 }
 
 struct ApprovalHandler {
@@ -77,6 +83,7 @@ impl UserQuestionResponder for QuestionHandler {
 
 pub struct SessionController {
     connection: Arc<RwLock<Option<BridgeConnection>>>,
+    supervisor: Arc<RwLock<Option<Arc<HarnessSupervisor>>>>,
     active_session: Rc<RefCell<Option<SessionModel>>>,
     active_model: Rc<RefCell<String>>,
     active_provider: Rc<RefCell<String>>,
@@ -86,6 +93,7 @@ pub struct SessionController {
     window_title: adw::WindowTitle,
     toast_overlay: adw::ToastOverlay,
     ui_sender: UnboundedSender<UiMessage>,
+    credential_store: CredentialStore,
 }
 
 impl SessionController {
@@ -95,9 +103,11 @@ impl SessionController {
         conversation_view: Rc<ConversationView>,
     ) -> Rc<Self> {
         let (ui_sender, ui_receiver) = unbounded_channel();
+        let credential_store = CredentialStore::new();
 
         let controller = Rc::new(Self {
             connection: Arc::new(RwLock::new(None)),
+            supervisor: Arc::new(RwLock::new(None)),
             active_session: Rc::new(RefCell::new(None)),
             active_model: Rc::new(RefCell::new("deepseek-chat".to_string())),
             active_provider: Rc::new(RefCell::new("deepseek".to_string())),
@@ -111,13 +121,25 @@ impl SessionController {
                 .and_downcast::<adw::ToastOverlay>()
                 .unwrap(),
             ui_sender,
+            credential_store,
         });
 
-        controller.setup_ui_receiver(ui_receiver);
+        controller.setup_ui_receiver(ui_receiver, Rc::downgrade(&controller));
         controller.setup_composer();
         controller.setup_double_esc();
 
         controller
+    }
+
+    pub fn credential_store(&self) -> &CredentialStore {
+        &self.credential_store
+    }
+
+    pub fn set_supervisor(&self, sup: Arc<HarnessSupervisor>) {
+        let sup_store = self.supervisor.clone();
+        tokio_runtime().spawn(async move {
+            *sup_store.write().await = Some(sup);
+        });
     }
 
     pub fn set_connection(&self, conn: BridgeConnection) {
@@ -143,6 +165,39 @@ impl SessionController {
         tokio_runtime().spawn(async move {
             while let Ok(notif) = notif_rx.recv().await {
                 let _ = ui_sender.send(UiMessage::Notification(notif));
+            }
+        });
+
+        let conn_for_cred = conn.clone();
+        let ui_sender_for_cred = self.ui_sender.clone();
+        let store_for_cred = self.credential_store.clone();
+
+        tokio_runtime().spawn(async move {
+            if let Ok(res) = conn_for_cred
+                .call::<serde_json::Value, CredentialsStatusResult>(
+                    METHOD_CREDENTIALS_STATUS,
+                    serde_json::json!({}),
+                    Duration::from_secs(5),
+                )
+                .await
+            {
+                if should_show_onboarding(&res.items) {
+                    if let Some(saved_key) = store_for_cred.get_key(DEFAULT_PROVIDER) {
+                        let _ = conn_for_cred
+                            .call::<CredentialsInjectParams, CredentialsInjectResult>(
+                                METHOD_CREDENTIALS_INJECT,
+                                CredentialsInjectParams {
+                                    provider: DEFAULT_PROVIDER.to_string(),
+                                    key: saved_key,
+                                    base_url: None,
+                                },
+                                Duration::from_secs(5),
+                            )
+                            .await;
+                    } else {
+                        let _ = ui_sender_for_cred.send(UiMessage::ShowOnboarding);
+                    }
+                }
             }
         });
 
@@ -439,13 +494,116 @@ impl SessionController {
         popover.popup();
     }
 
-    fn setup_ui_receiver(&self, mut receiver: UnboundedReceiver<UiMessage>) {
+    pub fn inject_credential(&self, provider: &str, key: &str) {
+        let prov = provider.to_string();
+        let k = key.to_string();
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            if let Some(conn) = conn_opt {
+                let params = CredentialsInjectParams {
+                    provider: prov.clone(),
+                    key: k,
+                    base_url: None,
+                };
+                let _ = conn
+                    .call::<CredentialsInjectParams, CredentialsInjectResult>(
+                        METHOD_CREDENTIALS_INJECT,
+                        params,
+                        Duration::from_secs(5),
+                    )
+                    .await;
+                let _ = ui_sender.send(UiMessage::Toast(format!("{} injected", prov)));
+            }
+        });
+    }
+
+    pub fn rotate_credential(&self, provider: &str, key: &str) {
+        let prov = provider.to_string();
+        let k = key.to_string();
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            if let Some(conn) = conn_opt {
+                let params = CredentialsRotateParams {
+                    provider: prov.clone(),
+                    key: k,
+                };
+                let _ = conn
+                    .call::<CredentialsRotateParams, CredentialsInjectResult>(
+                        METHOD_CREDENTIALS_ROTATE,
+                        params,
+                        Duration::from_secs(5),
+                    )
+                    .await;
+                let _ = ui_sender.send(UiMessage::Toast(format!("{} rotated in memory", prov)));
+            }
+        });
+    }
+
+    pub fn toggle_plugin(&self, plugin_id: &str, enable: bool) {
+        let p_id = plugin_id.to_string();
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            if let Some(conn) = conn_opt {
+                let method = if enable {
+                    METHOD_PLUGIN_ENABLE
+                } else {
+                    METHOD_PLUGIN_DISABLE
+                };
+                let params = PluginToggleParams { id: p_id };
+                if let Ok(res) = conn
+                    .call::<PluginToggleParams, PluginToggleResult>(
+                        method,
+                        params,
+                        Duration::from_secs(5),
+                    )
+                    .await
+                {
+                    if res.restart_required {
+                        let _ = ui_sender.send(UiMessage::PluginRestartRequired);
+                    }
+                }
+            }
+        });
+    }
+
+    pub fn restart_supervisor(&self) {
+        let sup_arc = self.supervisor.clone();
+        let ui_sender = self.ui_sender.clone();
+
+        tokio_runtime().spawn(async move {
+            let sup_opt = sup_arc.read().await.clone();
+            if let Some(sup) = sup_opt {
+                let _ = sup.stop().await;
+                if let Ok(_init) = sup.start().await {
+                    if let Some(conn) = sup.connection().await {
+                        let _ = ui_sender.send(UiMessage::SupervisorRestarted(conn));
+                    }
+                }
+            }
+        });
+    }
+
+    fn setup_ui_receiver(
+        &self,
+        mut receiver: UnboundedReceiver<UiMessage>,
+        ctrl_weak: std::rc::Weak<SessionController>,
+    ) {
         let win = self.window.clone();
         let sidebar = self.sidebar.clone();
         let conv_view = self.conversation_view.clone();
         let window_title = self.window_title.clone();
         let toast_overlay = self.toast_overlay.clone();
         let active_sess = self.active_session.clone();
+        let store = self.credential_store.clone();
 
         gtk4::glib::MainContext::default().spawn_local(async move {
             while let Some(msg) = receiver.recv().await {
@@ -517,6 +675,30 @@ impl SessionController {
                     }
                     UiMessage::Toast(msg) => {
                         toast_overlay.add_toast(adw::Toast::new(&msg));
+                    }
+                    UiMessage::ShowOnboarding => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            show_onboarding_dialog(&win, ctrl, store.clone());
+                        }
+                    }
+                    UiMessage::PluginRestartRequired => {
+                        toast_overlay
+                            .add_toast(adw::Toast::new("Plugin updated. Restart dsh to apply."));
+                    }
+                    UiMessage::SupervisorRestarted(new_conn) => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.set_connection(new_conn);
+                            let sess_id_opt = {
+                                active_sess
+                                    .borrow()
+                                    .as_ref()
+                                    .map(|s| s.id.clone())
+                            };
+                            if let Some(id) = sess_id_opt {
+                                ctrl.follow_session(&id);
+                            }
+                        }
+                        toast_overlay.add_toast(adw::Toast::new("dsh restarted successfully"));
                     }
                 }
             }
@@ -595,6 +777,7 @@ impl SessionController {
     fn clone_ref(&self) -> Self {
         Self {
             connection: self.connection.clone(),
+            supervisor: self.supervisor.clone(),
             active_session: self.active_session.clone(),
             active_model: self.active_model.clone(),
             active_provider: self.active_provider.clone(),
@@ -604,6 +787,7 @@ impl SessionController {
             window_title: self.window_title.clone(),
             toast_overlay: self.toast_overlay.clone(),
             ui_sender: self.ui_sender.clone(),
+            credential_store: self.credential_store.clone(),
         }
     }
 }

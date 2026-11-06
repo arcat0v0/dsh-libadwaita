@@ -17,7 +17,7 @@ fn main() -> adw::glib::ExitCode {
     settings_action.connect_activate(move |_, _| {
         if let Some(app) = app_weak.upgrade() {
             if let Some(active_window) = app.active_window() {
-                show_settings_dialog(&active_window);
+                show_settings_dialog(&active_window, None, None);
             }
         }
     });
