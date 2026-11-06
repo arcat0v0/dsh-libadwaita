@@ -1,0 +1,64 @@
+pkgname=dsh-libadwaita
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Linux GTK4/libadwaita native desktop client for DeepSeek Harness (dsh)"
+arch=('x86_64')
+url="https://github.com/deepseek-ai/deepseek-harness"
+license=('MIT')
+depends=('gtk4' 'libadwaita' 'libsecret' 'nodejs>=24.9')
+makedepends=('rust' 'cargo' 'pnpm' 'git')
+optdepends=('gtksourceview-5: code syntax highlighting')
+
+build() {
+  local root_dir
+  if [ -d "$srcdir/$pkgname-$pkgver/app" ]; then
+    root_dir="$srcdir/$pkgname-$pkgver"
+  elif [ -d "$startdir/../app" ]; then
+    root_dir="$startdir/.."
+  elif [ -d "$startdir/app" ]; then
+    root_dir="$startdir"
+  else
+    root_dir="$srcdir"
+  fi
+
+  cd "$root_dir/bridge"
+  pnpm install
+  pnpm build
+
+  cd "$root_dir/app"
+  cargo build --release
+}
+
+package() {
+  local root_dir
+  if [ -d "$srcdir/$pkgname-$pkgver/app" ]; then
+    root_dir="$srcdir/$pkgname-$pkgver"
+  elif [ -d "$startdir/../app" ]; then
+    root_dir="$startdir/.."
+  elif [ -d "$startdir/app" ]; then
+    root_dir="$startdir"
+  else
+    root_dir="$srcdir"
+  fi
+
+  local pkg_dir
+  if [ -f "$startdir/io.github.deepseek_ai.DshLibadwaita.desktop" ]; then
+    pkg_dir="$startdir"
+  elif [ -f "$root_dir/packaging/io.github.deepseek_ai.DshLibadwaita.desktop" ]; then
+    pkg_dir="$root_dir/packaging"
+  else
+    pkg_dir="$srcdir"
+  fi
+
+  install -Dm755 "$root_dir/app/target/release/dsh-libadwaita" "$pkgdir/usr/bin/dsh-libadwaita"
+
+  install -dm755 "$pkgdir/usr/lib/dsh-libadwaita/bridge"
+  cp -a "$root_dir/bridge/package.json" "$root_dir/bridge/cordis.patch.yml" "$root_dir/bridge/dist" "$pkgdir/usr/lib/dsh-libadwaita/bridge/"
+  if [ -d "$root_dir/bridge/node_modules" ]; then
+    cp -a "$root_dir/bridge/node_modules" "$pkgdir/usr/lib/dsh-libadwaita/bridge/"
+  fi
+
+  install -Dm644 "$pkg_dir/io.github.deepseek_ai.DshLibadwaita.desktop" "$pkgdir/usr/share/applications/io.github.deepseek_ai.DshLibadwaita.desktop"
+  install -Dm644 "$pkg_dir/io.github.deepseek_ai.DshLibadwaita.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.github.deepseek_ai.DshLibadwaita.svg"
+  install -Dm644 "$pkg_dir/io.github.deepseek_ai.DshLibadwaita.service" "$pkgdir/usr/share/dbus-1/services/io.github.deepseek_ai.DshLibadwaita.service"
+}

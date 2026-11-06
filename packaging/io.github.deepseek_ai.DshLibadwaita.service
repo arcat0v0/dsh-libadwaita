@@ -1,0 +1,3 @@
+[D-BUS Service]
+Name=io.github.deepseek_ai.DshLibadwaita
+Exec=/usr/bin/dsh-libadwaita --gapplication-service

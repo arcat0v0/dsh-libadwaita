@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=dsh
+GenericName=DeepSeek Harness Client
+Comment=Linux GTK4/libadwaita desktop client for DeepSeek Harness
+Exec=dsh-libadwaita
+Icon=io.github.deepseek_ai.DshLibadwaita
+Terminal=false
+Type=Application
+Categories=Development;Utility;
+DBusActivatable=true
+StartupNotify=true
