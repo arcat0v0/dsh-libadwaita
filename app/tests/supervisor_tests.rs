@@ -7,6 +7,7 @@ fn test_profile_generation_package_json_and_cordis_patch() {
         profile_name: "libadwaita".to_string(),
         bridge_bundle_path_or_url: "file:///usr/lib/dsh/bridge".to_string(),
         disabled_rows: vec!["hmr".to_string(), "credentials".to_string()],
+        llm_base_url: Some("http://127.0.0.1:4000/anthropic".to_string()),
         schema_version: 1,
     };
 
@@ -15,13 +16,21 @@ fn test_profile_generation_package_json_and_cordis_patch() {
     let bundles = parsed["dsh"]["profile"]["bundles"].as_array().unwrap();
     assert_eq!(bundles.len(), 2);
     assert_eq!(bundles[0], "@deepseek-ai/dsh-base");
-    assert_eq!(bundles[1], "file:///usr/lib/dsh/bridge");
+    assert_eq!(bundles[1], "@dsh-libadwaita/bridge");
+    assert_eq!(
+        parsed["dependencies"]["@dsh-libadwaita/bridge"],
+        "file:///usr/lib/dsh/bridge"
+    );
     assert_eq!(parsed["managedProfile"]["schemaVersion"], 1);
 
     let patch_yml = generate_cordis_patch_yml(&cfg);
     assert!(patch_yml.contains("- id: hmr"));
+    assert!(patch_yml.contains("name: '@deepseek-ai/dsh-hmr'"));
+    assert!(patch_yml.contains("root: []"));
     assert!(patch_yml.contains("- id: credentials"));
-    assert!(patch_yml.contains("disabled: true"));
+    assert!(patch_yml.contains("name: '@deepseek-ai/dsh-credentials-local'"));
+    assert!(patch_yml.contains("- id: llm-deepseek"));
+    assert!(patch_yml.contains("baseURL: http://127.0.0.1:4000/anthropic"));
 }
 
 #[test]
@@ -34,6 +43,7 @@ fn test_profile_ensure_and_version_upgrade() {
         profile_name: "libadwaita".to_string(),
         bridge_bundle_path_or_url: "file:///opt/bridge-v1".to_string(),
         disabled_rows: vec!["hmr".to_string(), "credentials".to_string()],
+        llm_base_url: None,
         schema_version: 1,
     };
 
@@ -42,14 +52,16 @@ fn test_profile_ensure_and_version_upgrade() {
     let patch_path = temp_dir.join("profiles/libadwaita/cordis.patch.yml");
     assert!(pkg_path.exists());
     assert!(patch_path.exists());
+    let symlink_path = temp_dir.join("profiles/libadwaita/node_modules/@dsh-libadwaita/bridge");
+    assert!(symlink_path.is_symlink());
 
     let content_v1 = std::fs::read_to_string(&pkg_path).unwrap();
     assert!(content_v1.contains("bridge-v1"));
-
     let cfg_v2 = ProfileTemplateConfig {
         profile_name: "libadwaita".to_string(),
         bridge_bundle_path_or_url: "file:///opt/bridge-v2".to_string(),
         disabled_rows: vec!["hmr".to_string(), "credentials".to_string()],
+        llm_base_url: None,
         schema_version: 2,
     };
     ensure_managed_profile(&temp_dir, &cfg_v2).unwrap();
