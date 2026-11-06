@@ -1,6 +1,9 @@
+use crate::transcript::{ConversationTranscript, RenderBlock};
 use crate::ui::composer::Composer;
+use crate::ui::message_renderer::{render_block, AssistantLiveHandle};
 use gtk4::prelude::*;
 use libadwaita as adw;
+use std::cell::{Cell, RefCell};
 
 pub struct ConversationView {
     stack: gtk4::Stack,
@@ -8,6 +11,8 @@ pub struct ConversationView {
     transcript_box: gtk4::Box,
     status_label: gtk4::Label,
     title_label: gtk4::Label,
+    live_handle: RefCell<Option<AssistantLiveHandle>>,
+    rendered_count: Cell<usize>,
 }
 
 impl ConversationView {
@@ -146,6 +151,8 @@ impl ConversationView {
             transcript_box,
             status_label,
             title_label,
+            live_handle: RefCell::new(None),
+            rendered_count: Cell::new(0),
         }
     }
 
@@ -172,6 +179,65 @@ impl ConversationView {
 
     pub fn select_panel(&self, panel_name: &str) {
         self.stack.set_visible_child_name(panel_name);
+    }
+
+    pub fn update_transcript(&self, transcript: &ConversationTranscript) {
+        let blocks = transcript.blocks();
+        if blocks.is_empty() {
+            while let Some(child) = self.transcript_box.first_child() {
+                self.transcript_box.remove(&child);
+            }
+            self.live_handle.borrow_mut().take();
+            self.rendered_count.set(0);
+            return;
+        }
+
+        if self.rendered_count.get() == 0 {
+            while let Some(child) = self.transcript_box.first_child() {
+                self.transcript_box.remove(&child);
+            }
+        }
+
+        let current_count = self.rendered_count.get();
+        if blocks.len() > current_count {
+            for block in &blocks[current_count..] {
+                let (widget, handle) = render_block(block);
+                self.transcript_box.append(&widget);
+                if let Some(h) = handle {
+                    *self.live_handle.borrow_mut() = Some(h);
+                }
+            }
+            self.rendered_count.set(blocks.len());
+        }
+
+        if let Some(last_block) = blocks.last() {
+            match last_block {
+                RenderBlock::AssistantMessage {
+                    text,
+                    reasoning,
+                    is_live,
+                    ..
+                } => {
+                    let handle_opt = self.live_handle.borrow().clone();
+                    if let Some(handle) = handle_opt {
+                        if *is_live {
+                            handle.update_text(text);
+                            if let Some(r) = reasoning {
+                                handle.update_reasoning(r);
+                            }
+                        } else {
+                            handle.finalize();
+                            *self.live_handle.borrow_mut() = None;
+                        }
+                    }
+                }
+                _ => {
+                    if let Some(handle) = self.live_handle.borrow_mut().take() {
+                        handle.finalize();
+                    }
+                }
+            }
+        }
     }
 }
 
