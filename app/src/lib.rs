@@ -4,3 +4,4 @@ pub const APP_NAME: &str = "dsh";
 pub mod connection;
 pub mod protocol;
 pub mod supervisor;
+pub mod ui;
