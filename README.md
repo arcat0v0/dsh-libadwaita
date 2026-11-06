@@ -44,3 +44,16 @@ pnpm -C bridge build
 pnpm -C bridge test
 pnpm -C bridge lint
 ```
+
+## 统一 CI 入口
+
+以上检查由 `scripts/ci.sh` 统一执行，本地与 CI 使用同一入口：
+
+```sh
+pnpm -C bridge install
+bash scripts/ci.sh
+```
+
+脚本依次执行 bridge 的 typecheck/build/test/lint、`cargo check`/`cargo test`（`app/Cargo.toml`）以及 `desktop-file-validate` 校验 `packaging/io.github.deepseek_ai.DshLibadwaita.desktop`；全部退出码为 0 时脚本成功，否则汇总失败的检查并返回非零。
+
+GitHub Actions 工作流 `.github/workflows/ci.yml` 在 push 与 pull_request（`master`/`main`）时于 `ubuntu-24.04` 上安装 GTK4、libadwaita、libsecret、GtkSourceView 5 开发包、Node.js 24、pnpm 与 Rust stable，然后调用该脚本。
