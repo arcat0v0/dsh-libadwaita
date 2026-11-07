@@ -26,44 +26,100 @@ pub struct MainWindow {
     startup_page: adw::StatusPage,
     startup_spinner: gtk4::Spinner,
 }
+fn apply_responsive_layout(
+    window: &adw::ApplicationWindow,
+    split_view: &adw::OverlaySplitView,
+    sidebar: &Sidebar,
+) {
+    let width = if window.width() > 0 {
+        window.width()
+    } else {
+        window.default_width()
+    };
+    let rail = width < 1024 && width >= 768;
+    sidebar.set_rail_mode(rail);
+    sidebar
+        .widget()
+        .set_width_request(if rail { 56 } else { 280 });
+    split_view.set_collapsed(width < 768);
+}
+
+fn configure_responsive_layout(
+    window: &adw::ApplicationWindow,
+    split_view: &adw::OverlaySplitView,
+    sidebar: &Rc<Sidebar>,
+) {
+    apply_responsive_layout(window, split_view, sidebar);
+    let split_for_width = split_view.clone();
+    let sidebar_for_width = sidebar.clone();
+    window.connect_default_width_notify(move |window| {
+        apply_responsive_layout(window, &split_for_width, &sidebar_for_width);
+    });
+    let split_for_map = split_view.clone();
+    let sidebar_for_map = sidebar.clone();
+    window.connect_map(move |window| {
+        apply_responsive_layout(window, &split_for_map, &sidebar_for_map);
+    });
+}
+
 impl MainWindow {
     pub fn new(app: &adw::Application) -> Self {
         let sidebar = Rc::new(Sidebar::new());
         let conversation_view = Rc::new(ConversationView::new());
         let right_dock = Rc::new(RightDock::new());
 
-        let split_view = adw::OverlaySplitView::new();
+        let split_view = adw::OverlaySplitView::builder()
+            .sidebar_width_fraction(0.24)
+            .min_sidebar_width(264.0)
+            .max_sidebar_width(420.0)
+            .build();
         split_view.set_sidebar(Some(sidebar.widget()));
 
         let paned = gtk4::Paned::builder()
             .orientation(gtk4::Orientation::Horizontal)
             .position(720)
+            .shrink_start_child(false)
+            .shrink_end_child(true)
             .build();
         paned.set_start_child(Some(conversation_view.widget()));
         paned.set_end_child(Some(right_dock.widget()));
+        right_dock.widget().set_visible(false);
 
         split_view.set_content(Some(&paned));
         split_view.set_show_sidebar(true);
 
-        let header_bar = adw::HeaderBar::new();
+        let header_bar = adw::HeaderBar::builder()
+            .css_classes(["dsh-header-bar"])
+            .show_title(false)
+            .build();
 
         let toggle_sidebar_btn = gtk4::Button::builder()
             .icon_name("sidebar-show-symbolic")
-            .tooltip_text("Toggle Sidebar (Ctrl+B)")
+            .tooltip_text(crate::ui::copy::Copybook::for_code("system").collapse_sidebar)
             .action_name("win.toggle-sidebar")
+            .css_classes(["dsh-icon-button"])
+            .visible(!split_view.shows_sidebar())
             .build();
         header_bar.pack_start(&toggle_sidebar_btn);
+        let toggle_sidebar_weak = toggle_sidebar_btn.downgrade();
+        split_view.connect_show_sidebar_notify(move |split_view| {
+            if let Some(button) = toggle_sidebar_weak.upgrade() {
+                button.set_visible(!split_view.shows_sidebar());
+            }
+        });
 
         let window_title = adw::WindowTitle::builder()
             .title("dsh")
-            .subtitle("New Session")
+            .subtitle(crate::ui::copy::Copybook::for_code("system").new_session)
+            .css_classes(["dsh-header-title"])
             .build();
-        header_bar.set_title_widget(Some(&window_title));
+        header_bar.set_title_widget(None::<&gtk4::Widget>);
 
         let settings_btn = gtk4::Button::builder()
             .icon_name("emblem-system-symbolic")
             .tooltip_text("Settings (Ctrl+,)")
             .action_name("app.settings")
+            .visible(false)
             .build();
         header_bar.pack_end(&settings_btn);
 
@@ -71,13 +127,15 @@ impl MainWindow {
             .icon_name("list-add-symbolic")
             .tooltip_text("New Session (Ctrl+N)")
             .action_name("win.new-session")
+            .visible(false)
             .build();
         header_bar.pack_end(&new_session_btn);
 
         let dock_btn = gtk4::Button::builder()
             .icon_name("sidebar-show-right-symbolic")
-            .tooltip_text("Toggle Right Dock")
+            .tooltip_text(crate::ui::copy::Copybook::for_code("system").open_right_sidebar)
             .action_name("win.toggle-dock")
+            .css_classes(["dsh-icon-button"])
             .build();
         header_bar.pack_end(&dock_btn);
 
@@ -85,6 +143,7 @@ impl MainWindow {
             .label("deepseek-chat")
             .css_classes(["flat"])
             .tooltip_text("Active Model")
+            .visible(false)
             .build();
         header_bar.pack_end(&model_btn);
 
@@ -125,7 +184,9 @@ impl MainWindow {
             .content(&toast_overlay)
             .default_width(1280)
             .default_height(820)
+            .css_classes(["dsh-window"])
             .build();
+        configure_responsive_layout(&window, &split_view, &sidebar);
 
         let split_view_weak = split_view.downgrade();
         let toggle_sidebar_action = gtk4::gio::SimpleAction::new("toggle-sidebar", None);
@@ -436,6 +497,21 @@ impl MainWindow {
             }
         });
         self.window.add_action(&new_session_action);
+
+        let ctrl_preset = Rc::downgrade(&controller);
+        let preset_action = gtk4::gio::SimpleAction::new(
+            "agent-preset",
+            Some(&gtk4::glib::VariantTy::STRING),
+        );
+        preset_action.connect_activate(move |_, param| {
+            if let (Some(c), Some(preset)) = (
+                ctrl_preset.upgrade(),
+                param.and_then(|value| value.get::<String>()),
+            ) {
+                c.select_agent_preset(&preset);
+            }
+        });
+        self.window.add_action(&preset_action);
 
         let ctrl_select = Rc::downgrade(&controller);
         let select_session_action = gtk4::gio::SimpleAction::new(

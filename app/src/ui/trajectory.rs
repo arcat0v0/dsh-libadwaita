@@ -179,24 +179,17 @@ impl TrajectoryView {
             self.store.remove(0);
         }
         let query = self.search.text().to_string().to_ascii_lowercase();
-        let events = self.events.borrow();
-        let mut filtered = self.filtered.borrow_mut();
-        filtered.clear();
-        for (index, event) in events.iter().enumerate() {
-            if query.is_empty() {
-                filtered.push(index);
-            } else {
-                let haystack = format!("{} {} {}", event.event_type, event.seq, event.data);
-                if haystack.to_ascii_lowercase().contains(&query) {
-                    filtered.push(index);
-                }
-            }
-        }
-        for row in 0..filtered.len() {
+        let rows = {
+            let events = self.events.borrow();
+            let indices = filter_event_indices(&events, &query);
+            *self.filtered.borrow_mut() = indices.clone();
+            indices
+        };
+        for row in 0..rows.len() {
             self.store
                 .append(&gtk4::glib::BoxedAnyObject::new(row));
         }
-        if filtered.is_empty() {
+        if rows.is_empty() {
             self.inspector.buffer().set_text("");
         }
     }
@@ -221,8 +214,23 @@ impl Default for TrajectoryView {
     }
 }
 
-fn summary(value: &serde_json::Value) -> String {
-    let text = value.to_string();
+pub fn filter_event_indices(events: &[SessionEvent], query: &str) -> Vec<usize> {
+    let query = query.trim().to_ascii_lowercase();
+    events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| {
+            if query.is_empty() {
+                return true;
+            }
+            let haystack = format!("{} {} {}", event.event_type, event.seq, event.data);
+            haystack.to_ascii_lowercase().contains(&query)
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+fn summary(value: &serde_json::Value) -> String {    let text = value.to_string();
     if text.chars().count() > 160 {
         format!("{}…", text.chars().take(160).collect::<String>())
     } else {

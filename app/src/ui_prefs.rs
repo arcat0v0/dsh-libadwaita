@@ -53,6 +53,8 @@ pub struct UiPrefs {
     #[serde(default)]
     pub theme: Option<String>,
     #[serde(default)]
+    pub locale: Option<String>,
+    #[serde(default)]
     pub font_size: Option<u32>,
     #[serde(default = "default_true")]
     pub developer_tools: bool,
@@ -77,6 +79,7 @@ impl Default for UiPrefs {
             archive_filter: ArchiveFilter::Active,
             notifications_enabled: true,
             theme: None,
+            locale: None,
             font_size: None,
             developer_tools: true,
             transcript_view: TranscriptView::Standard,
@@ -132,7 +135,7 @@ impl UiPrefs {
     }
 
     pub fn dock_visible(&self, session_id: &str) -> bool {
-        self.dock_visible.get(session_id).copied().unwrap_or(true)
+        self.dock_visible.get(session_id).copied().unwrap_or(false)
     }
 
     pub fn set_dock_visible(&mut self, session_id: &str, visible: bool) {

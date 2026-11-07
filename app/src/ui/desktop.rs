@@ -186,7 +186,14 @@ pub fn build_shortcuts_window(parent: &impl IsA<gtk4::Window>) -> gtk4::Shortcut
 
 pub fn configure_system_style() {
     let style_manager = adw::StyleManager::default();
-    style_manager.set_color_scheme(adw::ColorScheme::Default);
+    let preference = crate::ui_prefs::UiPrefs::load(&crate::ui_prefs::default_ui_prefs_path())
+        .theme
+        .unwrap_or_else(|| "dark".to_string());
+    style_manager.set_color_scheme(match preference.as_str() {
+        "light" => adw::ColorScheme::ForceLight,
+        "system" => adw::ColorScheme::Default,
+        _ => adw::ColorScheme::ForceDark,
+    });
     let _ = style_manager.is_high_contrast();
 
     if let Some(settings) = gtk4::Settings::default() {
@@ -194,38 +201,14 @@ pub fn configure_system_style() {
         settings.set_gtk_enable_animations(!reduced_motion);
     }
 
-    let css = r#"
-window {
-  font-family: system-ui, sans-serif;
-}
-.card {
-  background-color: var(--card-bg-color);
-  border-radius: 12px;
-}
-.accent-badge {
-  background-color: var(--accent-bg-color);
-  color: var(--accent-fg-color);
-  border-radius: 999px;
-  padding: 2px 8px;
-}
-@media (prefers-contrast: more) {
-  .card {
-    border: 2px solid currentColor;
-  }
-}
-@media (prefers-color-scheme: dark) {
-  .card {
-    background-color: color-mix(in srgb, var(--card-bg-color) 92%, white);
-  }
-}
-"#;
-
-    let provider = gtk4::CssProvider::new();
-    provider.load_from_string(css);
+    let provider: &'static gtk4::CssProvider = Box::leak(Box::new(gtk4::CssProvider::new()));
+    let install = |dark: bool| provider.load_from_string(&crate::ui::theme::shell_css(dark));
+    install(style_manager.is_dark());
+    style_manager.connect_dark_notify(move |manager| install(manager.is_dark()));
     if let Some(display) = gtk4::gdk::Display::default() {
         gtk4::style_context_add_provider_for_display(
             &display,
-            &provider,
+            provider,
             gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
     }

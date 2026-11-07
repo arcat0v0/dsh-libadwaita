@@ -1,6 +1,7 @@
 use crate::protocol::QueueItem;
 use crate::transcript::{ConversationTranscript, RenderBlock};
 use crate::ui::composer::Composer;
+use crate::ui::copy::Copybook;
 use crate::ui::desktop::{open_path_in_default_app, open_terminal_in_dir};
 use crate::ui::message_renderer::{render_block, AssistantLiveHandle};
 use crate::ui::goal_bar::GoalBar;
@@ -46,6 +47,12 @@ pub struct ConversationView {
     rendered_count: Cell<usize>,
     active_cwd: Rc<RefCell<PathBuf>>,
     title_activate: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+    hero_composer_slot: gtk4::Box,
+    composer_dock: gtk4::Box,
+    session_header: gtk4::Box,
+    switcher_bar: gtk4::Box,
+    preset_menu: gtk4::MenuButton,
+    preset_label: gtk4::Label,
 }
 
 impl ConversationView {
@@ -56,6 +63,7 @@ impl ConversationView {
 
         let conversation_box = gtk4::Box::builder()
             .orientation(gtk4::Orientation::Vertical)
+            .css_classes(["dsh-conversation"])
             .build();
 
         let active_cwd = Rc::new(RefCell::new(PathBuf::from(
@@ -69,10 +77,11 @@ impl ConversationView {
             .margin_end(12)
             .margin_top(8)
             .margin_bottom(8)
+            .visible(false)
             .build();
 
         let title_label = gtk4::Label::builder()
-            .label("New Session")
+            .label(Copybook::for_code("system").new_session)
             .hexpand(true)
             .halign(gtk4::Align::Start)
             .css_classes(["title-4"])
@@ -242,30 +251,11 @@ impl ConversationView {
             .margin_bottom(16)
             .build();
 
-        let welcome_bubble = gtk4::Box::builder()
-            .orientation(gtk4::Orientation::Vertical)
-            .spacing(6)
-            .css_classes(["card"])
-            .margin_start(8)
-            .margin_end(8)
-            .margin_top(8)
-            .margin_bottom(8)
-            .build();
-
-        let welcome_title = gtk4::Label::builder()
-            .label("Welcome to dsh")
-            .css_classes(["title-3"])
-            .halign(gtk4::Align::Start)
-            .build();
-        welcome_bubble.append(&welcome_title);
-
-        let welcome_text = gtk4::Label::builder()
-            .label("Ask questions, inspect workspace diffs, or run developer agent commands.")
-            .wrap(true)
-            .halign(gtk4::Align::Start)
-            .css_classes(["dim-label"])
-            .build();
-        welcome_bubble.append(&welcome_text);
+        let welcome_bubble = crate::ui::hero::build_hero();
+        let hero_composer_slot = welcome_bubble.composer_slot.clone();
+        let preset_menu = welcome_bubble.preset_menu.clone();
+        let preset_label = welcome_bubble.preset_label.clone();
+        let welcome_bubble = welcome_bubble.container;
         transcript_box.append(&welcome_bubble);
 
         transcript_scroll.set_child(Some(&transcript_box));
@@ -292,6 +282,7 @@ impl ConversationView {
             .orientation(gtk4::Orientation::Horizontal)
             .halign(gtk4::Align::Center)
             .margin_bottom(4)
+            .visible(false)
             .build();
         switcher_bar.append(&view_switcher);
         conversation_box.append(&switcher_bar);
@@ -308,7 +299,12 @@ impl ConversationView {
         conversation_box.append(todo_dock.widget());
 
         let composer = Composer::new();
-        conversation_box.append(composer.widget());
+        let composer_dock = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Vertical)
+            .css_classes(["dsh-composer-shell"])
+            .build();
+        conversation_box.append(&composer_dock);
+        hero_composer_slot.append(composer.widget());
 
         stack.add_named(&conversation_box, Some("conversation"));
 
@@ -353,6 +349,12 @@ impl ConversationView {
             rendered_count: Cell::new(0),
             active_cwd,
             title_activate,
+            hero_composer_slot,
+            composer_dock,
+            session_header,
+            switcher_bar,
+            preset_menu,
+            preset_label,
         }
     }
 
@@ -410,16 +412,20 @@ impl ConversationView {
     }
 
     pub fn set_status(&self, status: &str) {
-        self.status_label.set_label(status);
+        self.status_label.set_label(match status {
+            "Running" => "运行中",
+            "Idle" => "就绪",
+            other => other,
+        });
         self.composer.set_is_running(status == "Running");
     }
 
     pub fn set_disconnected(&self) {
         let current = self.status_label.label().to_string();
-        if current == "Running" || current == "Running (paused)" {
-            self.status_label.set_label("Running (paused)");
+        if current == "运行中" || current == "运行中（已暂停）" {
+            self.status_label.set_label("运行中（已暂停）");
         } else {
-            self.status_label.set_label("Disconnected");
+            self.status_label.set_label("已断开连接");
         }
     }
 
@@ -657,6 +663,36 @@ impl ConversationView {
         }
     }
 
+    pub fn set_hero(&self, hero: bool) {
+        self.session_header.set_visible(!hero);
+        self.switcher_bar.set_visible(!hero);
+        if hero {
+            if self.welcome_bubble.parent().is_none() {
+                self.transcript_box.append(&self.welcome_bubble);
+            }
+            self.welcome_bubble.set_visible(true);
+            if let Some(parent) = self.composer.widget().parent() {
+                if let Some(box_parent) = parent.downcast_ref::<gtk4::Box>() {
+                    box_parent.remove(self.composer.widget());
+                }
+            }
+            self.hero_composer_slot.append(self.composer.widget());
+        } else {
+            self.welcome_bubble.set_visible(false);
+            if let Some(parent) = self.composer.widget().parent() {
+                if let Some(box_parent) = parent.downcast_ref::<gtk4::Box>() {
+                    box_parent.remove(self.composer.widget());
+                }
+            }
+            self.composer_dock.append(self.composer.widget());
+        }
+    }
+
+    pub fn set_preset_label(&self, label: &str) {
+        self.preset_label.set_label(label);
+        self.preset_menu.set_tooltip_text(Some(label));
+    }
+
     pub fn clear_session(&self) {
         while let Some(child) = self.transcript_box.first_child() {
             self.transcript_box.remove(&child);
@@ -664,7 +700,8 @@ impl ConversationView {
         self.transcript_box.append(&self.welcome_bubble);
         self.live_handle.borrow_mut().take();
         self.rendered_count.set(0);
-        self.set_title("New Session");
+        self.set_hero(true);
+        self.set_title(Copybook::for_code("system").new_session);
         self.set_status("Idle");
         self.queue_dock.update(&[]);
     }
@@ -675,6 +712,7 @@ impl ConversationView {
 
     pub fn update_transcript(&self, transcript: &ConversationTranscript) {
         let blocks = transcript.blocks();
+        self.set_hero(blocks.is_empty());
         if self.view_mode.get().groups_intermediate()
             && blocks.len() > self.rendered_count.get()
         {
@@ -686,6 +724,7 @@ impl ConversationView {
             }
             self.live_handle.borrow_mut().take();
             self.rendered_count.set(0);
+            self.set_hero(true);
             return;
         }
 

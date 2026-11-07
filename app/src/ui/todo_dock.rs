@@ -17,9 +17,10 @@ impl TodoDock {
             .margin_top(4)
             .margin_bottom(4)
             .css_classes(["card"])
+            .visible(false)
             .build();
         let title = gtk4::Label::builder()
-            .label("Todo")
+            .label("任务")
             .css_classes(["heading"])
             .halign(gtk4::Align::Start)
             .build();
@@ -41,6 +42,7 @@ impl TodoDock {
     }
 
     pub fn update(&self, items: &[TodoItem]) {
+        self.container.set_visible(!items.is_empty());
         while let Some(child) = self.list.first_child() {
             self.list.remove(&child);
         }

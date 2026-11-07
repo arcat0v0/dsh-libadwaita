@@ -18,6 +18,7 @@ impl RightDock {
     pub fn new() -> Self {
         let container = gtk4::Box::builder()
             .orientation(gtk4::Orientation::Vertical)
+            .css_classes(["dsh-right-dock"])
             .build();
 
         let tab_view = adw::TabView::new();

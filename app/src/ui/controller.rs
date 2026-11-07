@@ -211,6 +211,7 @@ pub struct SessionController {
     active_session: Rc<RefCell<Option<SessionModel>>>,
     active_model: Rc<RefCell<String>>,
     active_provider: Rc<RefCell<String>>,
+    active_preset: Rc<RefCell<String>>,
     window: gtk4::Window,
     sidebar: Rc<Sidebar>,
     conversation_view: Rc<ConversationView>,
@@ -266,6 +267,7 @@ impl SessionController {
             active_session: Rc::new(RefCell::new(None)),
             active_model: Rc::new(RefCell::new("deepseek-chat".to_string())),
             active_provider: Rc::new(RefCell::new("deepseek".to_string())),
+            active_preset: Rc::new(RefCell::new("ptc".to_string())),
             window: main_window.window().clone().upcast(),
             sidebar,
             conversation_view,
@@ -1303,7 +1305,8 @@ impl SessionController {
     fn clear_active_session_ui(&self) {
         *self.active_session.borrow_mut() = None;
         self.conversation_view.clear_session();
-        self.window_title.set_subtitle("New Session");
+        self.right_dock.widget().set_visible(false);
+        self.window_title.set_subtitle("新会话");
         self.clear_persisted_session();
     }
 
@@ -2275,11 +2278,24 @@ impl SessionController {
         );
     }
 
+    pub fn select_agent_preset(&self, preset: &str) {
+        *self.active_preset.borrow_mut() = preset.to_string();
+        let label = match preset {
+            "standard" => "标准模式",
+            "ptc" => "PTC 模式",
+            "minimal" => "极简模式",
+            "cordis" => "创造模式",
+            _ => preset,
+        };
+        self.conversation_view.set_preset_label(label);
+    }
+
     pub fn create_session(&self, cwd: &str) {
         let cwd_string = cwd.to_string();
         let conn_arc = self.connection.clone();
         let model = self.active_model.borrow().clone();
         let provider = self.active_provider.borrow().clone();
+        let preset = self.active_preset.borrow().clone();
         let ui_sender = self.ui_sender.clone();
 
         tokio_runtime().spawn(async move {
@@ -2290,7 +2306,7 @@ impl SessionController {
                     cwd: cwd_string,
                     provider: Some(provider),
                     model: Some(model),
-                    agent_preset: None,
+                    agent_preset: Some(preset.clone()),
                 };
 
                 if let Ok(create_res) = conn
@@ -2412,8 +2428,7 @@ impl SessionController {
         *self.active_provider.borrow_mut() = provider.to_string();
         self.conversation_view
             .composer()
-            .model_button()
-            .set_label(model);
+            .set_model_label(model);
 
         let Some(sess_id) = self.active_session_id() else {
             return;
@@ -3365,15 +3380,14 @@ impl SessionController {
                             *ctrl.active_model.borrow_mut() = model.model.clone();
                             conv_view
                                 .composer()
-                                .model_button()
-                                .set_label(&model.model);
+                                .set_model_label(&model.model);
                         }
                     }
                     UiMessage::ModelSwitchFailed { provider, model } => {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
                             *ctrl.active_provider.borrow_mut() = provider;
                             *ctrl.active_model.borrow_mut() = model.clone();
-                            conv_view.composer().model_button().set_label(&model);
+                            conv_view.composer().set_model_label(&model);
                         }
                         toast_overlay.add_toast(adw::Toast::new(
                             "Model switch failed; previous model restored",
