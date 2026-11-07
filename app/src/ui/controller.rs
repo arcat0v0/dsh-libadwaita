@@ -2290,6 +2290,54 @@ impl SessionController {
         self.conversation_view.set_preset_label(label);
     }
 
+    pub fn start_new_session(&self) {
+        let default_path = self
+            .workspaces
+            .borrow()
+            .iter()
+            .find(|ws| ws.title.trim().is_empty())
+            .map(|ws| ws.path.clone());
+        match default_path {
+            Some(path) => self.create_session(&path),
+            None => self.prompt_new_session_portal(),
+        }
+    }
+
+    pub fn start_session_in_workspace(&self, workspace_id: &str) {
+        let Some(workspace) = self
+            .workspaces
+            .borrow()
+            .iter()
+            .find(|ws| ws.id == workspace_id)
+            .cloned()
+        else {
+            return;
+        };
+        self.switch_to_workspace_path(&workspace.path);
+    }
+
+    pub fn reveal_workspace(&self, workspace_id: &str) {
+        let Some(workspace) = self
+            .workspaces
+            .borrow()
+            .iter()
+            .find(|ws| ws.id == workspace_id)
+            .cloned()
+        else {
+            return;
+        };
+        let launcher = gtk4::FileLauncher::new(Some(&gtk4::gio::File::for_path(&workspace.path)));
+        let window_for_reveal = self.window.clone();
+        launcher.open_containing_folder(
+            Some(&window_for_reveal),
+            None::<&gtk4::gio::Cancellable>,
+            move |result| {
+                if let Err(err) = result {
+                    eprintln!("reveal workspace failed: {err}");
+                }
+            },
+        );
+    }
     pub fn create_session(&self, cwd: &str) {
         let cwd_string = cwd.to_string();
         let conn_arc = self.connection.clone();

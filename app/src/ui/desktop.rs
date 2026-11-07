@@ -188,11 +188,11 @@ pub fn configure_system_style() {
     let style_manager = adw::StyleManager::default();
     let preference = crate::ui_prefs::UiPrefs::load(&crate::ui_prefs::default_ui_prefs_path())
         .theme
-        .unwrap_or_else(|| "dark".to_string());
+        .unwrap_or_else(|| "system".to_string());
     style_manager.set_color_scheme(match preference.as_str() {
         "light" => adw::ColorScheme::ForceLight,
-        "system" => adw::ColorScheme::Default,
-        _ => adw::ColorScheme::ForceDark,
+        "dark" => adw::ColorScheme::ForceDark,
+        _ => adw::ColorScheme::Default,
     });
     let _ = style_manager.is_high_contrast();
 

@@ -109,10 +109,8 @@ headerbar, .dsh-header-bar {{
 
 .dsh-sidebar {{
   min-width: 264px;
-  background: var(--dsh-sidebar-fill);
-  border-right: 1px solid var(--dsh-border-l3);
   padding: 6px 8px;
-  color: var(--dsh-label-primary);
+  color: var(--window-fg-color);
   font-size: 14px;
 }}
 .dsh-sidebar-rail {{
@@ -260,17 +258,26 @@ headerbar, .dsh-header-bar {{
   line-height: 18px;
 }}
 .dsh-hero-chip {{
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--dsh-label-primary);
+  font-size: 13px;
+  font-weight: 500;
+}}
+.dsh-hero-chip > button {{
   min-height: 28px;
   padding: 0 8px;
   border: none;
   border-radius: var(--dsh-radius-sm);
   background: transparent;
   color: var(--dsh-label-primary);
-  font-size: 13px;
-  font-weight: 500;
 }}
-.dsh-hero-chip:hover {{
+.dsh-hero-chip > button:hover {{
   background: var(--dsh-hover-fill);
+}}
+.dsh-hero-chip > button:checked {{
+  background: var(--dsh-active-fill);
 }}
 .dsh-hero-chip image, .dsh-composer-chip image {{
   -gtk-icon-size: 12px;
@@ -397,11 +404,20 @@ headerbar, .dsh-header-bar {{
   border: 1px solid var(--dsh-border-l2);
   border-radius: var(--dsh-radius-sm);
 }}
-.dsh-popover-menu, popover {{
+.dsh-popover-menu > contents, popover > contents {{
   background: var(--dsh-composer-fill);
   color: var(--dsh-label-primary);
   border: 1px solid var(--dsh-border-l2);
   border-radius: var(--dsh-radius-md);
+}}
+.dsh-popover-menu > arrow, popover > arrow {{
+  background: var(--dsh-composer-fill);
+  border: 1px solid var(--dsh-border-l2);
+}}
+.dsh-popover-menu, popover.background {{
+  background: transparent;
+  border: none;
+  box-shadow: none;
 }}
 .dsh-popover-menu button, popover button {{
   color: var(--dsh-label-primary);

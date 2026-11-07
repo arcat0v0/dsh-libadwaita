@@ -85,6 +85,7 @@ pub fn build_hero() -> HeroParts {
         Some("win.new-workspace"),
     ));
     workspace_menu.set_menu_model(Some(&workspace_items));
+    crate::ui::menu::suppress_initial_selection(&workspace_menu);
     chips.append(&workspace_menu);
 
     let preset_menu = gtk4::MenuButton::builder()
@@ -117,6 +118,7 @@ pub fn build_hero() -> HeroParts {
         preset_items.append_item(&item);
     }
     preset_menu.set_menu_model(Some(&preset_items));
+    crate::ui::menu::suppress_initial_selection(&preset_menu);
     chips.append(&preset_menu);
     stack.append(&chips);
 

@@ -258,13 +258,27 @@ impl Sidebar {
                 .margin_bottom(4)
                 .build();
             let rename_btn = popover_button("重命名", "win.rename-workspace", &workspace.id);
-            let remove_btn = popover_button("移除", "win.remove-workspace", &workspace.id);
+            let reveal_btn = popover_button("在文件夹显示", "win.reveal-workspace", &workspace.id);
+            let remove_btn = popover_button("删除工作区", "win.remove-workspace", &workspace.id);
+            remove_btn.add_css_class("destructive-action");
             pop_box.append(&rename_btn);
+            pop_box.append(&reveal_btn);
+            pop_box.append(&gtk4::Separator::new(gtk4::Orientation::Horizontal));
             pop_box.append(&remove_btn);
             popover.set_child(Some(&pop_box));
             menu_btn.set_popover(Some(&popover));
             let row_box = row.child().and_downcast::<gtk4::Box>();
             if let Some(row_box) = row_box {
+                let new_session_btn = gtk4::Button::builder()
+                    .icon_name("chat-message-new-symbolic")
+                    .tooltip_text(Copybook::for_code("system").create_session)
+                    .action_name("win.new-session-in-workspace")
+                    .css_classes(["dsh-icon-button"])
+                    .valign(gtk4::Align::Center)
+                    .build();
+                new_session_btn.set_action_target_value(Some(&workspace.id.to_variant()));
+                row_box.append(&new_session_btn);
+                crate::ui::menu::suppress_initial_selection(&menu_btn);
                 row_box.append(&menu_btn);
             }
         }
@@ -353,16 +367,6 @@ fn more_row(copy: Copybook) -> gtk4::MenuButton {
         .margin_top(4)
         .margin_bottom(4)
         .build();
-    let plugins = gtk4::Button::builder()
-        .label(copy.plugins)
-        .action_name("win.show-plugins")
-        .css_classes(["dsh-panel-row"])
-        .build();
-    let schedules = gtk4::Button::builder()
-        .label(copy.schedules)
-        .action_name("win.show-schedules")
-        .css_classes(["dsh-panel-row"])
-        .build();
     let browse = gtk4::Button::builder()
         .label(copy.browse_plugins)
         .action_name("win.show-plugins")
@@ -370,16 +374,17 @@ fn more_row(copy: Copybook) -> gtk4::MenuButton {
         .build();
     let create = gtk4::Button::builder()
         .label(copy.create_plugin)
-        .action_name("win.new-session")
+        .action_name("win.show-plugins")
         .css_classes(["dsh-panel-row"])
         .build();
-    for item in [plugins, schedules, browse, create] {
+    for item in [browse, create] {
         let popover_clone = popover.clone();
         item.connect_clicked(move |_| popover_clone.popdown());
         menu_box.append(&item);
     }
     popover.set_child(Some(&menu_box));
     button.set_popover(Some(&popover));
+    crate::ui::menu::suppress_initial_selection(&button);
     button
 }
 

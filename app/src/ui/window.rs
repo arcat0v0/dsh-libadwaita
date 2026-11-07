@@ -93,20 +93,6 @@ impl MainWindow {
             .show_title(false)
             .build();
 
-        let toggle_sidebar_btn = gtk4::Button::builder()
-            .icon_name("sidebar-show-symbolic")
-            .tooltip_text(crate::ui::copy::Copybook::for_code("system").collapse_sidebar)
-            .action_name("win.toggle-sidebar")
-            .css_classes(["dsh-icon-button"])
-            .visible(!split_view.shows_sidebar())
-            .build();
-        header_bar.pack_start(&toggle_sidebar_btn);
-        let toggle_sidebar_weak = toggle_sidebar_btn.downgrade();
-        split_view.connect_show_sidebar_notify(move |split_view| {
-            if let Some(button) = toggle_sidebar_weak.upgrade() {
-                button.set_visible(!split_view.shows_sidebar());
-            }
-        });
 
         let window_title = adw::WindowTitle::builder()
             .title("dsh")
@@ -493,10 +479,40 @@ impl MainWindow {
         let new_session_action = gtk4::gio::SimpleAction::new("new-session", None);
         new_session_action.connect_activate(move |_, _| {
             if let Some(c) = ctrl_new.upgrade() {
-                c.prompt_new_session_portal();
+                c.start_new_session();
             }
         });
         self.window.add_action(&new_session_action);
+
+        let ctrl_new_in_workspace = Rc::downgrade(&controller);
+        let new_session_in_workspace = gtk4::gio::SimpleAction::new(
+            "new-session-in-workspace",
+            Some(&gtk4::glib::VariantTy::STRING),
+        );
+        new_session_in_workspace.connect_activate(move |_, param| {
+            if let (Some(c), Some(id)) = (
+                ctrl_new_in_workspace.upgrade(),
+                param.and_then(|value| value.get::<String>()),
+            ) {
+                c.start_session_in_workspace(&id);
+            }
+        });
+        self.window.add_action(&new_session_in_workspace);
+
+        let ctrl_reveal = Rc::downgrade(&controller);
+        let reveal_workspace = gtk4::gio::SimpleAction::new(
+            "reveal-workspace",
+            Some(&gtk4::glib::VariantTy::STRING),
+        );
+        reveal_workspace.connect_activate(move |_, param| {
+            if let (Some(c), Some(id)) = (
+                ctrl_reveal.upgrade(),
+                param.and_then(|value| value.get::<String>()),
+            ) {
+                c.reveal_workspace(&id);
+            }
+        });
+        self.window.add_action(&reveal_workspace);
 
         let ctrl_preset = Rc::downgrade(&controller);
         let preset_action = gtk4::gio::SimpleAction::new(

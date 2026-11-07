@@ -48,6 +48,21 @@ fn test_upstream_shell_geometry_rules_are_present() {
 }
 
 #[test]
+fn test_menu_button_hover_targets_inner_button_not_outer_widget() {
+    let css = shell_css(true);
+    assert!(css.contains(".dsh-hero-chip > button {"));
+    assert!(css.contains(".dsh-hero-chip > button:hover"));
+    assert!(!css.contains(".dsh-hero-chip:hover"));
+}
+
+#[test]
+fn test_popover_contents_and_arrow_share_menu_fill() {
+    let css = shell_css(true);
+    assert!(css.contains("popover > contents"));
+    assert!(css.contains("popover > arrow"));
+}
+
+#[test]
 fn test_empty_home_uses_upstream_chinese_copy() {
     let zh = Copybook::zh();
     assert_eq!(zh.new_session, "新会话");

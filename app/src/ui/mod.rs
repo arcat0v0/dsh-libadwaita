@@ -11,6 +11,7 @@ pub mod goal_bar;
 pub mod hero;
 pub mod layout;
 pub mod message_renderer;
+pub mod menu;
 pub mod onboarding;
 pub mod queue_dock;
 pub mod right_dock;
