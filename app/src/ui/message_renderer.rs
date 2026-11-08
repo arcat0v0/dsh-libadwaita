@@ -63,6 +63,14 @@ fn collect_widget_text(widget: &gtk4::Widget) -> String {
         .join("\n")
 }
 
+
+fn detach_popover_on_destroy(anchor: &impl IsA<gtk4::Widget>, popover: &gtk4::Popover) {
+    let popover = popover.clone();
+    anchor.connect_destroy(move |_| {
+        popover.unparent();
+    });
+}
+
 fn attach_message_context_menu(widget: &impl IsA<gtk4::Widget>, text: String) {
     let popover = gtk4::Popover::builder().build();
     let box_widget = gtk4::Box::builder()
@@ -105,6 +113,7 @@ fn attach_message_context_menu(widget: &impl IsA<gtk4::Widget>, text: String) {
     box_widget.append(&quote);
     popover.set_child(Some(&box_widget));
     popover.set_parent(widget);
+    detach_popover_on_destroy(widget, &popover);
     let gesture = gtk4::GestureClick::new();
     gesture.set_button(3);
     gesture.connect_pressed(move |_, _, _, _| {
@@ -158,6 +167,7 @@ fn attach_dynamic_context_menu(
     box_widget.append(&quote);
     popover.set_child(Some(&box_widget));
     popover.set_parent(widget);
+    detach_popover_on_destroy(widget, &popover);
     let gesture = gtk4::GestureClick::new();
     gesture.set_button(3);
     let current_for_press = current.clone();
@@ -192,6 +202,7 @@ fn attach_code_context_menu(view: &sourceview5::View, code: String) {
     box_widget.append(&copy);
     popover.set_child(Some(&box_widget));
     popover.set_parent(view);
+    detach_popover_on_destroy(view, &popover);
     let gesture = gtk4::GestureClick::new();
     gesture.set_button(3);
     gesture.connect_pressed(move |_, _, _, _| popover.popup());
