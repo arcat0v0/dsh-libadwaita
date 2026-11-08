@@ -90,14 +90,14 @@
 | M18 | Queue/Steer 预览/编辑/删除/插话 | 已实现 | `app/src/ui/queue_dock.rs::QueueDock` 展示 inbox，`SessionController::{refresh_queue,queue_edit,queue_remove,queue_steer_item,queue_steer_all}` 调 queue RPC；`IncomingNotification::SessionInbox` 实时更新。 |
 | M19 | Stop 按钮与双 Esc | 已实现 | `setup_composer` 在 running 时把 send button 转为 cancel，`setup_double_esc` 在 500ms 内两次 Escape 调 `cancel_current_turn`；无终端/IME/模态焦点仲裁。 |
 | M20 | 失败后“继续生成” | 已实现 | `SessionModel::handle_event` 记录六类 error code，`update_continue_state` 使用 `drafts::continuation_eligibility`，Continue 调 `continue_generation` 发送空 contentBlocks、`mode:"queue"`。 |
-| M21 | 附件选择/粘贴/拖放/上传进度/重试 | 部分实现 | Attach 打开 `GtkFileDialog.open_multiple`，窗口 DropTarget 接受 FileList，Ctrl+V 读取 image/png；文件/图片均走 `attachment/upload`；无独立上传进度与失败重试。 |
+| M21 | 附件选择/粘贴/拖放/上传进度/重试 | 部分实现 | Attach 打开 `GtkFileDialog.open_multiple`，窗口 DropTarget 接受 FileList，Ctrl+V 读取 image/png；附件进入 composer 暂存 rail（图片预览、文件卡、移除，按会话保留并由成功回显释放），提交时图片内联、文件经 bridge `admitEncodedFile` 转为 durable ref；无独立上传进度（提交前不预上传）。 |
 | M22 | 上下文占用率与组成 | 部分实现 | `session/projections` 与 `session.projection` 的 contextPressure 驱动 Context 按钮百分比，点击显示真实 contextBreakdown JSON；不是上游圆环视觉，也不显示估算值。 |
 | M23 | Todo dock | 已实现 | `app/src/ui/todo_dock.rs::TodoDock` 位于 composer 上方，`ConversationView::update_todo` 由 follow projections 与 `todo/write` 事件更新，显示完成计数与只读状态。 |
-| M24 | 已发送凭据遮挡与眼睛 | 已实现 | `build_user_message` 调 `drafts::mask_secret_patterns`，仅当文本被改变时显示 reveal 按钮；复制按钮复制原文，composer 原文不遮挡。 |
+| M24 | 已发送凭据遮挡与眼睛 | 已实现 | `build_user_message` 调 `secret_mask::mask_secret_patterns`，覆盖 PEM 私钥块、URL 密码、`sk-`/GitHub 系列/AIza/AKIA/ASIA/LTAI/AKID/xox/Slack/Stripe/`whsec_`/JWT 等格式，保留前 8 字符并按码点计数；仅文本被改时显示 reveal，复制按钮复制原文，composer 原文不遮挡。 |
 | M25 | Trajectory 表/检查器/时间线/搜索/虚拟行 | 部分实现 | `SessionModel` 保留 2000 条 raw SessionEvent，follow 加载 200 条 page 快照，live `session.event` 追加；`ui/trajectory.rs` 提供 GtkColumnView（seq/time/type/summary）、搜索过滤、GtkPaned 只读 SourceView JSON 检查器与实时追加；无时间线条与 `tool-result/watch` 原始中间值。 |
-| M26 | 消息赞踩/反馈弹窗 | 部分实现 | `message_renderer` 为定稿 assistant 消息提供 thumbs up/down 与 Feedback 对话框，调用 `message-feedback/list|put|delete` 和 `session-feedback/record`；以 seq 派生 message id，无七类原因、冲突权威项对账与撤回状态刷新。 |
+| M26 | 消息赞踩/反馈弹窗 | 已实现 | `message_renderer` 使用 `assistant/message` 的持久 `message.id` 作为反馈目标；点赞/点踩在已有同项时撤回、否则打开含七类原因与备注的对话框；`put`/`delete` 成功后刷新按钮状态，`version-conflict` 用错误 `data.item` 权威项对账；fork 仍使用 seq 定位。 |
 | M27 | Chat/Trajectory 视图选择与固定 | 部分实现 | `AdwViewStack`/`AdwViewSwitcher` 可切换 Chat/Trajectory；选择未按会话持久化，Trajectory 内容缺失。 |
-| M28 | Session 图片共享缓存 | 缺失 | 无 attachmentId 授权读取、按会话缓存或 release 清理。 |
+| M28 | Session 图片共享缓存 | 已实现 | `ImageCache` 按 `(sessionId, attachmentId)` 合并并发读取并缓存解码字节；bridge `attachment/read` 接受完整 `ImageAttachmentRef` 走 Host `readImage` 授权读取；会话 release/archive 时释放缓存；用户消息、助手图片与队列缩略图共用。 |
 
 ## 4. C：工具与展示卡片
 
@@ -214,10 +214,10 @@
 | G08 | N21 | implemented-partial | bridge `subagent/list|prompt|interrupt` 已实现；GUI 接 list/open/interrupt，未接子代理 prompt 续接。 |
 | G09 | N22 | base-blocked | `packages/bundle/base/cordis.patch.yml` 第 366–367 行插入 agent-team，但本机探针 `ctx.get('agentTeams')` 为 undefined，bridge 返回 `-32040`。 |
 | G10 | M02/M18 | implemented | `session/queue/list|edit|remove|steer` 与 `session.inbox` 已实现并接入 QueueDock。 |
-| G11 | M07/M21/M28/C03/O06 | implemented-partial | bridge `attachment/upload|read` 与 prompt image 已实现；GUI 已接选择、拖放、剪贴板、用户图片画廊灯箱、read_image 缩略图与文件保存，仍无上传进度/重试与按会话图片缓存。 |
+| G11 | M07/M21/M28/C03/O06 | implemented-partial | bridge `attachment/upload|read`（含完整图片 ref 的 Host 授权读取）与 prompt image/file 已实现；GUI 已接选择、拖放、剪贴板、用户图片画廊灯箱、read_image 缩略图、文件保存、按会话图片缓存与 composer 附件暂存；仍无预上传进度与流式分块。 |
 | G12 | M11/M12/M22/S17 | implemented-partial | `session/projections` 的 tokenUsage/contextPressure/contextBreakdown/goal 已消费；`packages/bundle/web-app/cordis.patch.yml` 第 98–104 行的 `turnOutline`/`sessionStats` 不属于 base，协议明确省略，不伪造。 |
 | G13 | M25 | implemented-partial | GUI Trajectory 已消费 2000 条 raw SessionEvent 与 follow/page 快照，并实时追加 `session.event`；未订阅 `tool-result/watch`，不承诺原始未落盘中间值。 |
-| G14 | M26 | implemented | `message-feedback/list|put|delete` 与 `session-feedback/record` 已实现，GUI thumbs/Feedback 对话框已接线。 |
+| G14 | M26 | implemented | `message-feedback/list|put|delete` 与 `session-feedback/record` 已实现；GUI 以持久 message id 接线 thumbs、七类原因/备注对话框、撤回刷新与冲突权威项对账。 |
 | G15 | M16/A09 | implemented | `command/list|execute`、`skill/list`、`reference/list` 已实现并接入 trigger popups；`/plan off` 参数语义仍受上游命令目录限制。 |
 | G16 | S01/S03/S06/S10–S13/P03 | implemented | `settings/describe`、`settings/mutate(expectedRevision)` 与 `settings.updated` 已实现；GUI Settings Editor 与 Host Settings typed 表单已消费，复杂嵌套/secret 字段不自动生成。 |
 | G17 | S06/S12 | implemented-partial | GUI 已消费 `model/catalog` 动态模型目录；`model/discover` 与 `web-search/providers` 仍未接，base 仅 `llm-pi-ai` 可 discovery 且可能返回 `-32044`，web provider 列表可为空。 |
@@ -307,5 +307,6 @@
 - 项 8 设置与凭证：`SettingsRevisionCache` CAS revision 回写（describe 播种、`settings.updated` 通知回写、冲突 `data.actual` 回写，设置页与 locale/theme 保存共用）、API key 字符集校验（settings 与 onboarding）与保存后 `account/status` 验证探测已完成（`30dd7ec`）；插件 inventory 的 fiberPhase/diagnostic 行级诊断此前已实现（P01 剩 preset 分组）；子智能体模型授权由 S11 typed 表单覆盖，运行期 `subagent/model-selection-policy` 为 Host log-only 事件且 GUI 无子代理模型选择器。验证：`settings_cas_tests` 5 单测 + 设置对话框打开截图（describe 后显示 "7 namespaces available"），Models 页交互输入因 headless a11y 无法翻页未验证。
 - 项 9 滚动与流式渲染：`ScrollFollow` 尾部跟随（32px 回底阈值、上滚暂停、回底恢复、会话切换重置）、浮动回底按钮、右侧轮次轨道（已加载轮次、活动轮次按视口上沿高亮、点击跳转、提示预览、≥2 轮显示）、流式 Markdown 稳定前缀/尾部分离（按空行切分且拒绝未闭合代码围栏，live assistant 仅重绘尾部）、`session/end-seed` fork 边界分隔、fork 仅出现在最后一条已定稿 assistant 消息、四档 presentation policy（步骤分组 collapsed/history/none、运行过程明细、已结思考首行预览）与定稿时补齐动作行已完成（`0fd9937`）；同时修复 trajectory `ColumnView` 未放入 `ScrolledWindow` 导致窗口最小高度随事件数增长的问题。验证：新增 21 个单测（scroll 5、stream 7、turn nav 5、presentation 4）+ 1 个 fork 边界 transcript 单测，35 个测试套件全部通过；headless sway 截图确认 fork 分隔条、8 轮轨道与活动轮次高亮、点击 Turn 1 跳到首轮并出现回底按钮、回底后按钮隐藏且活动标记回到第 8 轮。未验证：真实模型流式（本机 `DEEPSEEK_API_KEY` 仍 401）、完整 turn outline（G12）、`collapseTiming`/`foldedReplies` 与整轮外折叠时机。
 - 项 10 插件管理：missing bundle 安装（`catalog_install_plan` 仅接受 missing + installTarget，排除 unsupported-platform/只读；包页“安装”按钮与启用开关自动改走 catalog 安装，registry target 带 saveExact）、安装 RPC 丢失自动 `wait-install` 对账且无结果时重读 inventory、更新 RPC 丢失后刷新 inventory 并重查版本、组件行显示 Host diagnostic、详情按 `name@version` 缓存并在失败时显示原因与重试、README 图片占位 chip 已完成（`9f36a76`）。验证：新增 5 个 model 单测（catalog 规则、detail key/version、diagnostic、图片占位）+ 1 个安装丢失对账 reducer 单测，35 个测试套件通过；headless 截图确认插件页与“自动授权审查”详情页（组件行、来源信息、README 图片占位）。未验证：真实 missing bundle 的安装按钮点击（测试 profile 中无 missing bundle）、真实安装/更新断线对账（无可用 API key，且不触发网络安装）。
-- 项 11–12：待实施。
+- 项 11 密钥与附件：`secret_mask` 完整移植上游格式表与掩码规则（PEM 块保留 BEGIN/END 行、URL 仅遮密码并按码点计数、前缀凭据保留 8 字符、重叠候选合并）；feedback 使用 `assistant/message` 持久 messageId，点赞/点踩撤回与七类原因/备注对话框、`version-conflict` 权威项对账；`ImageCache` 按会话+附件合并读取并在 release/archive 清理，bridge `attachment/read` 支持完整 `ImageAttachmentRef` 走 Host `readImage`；composer 附件暂存 rail（图片预览、文件卡、移除，按会话保留到成功回显后释放），文件提交经 `admitEncodedFile` 成为 durable ref，QueueDock 显示图片缩略图与文件 chip 已完成（`ae00389`）。验证：新增 17 个 secret mask 单测、5 个 image cache 单测、3 个 queue attachment 单测与 2 个 transcript message-id 单测，35 个集成测试二进制全部通过；bridge `tsc --noEmit`、Biome 与 66 个 node 单测通过；headless 截图确认附件暂存 rail 的图片预览、文件名与移除按钮。未验证：附件发送后的真实回显与队列附件视觉（测试会话无 live agent，prompt RPC 被 Host 拒绝）、模型请求中的文件块消费（无可用 API key）、真实 `version-conflict` 对账（需并发写反馈）。
+- 项 12：待实施。
 - 模型链路根因修复：bridge catalog 默认 provider 改为 `agentDefaultModel` 校验值（`deepseek-official`），App 采纳目录默认并纠正失效会话；BridgeCredentials 从 `*_API_KEY` 环境变量取种（`81f1d2c`）。
