@@ -13,7 +13,6 @@ use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 
 pub const DEFAULT_MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConnectionError {
@@ -349,7 +348,6 @@ struct Inner {
     closed_tx: broadcast::Sender<()>,
     approval_responder: RwLock<Option<Arc<dyn ApprovalResponder>>>,
     user_question_responder: RwLock<Option<Arc<dyn UserQuestionResponder>>>,
-    default_timeout: Duration,
 }
 
 #[derive(Clone)]
@@ -359,27 +357,13 @@ pub struct BridgeConnection {
 
 impl BridgeConnection {
     pub async fn connect_unix(path: impl AsRef<Path>) -> Result<Self, ConnectionError> {
-        Self::connect_unix_with_timeout(path, DEFAULT_TIMEOUT).await
-    }
-
-    pub async fn connect_unix_with_timeout(
-        path: impl AsRef<Path>,
-        timeout: Duration,
-    ) -> Result<Self, ConnectionError> {
         let stream = UnixStream::connect(path.as_ref())
             .await
             .map_err(|e| ConnectionError::Transport(e.to_string()))?;
-        Ok(Self::from_stream_with_timeout(stream, timeout))
+        Ok(Self::from_stream(stream))
     }
 
     pub fn from_stream<S>(stream: S) -> Self
-    where
-        S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
-    {
-        Self::from_stream_with_timeout(stream, DEFAULT_TIMEOUT)
-    }
-
-    pub fn from_stream_with_timeout<S>(stream: S, default_timeout: Duration) -> Self
     where
         S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
@@ -396,7 +380,6 @@ impl BridgeConnection {
             closed_tx,
             approval_responder: RwLock::new(None),
             user_question_responder: RwLock::new(None),
-            default_timeout,
         });
 
         let conn = Self { inner };
@@ -607,10 +590,7 @@ impl BridgeConnection {
                     Some(req_params) => {
                         let responder = { inner.approval_responder.read().unwrap().clone() };
                         if let Some(resp) = responder {
-                            match tokio::time::timeout(inner.default_timeout, resp.respond(req_params)).await {
-                                Ok(out) => out,
-                                Err(_) => ApprovalOutcome::Rejected,
-                            }
+                            resp.respond(req_params).await
                         } else {
                             ApprovalOutcome::Rejected
                         }
@@ -633,10 +613,7 @@ impl BridgeConnection {
                     Some(req_params) => {
                         let responder = { inner.user_question_responder.read().unwrap().clone() };
                         if let Some(resp) = responder {
-                            match tokio::time::timeout(inner.default_timeout, resp.respond(req_params)).await {
-                                Ok(res) => res,
-                                Err(_) => SdkUserQuestionResult::cancelled(),
-                            }
+                            resp.respond(req_params).await
                         } else {
                             SdkUserQuestionResult::cancelled()
                         }

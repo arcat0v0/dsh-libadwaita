@@ -17,8 +17,13 @@ export class BridgeCredentials extends CredentialProvider {
   private readonly records = new Map<CredentialKey, CredentialRecord>();
   private readonly baseUrls = new Map<string, string>();
 
-  constructor(ctx: Context) {
+  constructor(ctx: Context, ambient: Record<string, string | undefined> = process.env) {
     super(ctx);
+    for (const [ref, value] of Object.entries(ambient)) {
+      if (!ref.endsWith('_API_KEY')) continue;
+      if (value === undefined || value.length === 0) continue;
+      this.store.set(ref, value);
+    }
   }
 
   override resolve(ref: CredentialRef): Promise<ResolvedCredential | undefined> {

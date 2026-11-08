@@ -1876,7 +1876,6 @@ export class BridgeService extends Service {
     const creds = this.ctx.get('credentials') as unknown as BridgeCredentials | undefined;
 
     const providersList = llm?.listProviders?.() ?? [
-      { id: 'deepseek', name: 'DeepSeek' },
       { id: 'deepseek-official', name: 'DeepSeek Official' },
     ];
 
@@ -1900,9 +1899,19 @@ export class BridgeService extends Service {
       });
     }
 
+    const defaults = this.ctx.get('agentDefaultModel') as unknown as
+      | { currentSelection?: () => { provider?: string; model?: string } }
+      | undefined;
+    const selection = defaults?.currentSelection?.() ?? {};
+    const defaultProvider = results.some((provider) => provider.id === selection.provider)
+      ? (selection.provider as string)
+      : (results[0]?.id ?? 'deepseek-official');
+    const defaultModels = results.find((provider) => provider.id === defaultProvider)?.models ?? [];
+    const defaultModel = selection.model ?? defaultModels[0]?.id ?? 'deepseek-chat';
+
     return {
-      defaultProvider: 'deepseek',
-      defaultModel: 'deepseek-chat',
+      defaultProvider,
+      defaultModel,
       providers: results,
     };
   }

@@ -112,6 +112,7 @@ pub struct ConversationView {
     hero_composer_slot: gtk4::Box,
     hero_workspace_menu: gtk4::MenuButton,
     composer_dock: gtk4::Box,
+    takeover_slot: gtk4::Box,
     session_header: gtk4::Box,
     dock_button: gtk4::Button,
     switcher_bar: gtk4::Box,
@@ -389,6 +390,11 @@ impl ConversationView {
             .orientation(gtk4::Orientation::Vertical)
             .css_classes(["dsh-composer-shell"])
             .build();
+        let takeover_slot = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Vertical)
+            .visible(false)
+            .build();
+        composer_dock.prepend(&takeover_slot);
         conversation_box.append(&composer_dock);
         hero_composer_slot.append(composer.widget());
 
@@ -437,6 +443,7 @@ impl ConversationView {
             hero_composer_slot,
             hero_workspace_menu,
             composer_dock,
+            takeover_slot,
             session_header,
             dock_button,
             switcher_bar,
@@ -860,6 +867,26 @@ impl ConversationView {
                 }
             }
             self.composer_dock.append(self.composer.widget());
+        }
+        if self.takeover_slot.is_visible() {
+            self.composer.widget().set_visible(false);
+        }
+    }
+
+    pub fn set_takeover(&self, widget: Option<gtk4::Widget>) {
+        while let Some(child) = self.takeover_slot.first_child() {
+            self.takeover_slot.remove(&child);
+        }
+        match widget {
+            Some(widget) => {
+                self.takeover_slot.append(&widget);
+                self.takeover_slot.set_visible(true);
+                self.composer.widget().set_visible(false);
+            }
+            None => {
+                self.takeover_slot.set_visible(false);
+                self.composer.widget().set_visible(true);
+            }
         }
     }
 

@@ -7,7 +7,7 @@ import { BridgeCredentials } from '../../src/credentials.js';
 describe('BridgeCredentials', () => {
   it('resolves injected API key and describes metadata', async () => {
     const ctx = new Context();
-    const creds = new BridgeCredentials(ctx);
+    const creds = new BridgeCredentials(ctx, {});
     const ref = credentialRef('DEEPSEEK_API_KEY');
 
     const beforeDesc = await creds.describe(ref);
@@ -35,9 +35,25 @@ describe('BridgeCredentials', () => {
     assert.equal(item.masked, 'sk-...1234');
   });
 
+  it('seeds ambient API keys from the launch environment', async () => {
+    const ctx = new Context();
+    const creds = new BridgeCredentials(ctx, {
+      DEEPSEEK_API_KEY: 'sk-ambient1234',
+      PATH: '/usr/bin',
+      EMPTY_API_KEY: '',
+    });
+
+    const resolved = await creds.resolve(credentialRef('DEEPSEEK_API_KEY'));
+    assert.ok(resolved);
+    assert.equal(resolved.value, 'sk-ambient1234');
+
+    assert.equal(await creds.resolve(credentialRef('PATH' as never)), undefined);
+    assert.equal(await creds.resolve(credentialRef('EMPTY_API_KEY' as never)), undefined);
+  });
+
   it('rotates and removes credentials', async () => {
     const ctx = new Context();
-    const creds = new BridgeCredentials(ctx);
+    const creds = new BridgeCredentials(ctx, {});
     const ref = credentialRef('DEEPSEEK_API_KEY');
 
     await creds.inject('DEEPSEEK_API_KEY', 'sk-initial');
@@ -54,7 +70,7 @@ describe('BridgeCredentials', () => {
 
   it('supports record operations for provider grants', async () => {
     const ctx = new Context();
-    const creds = new BridgeCredentials(ctx);
+    const creds = new BridgeCredentials(ctx, {});
     const key = credentialKey('llm', 'deepseek');
 
     const before = await creds.readRecord(key);

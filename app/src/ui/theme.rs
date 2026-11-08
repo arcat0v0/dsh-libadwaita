@@ -281,6 +281,21 @@ menubutton.dsh-icon-button > button:active, menubutton.dsh-icon-button > button:
 .dsh-composer-shell {
   background: transparent;
 }
+.dsh-interaction-card {
+  margin: 6px 24px 10px;
+  border: 1px solid color-mix(in srgb, var(--warning-color) 35%, var(--border-color));
+  background: var(--window-bg-color);
+}
+.dsh-interaction-strip {
+  padding: 8px 16px;
+  border-radius: 11px 11px 0 0;
+  background: color-mix(in srgb, var(--warning-bg-color) 55%, transparent);
+}
+.dsh-approval-command {
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--window-fg-color) 6%, transparent);
+}
 .dsh-hero {
   background: transparent;
 }

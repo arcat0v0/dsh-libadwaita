@@ -11,7 +11,6 @@ use crate::schedule_model::{
 use crate::session::{SessionModel, SessionStatus};
 use crate::session_state::{SessionState, default_state_path};
 use crate::supervisor::{HarnessSupervisor, SupervisorConfig, resolve_bridge_bundle_path};
-use crate::ui::approval_dialog::{show_approval_dialog, show_user_question_dialog};
 use crate::ui::conversation::ConversationView;
 use crate::ui::copy::Copybook;
 use crate::ui::desktop::{
@@ -307,6 +306,7 @@ pub enum UiMessage {
         provider: String,
         model: String,
     },
+    ModelCatalogLoaded(ModelCatalogResult),
     GoalLoaded(Option<GoalView>),
     SessionListRefresh,
     RefreshModelCatalog,
@@ -336,6 +336,58 @@ struct GapRepairState {
     session_id: String,
     to_seq: i64,
     buffered: Vec<SessionEvent>,
+}
+
+enum PendingInteraction {
+    Approval {
+        key: u64,
+        req: ApprovalRequestParams,
+        responder: Option<oneshot::Sender<ApprovalOutcome>>,
+    },
+    Question {
+        key: u64,
+        req: SdkUserQuestionRequest,
+        responder: Option<oneshot::Sender<SdkUserQuestionResult>>,
+    },
+}
+
+impl PendingInteraction {
+    fn key(&self) -> u64 {
+        match self {
+            Self::Approval { key, .. } | Self::Question { key, .. } => *key,
+        }
+    }
+
+    fn display(&self) -> DisplayInteraction {
+        match self {
+            Self::Approval { key, req, .. } => DisplayInteraction::Approval {
+                key: *key,
+                req: req.clone(),
+            },
+            Self::Question { key, req, responder } => DisplayInteraction::Question {
+                key: *key,
+                req: req.clone(),
+                answerable: responder.is_some(),
+            },
+        }
+    }
+}
+
+enum DisplayInteraction {
+    Approval {
+        key: u64,
+        req: ApprovalRequestParams,
+    },
+    Question {
+        key: u64,
+        req: SdkUserQuestionRequest,
+        answerable: bool,
+    },
+}
+
+enum InteractionResolution {
+    Approval(ApprovalOutcome),
+    Question(SdkUserQuestionResult),
 }
 
 struct ApprovalHandler {
@@ -377,6 +429,8 @@ pub struct SessionController {
     active_session: Rc<RefCell<Option<SessionModel>>>,
     active_model: Rc<RefCell<String>>,
     active_provider: Rc<RefCell<String>>,
+    model_explicit: Rc<Cell<bool>>,
+    model_catalog: Rc<RefCell<Option<ModelCatalogResult>>>,
     active_preset: Rc<RefCell<String>>,
     window: gtk4::Window,
     sidebar: Rc<Sidebar>,
@@ -401,6 +455,9 @@ pub struct SessionController {
     gap_repair: Rc<RefCell<Option<GapRepairState>>>,
     pending_images: Rc<RefCell<Vec<PendingImage>>>,
     pending_auto_send: Rc<RefCell<Option<String>>>,
+    pending_interactions: Rc<RefCell<HashMap<String, Vec<PendingInteraction>>>>,
+    takeover_key: Rc<RefCell<Option<(String, u64)>>>,
+    interaction_seq: Rc<Cell<u64>>,
     prefs: Rc<RefCell<UiPrefs>>,
     prefs_path: PathBuf,
     unread_sessions: Rc<RefCell<HashSet<String>>>,
@@ -445,6 +502,8 @@ impl SessionController {
             active_session: Rc::new(RefCell::new(None)),
             active_model: Rc::new(RefCell::new("deepseek-chat".to_string())),
             active_provider: Rc::new(RefCell::new("deepseek".to_string())),
+            model_explicit: Rc::new(Cell::new(false)),
+            model_catalog: Rc::new(RefCell::new(None)),
             active_preset: Rc::new(RefCell::new("ptc".to_string())),
             window: main_window.window().clone().upcast(),
             sidebar,
@@ -472,6 +531,9 @@ impl SessionController {
             gap_repair: Rc::new(RefCell::new(None)),
             pending_images: Rc::new(RefCell::new(Vec::new())),
             pending_auto_send: Rc::new(RefCell::new(None)),
+            pending_interactions: Rc::new(RefCell::new(HashMap::new())),
+            takeover_key: Rc::new(RefCell::new(None)),
+            interaction_seq: Rc::new(Cell::new(1)),
             prefs: {
                 let path = default_ui_prefs_path();
                 Rc::new(RefCell::new(UiPrefs::load(&path)))
@@ -1792,6 +1854,28 @@ impl SessionController {
         self.load_session_list();
         self.load_workspaces();
         self.load_schedules();
+        self.adopt_default_model();
+    }
+
+    fn adopt_default_model(&self) {
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            let Some(conn) = conn_opt else {
+                return;
+            };
+            if let Ok(catalog) = conn
+                .call::<serde_json::Value, ModelCatalogResult>(
+                    METHOD_MODEL_CATALOG,
+                    serde_json::json!({}),
+                    Duration::from_secs(10),
+                )
+                .await
+            {
+                let _ = ui_sender.send(UiMessage::ModelCatalogLoaded(catalog));
+            }
+        });
     }
 
     pub fn load_session_list(&self) {
@@ -2824,6 +2908,7 @@ impl SessionController {
         let conn_arc = self.connection.clone();
         let model = self.active_model.borrow().clone();
         let provider = self.active_provider.borrow().clone();
+        let model_explicit = self.model_explicit.get();
         let preset = preset
             .map(str::to_string)
             .unwrap_or_else(|| self.active_preset.borrow().clone());
@@ -2835,8 +2920,8 @@ impl SessionController {
                 let create_params = SessionCreateParams {
                     session_id,
                     cwd: cwd_string,
-                    provider: Some(provider),
-                    model: Some(model),
+                    provider: if model_explicit { Some(provider) } else { None },
+                    model: if model_explicit { Some(model) } else { None },
                     agent_preset: Some(preset),
                 };
 
@@ -3000,6 +3085,7 @@ impl SessionController {
     pub fn switch_model(&self, provider: &str, model: &str) {
         let previous_provider = self.active_provider.borrow().clone();
         let previous_model = self.active_model.borrow().clone();
+        self.model_explicit.set(true);
         *self.active_model.borrow_mut() = model.to_string();
         *self.active_provider.borrow_mut() = provider.to_string();
         self.conversation_view.composer().set_model_label(model);
@@ -3889,10 +3975,14 @@ impl SessionController {
             while let Some(msg) = receiver.recv().await {
                 match msg {
                     UiMessage::Approval { req, tx } => {
-                        show_approval_dialog(&win, req, tx);
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.enqueue_approval(req, Some(tx));
+                        }
                     }
                     UiMessage::UserQuestion { req, tx } => {
-                        show_user_question_dialog(&win, req, tx);
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.enqueue_question(req, Some(tx));
+                        }
                     }
                     UiMessage::RefreshModelCatalog => {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
@@ -4030,6 +4120,7 @@ impl SessionController {
                                 buffer.set_text("");
                                 ctrl.submit_text(&text, false);
                             }
+                            ctrl.refresh_takeover();
                         }
                     }
                     UiMessage::Notification(notif) => match notif {
@@ -4095,6 +4186,11 @@ impl SessionController {
                             if let Some(ctrl) = ctrl_weak.upgrade() {
                                 ctrl.handle_status_notification(&p.session_id, &p.status);
                                 ctrl.update_continue_state();
+                            }
+                        }
+                        IncomingNotification::UserQuestionCancelled(p) => {
+                            if let Some(ctrl) = ctrl_weak.upgrade() {
+                                ctrl.cancel_pending_question(&p.session_id, &p.request_id);
                             }
                         }
                         IncomingNotification::SessionTitle(p) => {
@@ -4257,6 +4353,7 @@ impl SessionController {
                     UiMessage::ConnectionLost => {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
                             ctrl.pending_draft.borrow_mut().take();
+                            ctrl.fail_pending_interactions();
                             ctrl.show_connection_lost();
                         }
                     }
@@ -4580,10 +4677,46 @@ impl SessionController {
                             ctrl_weak.upgrade().and_then(|ctrl| ctrl.active_session_id());
                         if active_id.as_deref() == Some(session_id.as_str()) {
                             if let Some(ctrl) = ctrl_weak.upgrade() {
+                                let catalog = ctrl.model_catalog.borrow().clone();
+                                let provider_known = catalog
+                                    .as_ref()
+                                    .map(|catalog| {
+                                        catalog
+                                            .providers
+                                            .iter()
+                                            .any(|provider| provider.id == model.provider)
+                                    })
+                                    .unwrap_or(true);
+                                if !provider_known {
+                                    if let Some(catalog) = catalog {
+                                        ctrl.switch_model(
+                                            &catalog.default_provider,
+                                            &catalog.default_model,
+                                        );
+                                        continue;
+                                    }
+                                }
                                 *ctrl.active_provider.borrow_mut() = model.provider;
                                 *ctrl.active_model.borrow_mut() = model.model.clone();
                                 conv_view.composer().set_model_label(&model.model);
                             }
+                        }
+                    }
+                    UiMessage::ModelCatalogLoaded(catalog) => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            let known = catalog
+                                .providers
+                                .iter()
+                                .any(|provider| provider.id == *ctrl.active_provider.borrow());
+                            if !known || !ctrl.model_explicit.get() {
+                                *ctrl.active_provider.borrow_mut() =
+                                    catalog.default_provider.clone();
+                                *ctrl.active_model.borrow_mut() = catalog.default_model.clone();
+                                conv_view
+                                    .composer()
+                                    .set_model_label(&catalog.default_model);
+                            }
+                            *ctrl.model_catalog.borrow_mut() = Some(catalog);
                         }
                     }
                     UiMessage::ModelSwitchFailed { provider, model } => {
@@ -4702,8 +4835,9 @@ impl SessionController {
                         conv_view.schedules_page().handle_limits(value);
                     }
                     UiMessage::QuestionReopened(request) => {
-                        let (sender, _receiver) = oneshot::channel();
-                        show_user_question_dialog(&win, request, sender);
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.enqueue_question(request, None);
+                        }
                     }
                     UiMessage::FeedbackLoaded { session_id, items } => {
                         let active_id =
@@ -5194,6 +5328,228 @@ impl SessionController {
                 Err(err) => UiMessage::Toast(format!("No pending question: {}", err)),
             },
         );
+    }
+
+    fn next_interaction_key(&self) -> u64 {
+        let key = self.interaction_seq.get();
+        self.interaction_seq.set(key + 1);
+        key
+    }
+
+    pub fn enqueue_approval(
+        &self,
+        req: ApprovalRequestParams,
+        responder: Option<oneshot::Sender<ApprovalOutcome>>,
+    ) {
+        let key = self.next_interaction_key();
+        let session_id = req.session_id.clone();
+        self.pending_interactions
+            .borrow_mut()
+            .entry(session_id)
+            .or_default()
+            .push(PendingInteraction::Approval {
+                key,
+                req,
+                responder,
+            });
+        self.refresh_takeover();
+    }
+
+    pub fn enqueue_question(
+        &self,
+        req: SdkUserQuestionRequest,
+        responder: Option<oneshot::Sender<SdkUserQuestionResult>>,
+    ) {
+        let key = self.next_interaction_key();
+        let session_id = req.session_id.clone();
+        self.pending_interactions
+            .borrow_mut()
+            .entry(session_id)
+            .or_default()
+            .push(PendingInteraction::Question {
+                key,
+                req,
+                responder,
+            });
+        self.refresh_takeover();
+    }
+
+    pub fn cancel_pending_question(&self, session_id: &str, request_id: &str) {
+        {
+            let mut map = self.pending_interactions.borrow_mut();
+            let mut empty = false;
+            if let Some(queue) = map.get_mut(session_id) {
+                queue.retain(|item| match item {
+                    PendingInteraction::Question { req, .. } => req.request_id != request_id,
+                    PendingInteraction::Approval { .. } => true,
+                });
+                empty = queue.is_empty();
+            }
+            if empty {
+                map.remove(session_id);
+            }
+        }
+        self.refresh_takeover();
+    }
+
+    pub fn fail_pending_interactions(&self) {
+        let drained: Vec<PendingInteraction> = {
+            let mut map = self.pending_interactions.borrow_mut();
+            map.drain()
+                .flat_map(|(_, queue)| queue)
+                .collect::<Vec<_>>()
+        };
+        for item in drained {
+            match item {
+                PendingInteraction::Approval {
+                    responder: Some(tx), ..
+                } => {
+                    let _ = tx.send(ApprovalOutcome::Rejected);
+                }
+                PendingInteraction::Question {
+                    responder: Some(tx), ..
+                } => {
+                    let _ = tx.send(SdkUserQuestionResult::cancelled());
+                }
+                _ => {}
+            }
+        }
+        *self.takeover_key.borrow_mut() = None;
+        self.conversation_view.set_takeover(None);
+    }
+
+    fn active_session_events(&self) -> Vec<SessionEvent> {
+        let session = self.active_session.borrow();
+        let Some(session) = session.as_ref() else {
+            return Vec::new();
+        };
+        let mut events: Vec<SessionEvent> = Vec::new();
+        let (front, back) = session.raw_events().as_slices();
+        events.extend_from_slice(front);
+        events.extend_from_slice(back);
+        events
+    }
+
+    pub fn refresh_takeover(&self) {
+        if let Some((session_id, key)) = self.takeover_key.borrow().clone() {
+            let active = self.active_session_id();
+            let still_pending = self
+                .pending_interactions
+                .borrow()
+                .get(&session_id)
+                .map(|queue| queue.iter().any(|item| item.key() == key))
+                .unwrap_or(false);
+            if still_pending && active.as_deref() == Some(session_id.as_str()) {
+                return;
+            }
+            self.conversation_view.set_takeover(None);
+            *self.takeover_key.borrow_mut() = None;
+        }
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        let Some(display) = self
+            .pending_interactions
+            .borrow()
+            .get(&session_id)
+            .and_then(|queue| queue.first())
+            .map(PendingInteraction::display)
+        else {
+            return;
+        };
+        let weak = self.self_weak.borrow().clone();
+        match display {
+            DisplayInteraction::Approval { key, req } => {
+                let command = crate::interaction::approval_command(
+                    &self.active_session_events(),
+                    req.call_id.as_deref(),
+                );
+                let session = session_id.clone();
+                let on_answer: Rc<dyn Fn(ApprovalOutcome)> = Rc::new(move |outcome| {
+                    if let Some(ctrl) = weak.upgrade() {
+                        ctrl.resolve_interaction(
+                            &session,
+                            key,
+                            InteractionResolution::Approval(outcome),
+                        );
+                    }
+                });
+                let card =
+                    crate::ui::interaction_card::build_approval_card(&req, command, on_answer);
+                self.conversation_view.set_takeover(Some(card));
+                *self.takeover_key.borrow_mut() = Some((session_id, key));
+            }
+            DisplayInteraction::Question {
+                key,
+                req,
+                answerable,
+            } => {
+                let draft = crate::interaction::QuestionDraft::new(&req);
+                let session = session_id.clone();
+                let on_answer: Rc<dyn Fn(SdkUserQuestionResult)> = Rc::new(move |result| {
+                    if let Some(ctrl) = weak.upgrade() {
+                        ctrl.resolve_interaction(
+                            &session,
+                            key,
+                            InteractionResolution::Question(result),
+                        );
+                    }
+                });
+                let card = crate::ui::interaction_card::build_question_card(
+                    &req, draft, answerable, on_answer,
+                );
+                self.conversation_view.set_takeover(Some(card));
+                *self.takeover_key.borrow_mut() = Some((session_id, key));
+            }
+        }
+    }
+
+    fn resolve_interaction(&self, session_id: &str, key: u64, resolution: InteractionResolution) {
+        let pending = {
+            let mut map = self.pending_interactions.borrow_mut();
+            let mut removed = None;
+            let mut empty = false;
+            if let Some(queue) = map.get_mut(session_id) {
+                if let Some(position) = queue.iter().position(|item| item.key() == key) {
+                    removed = Some(queue.remove(position));
+                }
+                empty = queue.is_empty();
+            }
+            if empty {
+                map.remove(session_id);
+            }
+            removed
+        };
+        match (pending, resolution) {
+            (
+                Some(PendingInteraction::Approval {
+                    responder: Some(tx), ..
+                }),
+                InteractionResolution::Approval(outcome),
+            ) => {
+                let _ = tx.send(outcome);
+            }
+            (
+                Some(PendingInteraction::Question {
+                    responder: Some(tx), ..
+                }),
+                InteractionResolution::Question(result),
+            ) => {
+                let _ = tx.send(result);
+            }
+            _ => {}
+        }
+        let mounted = self
+            .takeover_key
+            .borrow()
+            .as_ref()
+            .map(|(session, mounted_key)| session == session_id && *mounted_key == key)
+            .unwrap_or(false);
+        if mounted {
+            *self.takeover_key.borrow_mut() = None;
+            self.conversation_view.set_takeover(None);
+        }
+        self.refresh_takeover();
     }
 
     pub fn load_account(&self) {

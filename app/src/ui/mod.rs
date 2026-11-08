@@ -1,4 +1,3 @@
-pub mod approval_dialog;
 pub mod brand;
 pub mod cards;
 pub mod composer;
@@ -9,6 +8,7 @@ pub mod desktop;
 pub mod files_panel;
 pub mod goal_bar;
 pub mod hero;
+pub mod interaction_card;
 pub mod layout;
 pub mod message_renderer;
 pub mod menu;

@@ -149,9 +149,9 @@ async fn test_fail_closed_approval_when_no_responder() {
 }
 
 #[tokio::test]
-async fn test_fail_closed_approval_on_responder_timeout() {
+async fn test_slow_approval_responder_is_not_cancelled() {
     let (client_io, mut server_io) = tokio::io::duplex(4096);
-    let conn = BridgeConnection::from_stream_with_timeout(client_io, Duration::from_millis(50));
+    let conn = BridgeConnection::from_stream(client_io);
 
     conn.set_approval_responder(|_req: ApprovalRequestParams| async {
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -167,7 +167,34 @@ async fn test_fail_closed_approval_on_responder_timeout() {
     let resp: JsonRpcResponse<ApprovalRequestResult> = serde_json::from_str(resp_str.trim()).unwrap();
 
     assert_eq!(resp.id, RequestId::from("srv-2"));
-    assert_eq!(resp.result.unwrap().outcome, ApprovalOutcome::Rejected);
+    assert_eq!(resp.result.unwrap().outcome, ApprovalOutcome::AllowedOnce);
+}
+
+#[tokio::test]
+async fn test_slow_question_responder_is_not_cancelled() {
+    let (client_io, mut server_io) = tokio::io::duplex(4096);
+    let conn = BridgeConnection::from_stream(client_io);
+
+    conn.set_user_question_responder(|_req: SdkUserQuestionRequest| async {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        SdkUserQuestionResult::answers(vec![UserQuestionAnswer {
+            id: "q1".to_string(),
+            selected: vec!["A".to_string()],
+        }])
+    });
+
+    let req = r#"{"jsonrpc":"2.0","id":"srv-3","method":"user-question/ask","params":{"requestId":"r1","sessionId":"s1","questions":[{"id":"q1","question":"Pick","options":[{"label":"A"}]}]}}"#;
+    server_io.write_all(format!("{}\n", req).as_bytes()).await.unwrap();
+
+    let mut buf = vec![0u8; 1024];
+    let n = server_io.read(&mut buf).await.unwrap();
+    let resp_str = String::from_utf8_lossy(&buf[..n]).to_string();
+    let resp: JsonRpcResponse<SdkUserQuestionResult> =
+        serde_json::from_str(resp_str.trim()).unwrap();
+
+    assert_eq!(resp.id, RequestId::from("srv-3"));
+    let result = resp.result.unwrap();
+    assert_eq!(result.answers.unwrap()[0].selected, vec!["A".to_string()]);
 }
 
 #[tokio::test]
