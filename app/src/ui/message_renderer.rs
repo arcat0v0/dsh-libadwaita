@@ -218,7 +218,16 @@ fn attach_link_handler(label: &gtk4::Label) {
     });
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MarkdownOptions {
+    pub image_placeholders: bool,
+}
+
 pub fn render_markdown(text: &str) -> gtk4::Box {
+    render_markdown_with(text, MarkdownOptions::default())
+}
+
+pub fn render_markdown_with(text: &str, options: MarkdownOptions) -> gtk4::Box {
     let container = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
         .spacing(6)
@@ -239,6 +248,10 @@ pub fn render_markdown(text: &str) -> gtk4::Box {
     let mut in_table = false;
     let mut table_rows: Vec<Vec<String>> = Vec::new();
     let mut current_cell = String::new();
+    let mut in_image = false;
+    let mut image_alt = String::new();
+    let mut image_dest = String::new();
+    let mut image_title = String::new();
 
     for event in parser {
         match event {
@@ -308,6 +321,16 @@ pub fn render_markdown(text: &str) -> gtk4::Box {
                 }
                 Tag::FootnoteDefinition(name) => {
                     current_markup.push_str(&format!("[{}] ", name));
+                }
+                Tag::Image {
+                    dest_url, title, ..
+                } => {
+                    if options.image_placeholders {
+                        in_image = true;
+                        image_alt.clear();
+                        image_dest = dest_url.to_string();
+                        image_title = title.to_string();
+                    }
                 }
                 _ => {}
             },
@@ -417,6 +440,14 @@ pub fn render_markdown(text: &str) -> gtk4::Box {
                     container.append(&grid);
                     table_rows.clear();
                 }
+                TagEnd::Image => {
+                    if in_image {
+                        in_image = false;
+                        append_markup_label(&container, &mut current_markup);
+                        let label = image_placeholder_label(&image_alt, &image_title, &image_dest);
+                        container.append(&build_readme_image_placeholder(&label, &image_dest));
+                    }
+                }
                 _ => {}
             },
             Event::Text(t) => {
@@ -424,6 +455,8 @@ pub fn render_markdown(text: &str) -> gtk4::Box {
                     code_block_content.push_str(&t);
                 } else if in_table {
                     current_cell.push_str(&t);
+                } else if in_image {
+                    image_alt.push_str(&t);
                 } else {
                     current_markup.push_str(&gtk4::glib::markup_escape_text(&t));
                 }
@@ -433,6 +466,8 @@ pub fn render_markdown(text: &str) -> gtk4::Box {
                     code_block_content.push_str(&c);
                 } else if in_table {
                     current_cell.push_str(&c);
+                } else if in_image {
+                    image_alt.push_str(&c);
                 } else {
                     current_markup.push_str(&format!(
                         "<tt>{}</tt>",
@@ -445,6 +480,8 @@ pub fn render_markdown(text: &str) -> gtk4::Box {
                     code_block_content.push('\n');
                 } else if in_table {
                     current_cell.push(' ');
+                } else if in_image {
+                    image_alt.push(' ');
                 } else {
                     current_markup.push(' ');
                 }
@@ -458,6 +495,8 @@ pub fn render_markdown(text: &str) -> gtk4::Box {
             Event::HardBreak => {
                 if in_code_block {
                     code_block_content.push('\n');
+                } else if in_image {
+                    image_alt.push(' ');
                 } else {
                     current_markup.push_str("\n");
                 }
@@ -489,6 +528,74 @@ pub fn render_markdown(text: &str) -> gtk4::Box {
     }
 
     container
+}
+
+fn append_markup_label(container: &gtk4::Box, markup: &mut String) {
+    if markup.is_empty() {
+        return;
+    }
+    let label = gtk4::Label::builder()
+        .use_markup(true)
+        .label(&*markup)
+        .wrap(true)
+        .wrap_mode(gtk4::pango::WrapMode::WordChar)
+        .halign(gtk4::Align::Start)
+        .xalign(0.0)
+        .selectable(true)
+        .build();
+    attach_link_handler(&label);
+    container.append(&label);
+    markup.clear();
+}
+
+pub fn image_placeholder_label(alt: &str, title: &str, destination: &str) -> String {
+    let candidate = [alt, title]
+        .into_iter()
+        .map(str::trim)
+        .find(|text| !text.is_empty());
+    let text = match candidate {
+        Some(text) => text.to_string(),
+        None => destination
+            .rsplit(|character| character == '/' || character == '\\')
+            .next()
+            .unwrap_or(destination)
+            .trim()
+            .to_string(),
+    };
+    let label = if text.is_empty() {
+        "图片".to_string()
+    } else {
+        format!("图片：{text}")
+    };
+    if label.chars().count() > 60 {
+        let mut truncated: String = label.chars().take(59).collect();
+        truncated.push('…');
+        truncated
+    } else {
+        label
+    }
+}
+
+fn build_readme_image_placeholder(label: &str, destination: &str) -> gtk4::Box {
+    let row = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing(8)
+        .css_classes(["dsh-readme-image"])
+        .build();
+    row.append(&gtk4::Image::from_icon_name("image-x-generic-symbolic"));
+    row.append(
+        &gtk4::Label::builder()
+            .label(label)
+            .wrap(true)
+            .xalign(0.0)
+            .halign(gtk4::Align::Start)
+            .css_classes(["dim-label", "caption"])
+            .build(),
+    );
+    if !destination.is_empty() {
+        row.set_tooltip_text(Some(destination));
+    }
+    row
 }
 
 fn build_table(rows: &[Vec<String>]) -> gtk4::ScrolledWindow {

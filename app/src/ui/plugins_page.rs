@@ -384,6 +384,50 @@ pub mod model {
                 && pkg.source.as_deref() != Some(target.spec.as_str()))
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct CatalogInstallPlan {
+        pub name: String,
+        pub spec: String,
+        pub version: String,
+        pub local: bool,
+        pub save_exact: bool,
+    }
+
+    /// A bundle the profile declares but whose files are missing installs from
+    /// its catalog target; an unsupported platform or a Host-protected package
+    /// cannot be installed this way.
+    pub fn catalog_install_plan(pkg: &PackageView) -> Option<CatalogInstallPlan> {
+        if pkg.availability != "missing" || pkg.read_only_reason.is_some() {
+            return None;
+        }
+        if pkg
+            .error
+            .as_ref()
+            .is_some_and(|error| error.code == "unsupported-platform")
+        {
+            return None;
+        }
+        let target = pkg.install_target.as_ref()?;
+        let local = target.spec.starts_with("link:");
+        Some(CatalogInstallPlan {
+            name: pkg.name.clone(),
+            spec: target.spec.clone(),
+            version: target.version.clone(),
+            local,
+            save_exact: !local,
+        })
+    }
+
+    pub fn detail_version(pkg: &PackageView) -> Option<&str> {
+        pkg.version
+            .as_deref()
+            .or_else(|| pkg.install_target.as_ref().map(|target| target.version.as_str()))
+    }
+
+    pub fn detail_key(name: &str, version: Option<&str>) -> String {
+        format!("{}@{}", name, version.unwrap_or_default())
+    }
+
     pub fn package_tags(pkg: &PackageView) -> Vec<PackageTag> {
         let mut tags = Vec::new();
         if EXPERIMENTAL_BUNDLES.contains(&pkg.name.as_str()) {
@@ -415,6 +459,13 @@ pub mod model {
             (true, Some(RowPhase::Failed)) => "异常",
             (true, Some(RowPhase::Unloading)) => "卸载中",
         }
+    }
+
+    pub fn row_diagnostic(row: &PackageRow) -> Option<&str> {
+        row.diagnostic
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
     }
 
     pub fn row_dot(row: &PackageRow) -> DotState {
@@ -903,6 +954,9 @@ pub mod model {
         InstallResult {
             result: PluginChangeResult,
         },
+        LostResult {
+            reason: String,
+        },
         WaitInstallResult {
             result: Option<PluginChangeResult>,
         },
@@ -1078,6 +1132,20 @@ pub mod model {
                 } else {
                     state.phase = InstallPhase::Failed;
                     state.failure = Some(classify_install_failure(&result));
+                }
+            }
+            InstallAction::LostResult { reason } => {
+                if state.phase != InstallPhase::Done {
+                    state.phase = InstallPhase::Unconfirmed;
+                    state.failure = Some(InstallFailureDetails {
+                        reason: reason.clone(),
+                        code: Some("operation-error".to_string()),
+                        kind: None,
+                        stage: Some("install".to_string()),
+                        failed_at: None,
+                        pending_builds: Vec::new(),
+                        uncertainty: Some(reason),
+                    });
                 }
             }
             InstallAction::WaitInstallResult { result } => match result {
@@ -1973,6 +2041,8 @@ struct PluginsState {
     market: Cell<bool>,
     market_state: RefCell<MarketState>,
     details: RefCell<HashMap<String, PluginBundleDetail>>,
+    detail_errors: RefCell<HashMap<String, String>>,
+    detail_loading: RefCell<HashSet<String>>,
     forms: RefCell<Vec<SettingsDescriptor>>,
     drafts: RefCell<HashMap<String, serde_json::Map<String, serde_json::Value>>>,
     providers: RefCell<Option<(Vec<ProviderOption>, Vec<ProviderOption>)>>,
@@ -2124,6 +2194,14 @@ fn dim_label(text: &str) -> gtk4::Label {
         .xalign(0.0)
         .css_classes(["dim-label", "caption"])
         .build()
+}
+
+fn failed_detail() -> PluginBundleDetail {
+    PluginBundleDetail {
+        status: "failed".to_string(),
+        origin: None,
+        markdown: None,
+    }
 }
 
 fn tag_label(text: &str, tone: &str) -> gtk4::Label {
@@ -2507,6 +2585,8 @@ impl PluginsPage {
             market: Cell::new(false),
             market_state: RefCell::new(MarketState::default()),
             details: RefCell::new(HashMap::new()),
+            detail_errors: RefCell::new(HashMap::new()),
+            detail_loading: RefCell::new(HashSet::new()),
             forms: RefCell::new(Vec::new()),
             drafts: RefCell::new(HashMap::new()),
             providers: RefCell::new(None),
@@ -2894,9 +2974,22 @@ impl PluginsPage {
 
     pub fn reload_after_change(&self) {
         self.state.details.borrow_mut().clear();
+        self.state.detail_errors.borrow_mut().clear();
         self.load_inventory();
         self.refresh_current_view();
         self.market_reload_install_status();
+    }
+
+    fn clear_detail_for(&self, name: &str) {
+        let prefix = format!("{name}@");
+        self.state
+            .details
+            .borrow_mut()
+            .retain(|key, _| !key.starts_with(&prefix));
+        self.state
+            .detail_errors
+            .borrow_mut()
+            .retain(|key, _| !key.starts_with(&prefix));
     }
 
     fn market_reload_install_status(&self) {
@@ -4607,7 +4700,7 @@ impl PluginsPage {
                 } else if change.application == "failed" {
                     self.toast(&change_failure_text(&change, FailedAction::Uninstall));
                 } else {
-                    self.state.details.borrow_mut().remove(&name);
+                    self.clear_detail_for(&name);
                 }
                 if change.application != "failed" {
                     self.load_inventory();
@@ -4778,6 +4871,7 @@ impl PluginsPage {
         }
 
         let mut model = self.state.install_model.borrow_mut();
+        let mut lost_request = None;
         match result {
             Ok(change) => {
                 reduce_install(
@@ -4791,38 +4885,18 @@ impl PluginsPage {
                 }
             }
             Err(err) => {
-                let failure_change = PluginChangeResult {
-                    changed: false,
-                    application: "failed".to_string(),
-                    restart_reason: None,
-                    stage: "install".to_string(),
-                    target: model.spec.clone(),
-                    enabled: Some(true),
-                    error: Some(PluginChangeError {
-                        code: "operation-error".to_string(),
-                        diagnostic: Some(err),
-                        incompatible: None,
-                    }),
-                    package_result: None,
-                    bundle: None,
-                    version: None,
-                    pending_builds: None,
-                    approved_builds: None,
-                    registries: None,
-                    failed_at: None,
-                };
-                reduce_install(
-                    &mut model,
-                    InstallAction::InstallResult {
-                        result: failure_change,
-                    },
-                );
+                reduce_install(&mut model, InstallAction::LostResult { reason: err });
+                lost_request = model.request_id.clone();
             }
         }
         model.market_title = None;
         drop(model);
         self.render_install_dialog_content();
         self.update_add_button();
+        if let Some(request_id) = lost_request {
+            self.load_inventory();
+            self.with_controller(|ctrl| ctrl.plugin_wait_install(&request_id));
+        }
     }
 
     pub fn handle_cancel_install_done(&self, result: Result<PluginCancellationResult, String>) {
@@ -4855,17 +4929,23 @@ impl PluginsPage {
 
     pub fn handle_wait_install_done(&self, result: Result<Option<PluginChangeResult>, String>) {
         let mut model = self.state.install_model.borrow_mut();
-        match result {
+        let reload = match result {
             Ok(change) => {
+                let unknown = change.is_none();
                 reduce_install(&mut model, InstallAction::WaitInstallResult { result: change });
+                unknown || model.phase == InstallPhase::Done
             }
             Err(_) => {
                 reduce_install(&mut model, InstallAction::WaitInstallResult { result: None });
+                true
             }
-        }
+        };
         drop(model);
         self.render_install_dialog_content();
         self.update_add_button();
+        if reload {
+            self.load_inventory();
+        }
     }
 
     pub fn handle_registries_loaded(&self, result: Result<PluginRegistries, String>) {
@@ -4941,6 +5021,16 @@ impl PluginsPage {
                     restore: None,
                 };
                 *self.state.update_result.borrow_mut() = Some(fake);
+                let name = self
+                    .state
+                    .update_pkg_info
+                    .borrow()
+                    .as_ref()
+                    .map(|(name, _, _, _)| name.clone());
+                self.load_inventory();
+                if let Some(name) = name {
+                    self.recheck_versions(&name);
+                }
             }
         }
         self.render_update_dialog_content();
@@ -4981,7 +5071,7 @@ impl PluginsPage {
         };
         self.render_package_page(&pkg, from_more);
         self.stack.set_visible_child_name("package");
-        self.load_detail(&pkg.name);
+        self.load_detail(&pkg);
     }
 
     pub fn open_plugin_target(&self, target: &str) {
@@ -5368,6 +5458,22 @@ impl PluginsPage {
     }
 
     fn toggle_bundle(&self, name: &str, enable: bool) {
+        if enable {
+            let pkg = self
+                .state
+                .packages
+                .borrow()
+                .iter()
+                .find(|pkg| pkg.name == name)
+                .cloned();
+            if let Some(pkg) = pkg {
+                if let Some(plan) = catalog_install_plan(&pkg) {
+                    let title = pkg.title.clone().unwrap_or_else(|| pkg.name.clone());
+                    self.start_catalog_install(plan, title, true);
+                    return;
+                }
+            }
+        }
         let action = if enable {
             FailedAction::Enable
         } else {
@@ -5403,8 +5509,13 @@ impl PluginsPage {
         true
     }
 
-    fn load_detail(&self, name: &str) {
-        if self.state.details.borrow().contains_key(name) {
+    fn load_detail(&self, pkg: &PackageView) {
+        let version = detail_version(pkg);
+        let key = detail_key(&pkg.name, version);
+        if self.state.details.borrow().contains_key(&key) {
+            return;
+        }
+        if !self.state.detail_loading.borrow_mut().insert(key.clone()) {
             return;
         }
         let conn_arc = self
@@ -5412,10 +5523,11 @@ impl PluginsPage {
             .and_then(|weak| weak.upgrade())
             .map(|ctrl| ctrl.connection_handle());
         let Some(conn_arc) = conn_arc else {
+            self.state.detail_loading.borrow_mut().remove(&key);
             return;
         };
         let params = PluginDetailParams {
-            name: name.to_string(),
+            name: pkg.name.clone(),
             language: Some("zh".to_string()),
             npm_file_sources: Some(NPM_FILE_SOURCES.iter().map(|s| s.to_string()).collect()),
         };
@@ -5426,21 +5538,33 @@ impl PluginsPage {
             Duration::from_secs(20),
         );
         let page = self.clone();
-        let name = name.to_string();
+        let name = pkg.name.clone();
         gtk4::glib::MainContext::default().spawn_local(async move {
             let mut rx = rx;
-            let outcome = match rx.recv().await {
-                Some(Ok(result)) => {
-                    serde_json::from_value::<PluginBundleDetail>(result.result).ok()
-                }
-                _ => None,
+            let outcome = rx.recv().await;
+            page.state.detail_loading.borrow_mut().remove(&key);
+            let error = match &outcome {
+                Some(Ok(result)) => match serde_json::from_value::<PluginBundleDetail>(result.result.clone()) {
+                    Ok(detail) => {
+                        page.state.detail_errors.borrow_mut().remove(&key);
+                        page.state.details.borrow_mut().insert(key.clone(), detail);
+                        None
+                    }
+                    Err(err) => Some(format!("无效的详情响应：{err}")),
+                },
+                Some(Err(err)) => Some(err.to_string()),
+                None => Some("与 DSH 的连接中断".to_string()),
             };
-            let detail = outcome.unwrap_or(PluginBundleDetail {
-                status: "failed".to_string(),
-                origin: None,
-                markdown: None,
-            });
-            page.state.details.borrow_mut().insert(name.clone(), detail);
+            if let Some(message) = error {
+                page.state
+                    .detail_errors
+                    .borrow_mut()
+                    .insert(key.clone(), message);
+                page.state
+                    .details
+                    .borrow_mut()
+                    .insert(key.clone(), failed_detail());
+            }
             if let View::Package {
                 name: open_name,
                 from_more,
@@ -5462,7 +5586,7 @@ impl PluginsPage {
         });
     }
 
-    fn detail_section(&self, name: &str) -> gtk4::Box {
+    fn detail_section(&self, pkg: &PackageView) -> gtk4::Box {
         let box_ = gtk4::Box::builder()
             .orientation(gtk4::Orientation::Vertical)
             .spacing(6)
@@ -5474,9 +5598,14 @@ impl PluginsPage {
                 .halign(gtk4::Align::Start)
                 .build(),
         );
-        let detail = self.state.details.borrow().get(name).cloned();
+        let key = detail_key(&pkg.name, detail_version(pkg));
+        if !self.state.details.borrow().contains_key(&key) {
+            self.load_detail(pkg);
+        }
+        let detail = self.state.details.borrow().get(&key).cloned();
+        let loading = self.state.detail_loading.borrow().contains(&key);
         match detail {
-            None => {
+            None if loading => {
                 let row = gtk4::Box::builder()
                     .orientation(gtk4::Orientation::Horizontal)
                     .spacing(8)
@@ -5485,19 +5614,71 @@ impl PluginsPage {
                 row.append(&gtk4::Label::new(Some("正在读取详细介绍")));
                 box_.append(&row);
             }
+            None => {
+                box_.append(&self.detail_failure_box(
+                    pkg,
+                    &key,
+                    "无法连接 DSH 读取详细介绍",
+                ));
+            }
             Some(detail) => match detail.status.as_str() {
                 "found" => {
                     let markdown = detail.markdown.unwrap_or_default();
                     if markdown.trim().is_empty() {
                         box_.append(&dim_label("暂无详细介绍"));
                     } else {
-                        box_.append(&crate::ui::message_renderer::render_markdown(&markdown));
+                        box_.append(&crate::ui::message_renderer::render_markdown_with(
+                            &markdown,
+                            crate::ui::message_renderer::MarkdownOptions {
+                                image_placeholders: true,
+                            },
+                        ));
                     }
                 }
                 "none" => box_.append(&dim_label("暂无详细介绍")),
-                _ => box_.append(&dim_label("无法读取详细介绍")),
+                _ => {
+                    let reason = self
+                        .state
+                        .detail_errors
+                        .borrow()
+                        .get(&key)
+                        .map(|error| market::detail_failure_text(error))
+                        .unwrap_or("无法读取详细介绍");
+                    box_.append(&self.detail_failure_box(pkg, &key, reason));
+                }
             },
         }
+        box_
+    }
+
+    fn detail_failure_box(&self, pkg: &PackageView, key: &str, reason: &str) -> gtk4::Box {
+        let box_ = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Horizontal)
+            .spacing(8)
+            .build();
+        box_.append(
+            &gtk4::Label::builder()
+                .label(reason)
+                .wrap(true)
+                .xalign(0.0)
+                .hexpand(true)
+                .css_classes(["dim-label", "caption"])
+                .build(),
+        );
+        let retry = gtk4::Button::builder()
+            .label("重试")
+            .css_classes(["flat"])
+            .build();
+        let page = self.clone();
+        let pkg = pkg.clone();
+        let key = key.to_string();
+        retry.connect_clicked(move |_| {
+            page.state.details.borrow_mut().remove(&key);
+            page.state.detail_errors.borrow_mut().remove(&key);
+            page.load_detail(&pkg);
+            page.refresh_current_view();
+        });
+        box_.append(&retry);
         box_
     }
 
@@ -5522,6 +5703,19 @@ impl PluginsPage {
         let busy = self.state.busy.borrow().contains_key(&pkg.name);
         if busy {
             actions.append(&gtk4::Spinner::builder().spinning(true).build());
+        }
+        if let Some(plan) = catalog_install_plan(pkg) {
+            let install = gtk4::Button::builder()
+                .label("安装")
+                .css_classes(["suggested-action"])
+                .sensitive(!busy)
+                .build();
+            let page = self.clone();
+            let title = pkg.title.clone().unwrap_or_else(|| pkg.name.clone());
+            install.connect_clicked(move |_| {
+                page.start_catalog_install(plan.clone(), title.clone(), true);
+            });
+            actions.append(&install);
         }
         if pkg.updatable {
             let cur_ver = pkg.version.clone().unwrap_or_default();
@@ -5650,9 +5844,9 @@ impl PluginsPage {
         }
 
         if pkg.availability != "missing" {
-            self.package_box.append(&self.detail_section(&pkg.name));
             self.package_box.append(&self.rows_section(pkg));
         }
+        self.package_box.append(&self.detail_section(pkg));
         if pkg.updatable {
             self.package_box.append(&self.version_section(pkg));
         }
@@ -5758,6 +5952,22 @@ impl PluginsPage {
                     .build(),
             );
             text.append(&dim_label(row_state_text(row)));
+            if let Some(diagnostic) = row_diagnostic(row) {
+                let classes = if row.phase == Some(RowPhase::Failed) {
+                    vec!["error", "caption"]
+                } else {
+                    vec!["dim-label", "caption"]
+                };
+                text.append(
+                    &gtk4::Label::builder()
+                        .label(diagnostic)
+                        .wrap(true)
+                        .xalign(0.0)
+                        .halign(gtk4::Align::Start)
+                        .css_classes(classes)
+                        .build(),
+                );
+            }
             if row.title.is_some() && row.title.as_deref() != Some(row.row_id.as_str()) {
                 text.append(
                     &gtk4::Label::builder()
@@ -7014,9 +7224,58 @@ impl PluginsPage {
         }
     }
 
+    fn start_catalog_install(
+        &self,
+        plan: CatalogInstallPlan,
+        title: String,
+        enabled: bool,
+    ) {
+        if is_install_pending(self.state.install_model.borrow().phase) {
+            self.open_install_dialog();
+            return;
+        }
+        let request_id = format!("req-{}", gtk4::glib::uuid_string_random());
+        let registry_url = self.install_registry_url();
+        {
+            let mut model = self.state.install_model.borrow_mut();
+            model.spec = plan.spec.clone();
+            model.market_title = Some(title);
+            model.input_error = None;
+            model.subject = Some(InstallSubjectInfo {
+                spec: plan.spec.clone(),
+                kind: if plan.local { "path" } else { "registry" }.to_string(),
+                name: Some(plan.name.clone()),
+                version: Some(plan.version.clone()),
+                description: None,
+                bundle: Some(true),
+                registry: registry_url.clone(),
+                host: None,
+                bundled: false,
+            });
+            reduce_install(
+                &mut model,
+                InstallAction::StartInstall {
+                    request_id: request_id.clone(),
+                    approved_builds: Vec::new(),
+                },
+            );
+        }
+        self.open_install_dialog();
+        self.refresh_current_view();
+        self.with_controller(move |ctrl| {
+            ctrl.plugin_install(
+                &plan.spec,
+                Some(enabled),
+                if plan.save_exact { Some(true) } else { None },
+                Some(request_id),
+                None,
+                registry_url,
+            );
+        });
+    }
+
     fn start_install_bundle(&self) {
-        let (spec, approved_builds) = {
-            let model = self.state.install_model.borrow();
+        let (spec, approved_builds) = {            let model = self.state.install_model.borrow();
             (model.spec.clone(), model.approved_builds.clone())
         };
         if spec.is_empty() {
@@ -7577,6 +7836,16 @@ impl PluginsPage {
                 .build(),
         );
         box_.append(&dim_label("与 Host 通信中断，请核对安装状态。"));
+        let uncertainty = self
+            .state
+            .install_model
+            .borrow()
+            .failure
+            .as_ref()
+            .and_then(|failure| failure.uncertainty.clone());
+        if let Some(reason) = uncertainty {
+            box_.append(&dim_label(&reason));
+        }
         content.append(&box_);
 
         let buttons = gtk4::Box::builder()
@@ -8054,6 +8323,7 @@ impl PluginsPage {
                             .build(),
                     );
                     outcome_box.append(&dim_label(&reason));
+                    outcome_box.append(&dim_label("已刷新插件清单，以实际状态为准。"));
                 }
             }
             content.append(&outcome_box);

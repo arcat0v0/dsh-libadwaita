@@ -577,3 +577,68 @@ fn test_terminal_folding() {
     assert_eq!(tail[0], "line 15");
     assert_eq!(tail[5], "line 20");
 }
+
+#[test]
+fn test_install_result_lost_reconciles_through_wait() {
+    let mut state = InstallStateModel::default();
+    state.phase = InstallPhase::Confirmed;
+    reduce_install(
+        &mut state,
+        InstallAction::StartInstall {
+            request_id: "req-lost".to_string(),
+            approved_builds: Vec::new(),
+        },
+    );
+    reduce_install(
+        &mut state,
+        InstallAction::LostResult {
+            reason: "与 DSH 的连接中断".to_string(),
+        },
+    );
+    assert_eq!(state.phase, InstallPhase::Unconfirmed);
+    assert_eq!(state.request_id.as_deref(), Some("req-lost"));
+    assert_eq!(
+        state.failure.as_ref().and_then(|failure| failure.uncertainty.as_deref()),
+        Some("与 DSH 的连接中断")
+    );
+
+    reduce_install(
+        &mut state,
+        InstallAction::WaitInstallResult { result: None },
+    );
+    assert_eq!(state.phase, InstallPhase::Unconfirmed);
+
+    let applied = PluginChangeResult {
+        changed: true,
+        application: "applied".to_string(),
+        restart_reason: None,
+        stage: "install".to_string(),
+        target: "pkg".to_string(),
+        enabled: Some(true),
+        error: None,
+        package_result: None,
+        bundle: Some("pkg".to_string()),
+        version: Some("1.0.0".to_string()),
+        pending_builds: None,
+        approved_builds: None,
+        registries: None,
+        failed_at: None,
+    };
+    reduce_install(
+        &mut state,
+        InstallAction::WaitInstallResult {
+            result: Some(applied),
+        },
+    );
+    assert_eq!(state.phase, InstallPhase::Done);
+    assert_eq!(state.installed_name.as_deref(), Some("pkg"));
+    assert_eq!(state.installed_version.as_deref(), Some("1.0.0"));
+
+    reduce_install(
+        &mut state,
+        InstallAction::LostResult {
+            reason: "late error".to_string(),
+        },
+    );
+    assert_eq!(state.phase, InstallPhase::Done);
+}

@@ -332,6 +332,11 @@ menubutton.dsh-icon-button > button:active, menubutton.dsh-icon-button > button:
 .dsh-fork-boundary {
   padding: 2px 24px;
 }
+.dsh-readme-image {
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--window-fg-color) 5%, transparent);
+}
 .dsh-hero {
   background: transparent;
 }

@@ -1,3 +1,4 @@
+use dsh_libadwaita::ui::message_renderer::image_placeholder_label;
 use dsh_libadwaita::ui::plugins_page::model::*;
 use serde_json::json;
 
@@ -388,4 +389,136 @@ fn test_unavailable_bundle_is_not_installed_and_flags_error() {
         codex.install_target.as_ref().map(|target| target.version.as_str()),
         Some("1.1.0")
     );
+}
+
+fn missing_bundle() -> PackageView {
+    PackageView {
+        name: "@community/missing".to_string(),
+        official: false,
+        availability: "missing".to_string(),
+        install_target: Some(InstallTarget {
+            spec: "@community/missing@1.2.3".to_string(),
+            version: "1.2.3".to_string(),
+        }),
+        version: None,
+        description: None,
+        title: Some("Missing bundle".to_string()),
+        meta_description: None,
+        icon: None,
+        meta_error: None,
+        installed: false,
+        listed_by_default: None,
+        source: None,
+        optional: false,
+        removable: false,
+        updatable: false,
+        enabled: false,
+        read_only_reason: None,
+        error: None,
+        rows: Vec::new(),
+    }
+}
+
+#[test]
+fn test_catalog_install_plan_follows_upstream_missing_rules() {
+    let pkg = missing_bundle();
+    let plan = catalog_install_plan(&pkg).expect("missing bundle with target installs");
+    assert_eq!(plan.name, "@community/missing");
+    assert_eq!(plan.spec, "@community/missing@1.2.3");
+    assert_eq!(plan.version, "1.2.3");
+    assert!(!plan.local);
+    assert!(plan.save_exact);
+
+    let mut linked = missing_bundle();
+    linked.install_target = Some(InstallTarget {
+        spec: "link:/tmp/missing".to_string(),
+        version: "0.0.0".to_string(),
+    });
+    let plan = catalog_install_plan(&linked).unwrap();
+    assert!(plan.local);
+    assert!(!plan.save_exact);
+
+    let mut installed = missing_bundle();
+    installed.availability = "installation".to_string();
+    assert!(catalog_install_plan(&installed).is_none());
+
+    let mut no_target = missing_bundle();
+    no_target.install_target = None;
+    assert!(catalog_install_plan(&no_target).is_none());
+
+    let mut errored = missing_bundle();
+    errored.error = Some(PackageError {
+        code: "unsupported-platform".to_string(),
+        diagnostic: None,
+    });
+    assert!(catalog_install_plan(&errored).is_none());
+
+    let mut recoverable = missing_bundle();
+    recoverable.error = Some(PackageError {
+        code: "broken-bundle".to_string(),
+        diagnostic: Some("files missing".to_string()),
+    });
+    assert!(catalog_install_plan(&recoverable).is_some());
+
+    let mut protected = missing_bundle();
+    protected.read_only_reason = Some("builtin".to_string());
+    assert!(catalog_install_plan(&protected).is_none());
+}
+
+#[test]
+fn test_detail_version_and_key_include_offered_version() {
+    let mut pkg = missing_bundle();
+    assert_eq!(detail_version(&pkg), Some("1.2.3"));
+    assert_eq!(detail_key(&pkg.name, detail_version(&pkg)), "@community/missing@1.2.3");
+
+    pkg.version = Some("1.2.4".to_string());
+    assert_eq!(detail_version(&pkg), Some("1.2.4"));
+
+    pkg.version = None;
+    pkg.install_target = None;
+    assert_eq!(detail_version(&pkg), None);
+    assert_eq!(detail_key("pkg", None), "pkg@");
+}
+
+#[test]
+fn test_row_diagnostic_trims_and_skips_empty() {
+    let mut row = PackageRow {
+        entry_id: None,
+        row_id: "row".to_string(),
+        module_name: "module".to_string(),
+        title: None,
+        description: None,
+        icon: None,
+        meta_error: None,
+        enabled: true,
+        phase: Some(RowPhase::Failed),
+        diagnostic: Some("  boom  ".to_string()),
+        read_only_reason: None,
+    };
+    assert_eq!(row_diagnostic(&row), Some("boom"));
+    row.diagnostic = Some("   ".to_string());
+    assert_eq!(row_diagnostic(&row), None);
+    row.diagnostic = None;
+    assert_eq!(row_diagnostic(&row), None);
+}
+
+#[test]
+fn test_readme_image_placeholder_labels() {
+    assert_eq!(
+        image_placeholder_label("Logo", "Title", "https://x/logo.png"),
+        "图片：Logo"
+    );
+    assert_eq!(
+        image_placeholder_label("  ", "Screenshot", "docs/shot.png"),
+        "图片：Screenshot"
+    );
+    assert_eq!(
+        image_placeholder_label("", "", "https://example.com/assets/a.png"),
+        "图片：a.png"
+    );
+    assert_eq!(image_placeholder_label("", "", ""), "图片");
+    let long = "x".repeat(100);
+    let label = image_placeholder_label(&long, "", "");
+    assert_eq!(label.chars().count(), 60);
+    assert!(label.ends_with('…'));
 }
