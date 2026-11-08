@@ -294,3 +294,13 @@
 | 12 | 布局与周边 | 侧边栏/右栏拖拽宽度持久化、分组/平铺排序、计划时钟、通知路由、打开方式与应用选择器 |
 
 仍需 Host 侧能力（bridge RPC / profile mount / 原生依赖）的延后项：完整存档确认与分页、全文搜索（`session-query-sqlite` 目前 `openAt: never`）、VTE 终端与多标签 dock、PDF/Office 预览、Agent Team 与子智能体层级、请求关联提交与分块附件、完整 Trajectory ledger、变更文件多文件 diff、定时提问迟到回答、Provider CRUD/OAuth、第三方插件声明式配置、后台任务 unfollow 与完整 i18n/快捷键录制。
+
+### 13.1 实施进度（2026-11-09）
+
+- 项 1 消息流与历史：最近窗口加载、缺口修复、attempt/revision 防护已完成（`c5d0854`）；UI 替换/删除与流式尾部增量解析仍待补。
+- 项 2 审批/提问/计划：composer 接管卡片、键盘仲裁、命令预览、推荐项预选、计划审查、会话路由与 fail-closed 已完成（`81f1d2c`）；倒计时/慢慢回答依赖 Host `remainingMs`/`attachWait`（G28），延后。
+- 项 3 异步响应会话隔离：主要 UiMessage 已加会话/代数守卫（`c5d0854`）；dock 布局与反馈映射的按会话隔离仍待补。
+- 项 4 重连与启动诊断：指数退避自动重连、恢复活动会话、保留 InitializeResult、console 诊断环形缓冲与设置页展示已完成（`644371b`）。
+- 项 5 统计与生命周期卡片：每轮 token/速率/耗时 Stats 面板、运行计时器、compaction/turn-error/max-tokens/llm-retry 卡片已完成（`8cdc5f5`）。
+- 项 6–12：待实施。
+- 模型链路根因修复：bridge catalog 默认 provider 改为 `agentDefaultModel` 校验值（`deepseek-official`），App 采纳目录默认并纠正失效会话；BridgeCredentials 从 `*_API_KEY` 环境变量取种（`81f1d2c`）。
