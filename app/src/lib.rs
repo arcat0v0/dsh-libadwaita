@@ -4,6 +4,7 @@ pub const APP_NAME: &str = "dsh";
 pub mod attachments;
 pub mod links;
 pub mod connection;
+pub mod settings_cas;
 pub mod settings_model;
 pub mod ui_prefs;
 pub mod credentials;

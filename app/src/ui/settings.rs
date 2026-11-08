@@ -1,5 +1,6 @@
-use crate::connection::BridgeConnection;
+use crate::connection::{BridgeConnection, ConnectionError};
 use crate::credentials::{CredentialStore, DEFAULT_PROVIDER};
+use crate::settings_cas::{api_key_failure, conflict_revision, SettingsRevisionCache};
 use crate::protocol::*;
 use crate::ui::controller::{tokio_runtime, SessionController};
 use adw::prelude::*;
@@ -19,11 +20,16 @@ pub struct SettingsDialogHandle {
     refresh: Rc<dyn Fn()>,
     refresh_catalog: Rc<dyn Fn()>,
     version_info: Rc<dyn Fn(Option<&crate::protocol::InitializeResult>)>,
+    apply_revision: Rc<dyn Fn(&str, u64)>,
 }
 
 impl SettingsDialogHandle {
     pub fn refresh(&self) {
         (self.refresh)();
+    }
+
+    pub fn apply_revision(&self, namespace: &str, revision: u64) {
+        (self.apply_revision)(namespace, revision);
     }
 
     pub fn refresh_model_catalog(&self) {
@@ -76,36 +82,76 @@ where
     });
     receiver
 }
+fn spawn_settings_mutate(
+    conn: Arc<RwLock<Option<BridgeConnection>>>,
+    params: SettingsMutateParams,
+) -> tokio::sync::mpsc::UnboundedReceiver<Result<serde_json::Value, ConnectionError>> {
+    let (sender, receiver) = unbounded_channel();
+    tokio_runtime().spawn(async move {
+        let conn_opt = conn.read().await.clone();
+        let result = match conn_opt {
+            Some(conn) => conn
+                .call::<SettingsMutateParams, serde_json::Value>(
+                    METHOD_SETTINGS_MUTATE,
+                    params,
+                    Duration::from_secs(15),
+                )
+                .await,
+            None => Err(ConnectionError::Closed),
+        };
+        let _ = sender.send(result);
+    });
+    receiver
+}
+
+fn report_mutate_outcome(
+    revisions: &RefCell<SettingsRevisionCache>,
+    namespace: &str,
+    result: Result<serde_json::Value, ConnectionError>,
+    status: &gtk4::Label,
+    saved_text: &str,
+) {
+    match result {
+        Ok(_) => status.set_label(saved_text),
+        Err(err) => match conflict_revision(&err) {
+            Some(actual) => {
+                revisions
+                    .borrow_mut()
+                    .apply_conflict_actual(namespace, actual);
+                status.set_label(&format!(
+                    "Settings conflict; host revision {} loaded — retry save",
+                    actual
+                ));
+            }
+            None => status.set_label(&format!("Host setting unavailable: {}", err)),
+        },
+    }
+}
+
 fn persist_setting(
     conn: Arc<RwLock<Option<BridgeConnection>>>,
+    revisions: Rc<RefCell<SettingsRevisionCache>>,
     namespace: String,
     key: String,
     value: serde_json::Value,
     revision: u64,
     status: gtk4::Label,
 ) {
+    let expected = revisions.borrow().revision(&namespace).unwrap_or(revision);
     let mut patch = serde_json::Map::new();
     patch.insert(key, value);
     let params = SettingsMutateParams {
-        namespace: Some(namespace),
+        namespace: Some(namespace.clone()),
         patch: serde_json::Value::Object(patch),
-        expected_revision: Some(revision),
+        expected_revision: Some(expected),
     };
-    let rx = rpc_receiver::<SettingsMutateParams, serde_json::Value>(
-        conn,
-        METHOD_SETTINGS_MUTATE,
-        params,
-        Duration::from_secs(15),
-    );
+    let rx = spawn_settings_mutate(conn, params);
     gtk4::glib::MainContext::default().spawn_local(async move {
         let mut rx = rx;
-        match rx.recv().await {
-            Some(Ok(_)) => status.set_label("Preference saved to Host settings"),
-            Some(Err(err)) if err.contains("-32020") => {
-                status.set_label("Settings conflict; reload and retry")
-            }
-            Some(Err(err)) => status.set_label(&format!("Host setting unavailable: {}", err)),
-            None => status.set_label("Host setting unavailable"),
+        if let Some(result) = rx.recv().await {
+            report_mutate_outcome(&revisions, &namespace, result, &status, "Preference saved to Host settings");
+        } else {
+            status.set_label("Host setting unavailable");
         }
     });
 }
@@ -125,6 +171,8 @@ pub fn build_preferences_dialog(
         .as_ref()
         .map(|ctrl| ctrl.prefs_snapshot())
         .unwrap_or_default();
+    let revisions: Rc<RefCell<SettingsRevisionCache>> =
+        Rc::new(RefCell::new(SettingsRevisionCache::new()));
     let appearance_group = adw::PreferencesGroup::builder()
         .title("Appearance")
         .description("Theme, language, font size, and desktop notifications")
@@ -169,6 +217,7 @@ pub fn build_preferences_dialog(
         .build();
     let locale_status_for_change = locale_status.clone();
     let locale_controller = controller.clone();
+    let revisions_locale = revisions.clone();
     locale_row.connect_selected_notify(move |row| {
         let code = match row.selected() {
             1 => "en",
@@ -190,6 +239,7 @@ pub fn build_preferences_dialog(
         ) {
             persist_setting(
                 ctrl.connection_handle(),
+                revisions_locale.clone(),
                 config.0,
                 config.1,
                 serde_json::json!(code),
@@ -217,6 +267,7 @@ pub fn build_preferences_dialog(
         Rc::new(RefCell::new(None));
     let theme_config_for_change = theme_config.clone();
     let ctrl_theme = controller.clone();
+    let revisions_theme = revisions.clone();
     let theme_status_for_change = theme_status.clone();
     theme_row.connect_selected_notify(move |row| {
         let value = match row.selected() {
@@ -229,6 +280,7 @@ pub fn build_preferences_dialog(
             if let Some(config) = theme_config_for_change.borrow().clone() {
                 persist_setting(
                     ctrl.connection_handle(),
+                    revisions_theme.clone(),
                     config.0,
                     config.1,
                     serde_json::json!(value),
@@ -316,6 +368,8 @@ pub fn build_preferences_dialog(
     let host_page_for_schema = host_page.clone();
     let host_status_for_schema = host_status.clone();
     let host_controller = controller.clone();
+    let revisions_describe = revisions.clone();
+    let revisions_typed = revisions.clone();
     if let Some(ctrl) = describe_controller {
         let rx = rpc_receiver::<serde_json::Value, SettingsDescribeResult>(
             ctrl.connection_handle(),
@@ -331,6 +385,9 @@ pub fn build_preferences_dialog(
                 host_status_for_schema.set_label("Host settings unavailable");
                 return;
             };
+            revisions_describe
+                .borrow_mut()
+                .seed_from_descriptors(&result.namespaces);
             if let Some(descriptor) = result
                 .namespaces
                 .iter()
@@ -510,10 +567,15 @@ pub fn build_preferences_dialog(
                     .map(|ctrl| ctrl.connection_handle());
                 let form_fields = Rc::new(RefCell::new(form_fields));
                 let status_for_save = status_label.clone();
+                let revisions_for_save = revisions_typed.clone();
                 save_button.connect_clicked(move |_| {
                     let Some(conn) = conn.clone() else {
                         return;
                     };
+                    let expected = revisions_for_save
+                        .borrow()
+                        .revision(&namespace)
+                        .unwrap_or(revision);
                     let mut patch = serde_json::Map::new();
                     for field in form_fields.borrow().iter() {
                         let value = match &field.widget {
@@ -537,24 +599,24 @@ pub fn build_preferences_dialog(
                     let params = SettingsMutateParams {
                         namespace: Some(namespace.clone()),
                         patch: serde_json::Value::Object(patch),
-                        expected_revision: Some(revision),
+                        expected_revision: Some(expected),
                     };
-                    let rx = rpc_receiver::<SettingsMutateParams, serde_json::Value>(
-                        conn.clone(),
-                        METHOD_SETTINGS_MUTATE,
-                        params,
-                        Duration::from_secs(15),
-                    );
+                    let rx = spawn_settings_mutate(conn, params);
                     let status = status_for_save.clone();
+                    let revisions = revisions_for_save.clone();
+                    let namespace_for_report = namespace.clone();
                     gtk4::glib::MainContext::default().spawn_local(async move {
                         let mut rx = rx;
-                        match rx.recv().await {
-                            Some(Ok(_)) => status.set_label("Saved"),
-                            Some(Err(err)) if err.contains("-32020") => {
-                                status.set_label("Conflict; reload settings")
-                            }
-                            Some(Err(err)) => status.set_label(&format!("Save failed: {}", err)),
-                            None => status.set_label("Save failed"),
+                        if let Some(result) = rx.recv().await {
+                            report_mutate_outcome(
+                                &revisions,
+                                &namespace_for_report,
+                                result,
+                                &status,
+                                "Saved",
+                            );
+                        } else {
+                            status.set_label("Save failed");
                         }
                     });
                 });
@@ -699,20 +761,65 @@ pub fn build_preferences_dialog(
     let ctrl_c = controller.clone();
     let entry_c = key_entry_row.clone();
     let status_c = status_row.clone();
+    let verify_conn = controller.as_ref().map(|ctrl| ctrl.connection_handle());
 
     update_btn.connect_clicked(move |_| {
         let text = entry_c.text().to_string();
-        let trimmed = text.trim();
-        if !trimmed.is_empty() {
-            let _ = store_c.set_key(DEFAULT_PROVIDER, trimmed);
-            if let Some(ctrl) = &ctrl_c {
-                ctrl.rotate_credential(DEFAULT_PROVIDER, trimmed);
+        match api_key_failure(&text) {
+            Some("keyBlank") => {
+                status_c.set_subtitle("Key is blank — type a key before saving");
+                return;
             }
-            status_c.set_subtitle(&format!(
-                "Masked: {}",
-                CredentialStore::mask_key(trimmed)
-            ));
-            entry_c.set_text("");
+            Some(_) => {
+                status_c.set_subtitle(
+                    "Key must be printable ASCII without spaces, quote wrapping, or NAME=value paste",
+                );
+                return;
+            }
+            None => {}
+        }
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let _ = store_c.set_key(DEFAULT_PROVIDER, trimmed);
+        if let Some(ctrl) = &ctrl_c {
+            ctrl.rotate_credential(DEFAULT_PROVIDER, trimmed);
+        }
+        status_c.set_subtitle(&format!(
+            "Masked: {} — verifying…",
+            CredentialStore::mask_key(trimmed)
+        ));
+        entry_c.set_text("");
+        if let Some(conn) = verify_conn.clone() {
+            let rx = rpc_receiver::<serde_json::Value, AccountStatusResult>(
+                conn,
+                METHOD_ACCOUNT_STATUS,
+                serde_json::json!({}),
+                Duration::from_secs(10),
+            );
+            let status = status_c.clone();
+            gtk4::glib::MainContext::default().spawn_local(async move {
+                let mut rx = rx;
+                match rx.recv().await {
+                    Some(Ok(result)) => {
+                        let authenticated = result.state["authenticated"].as_bool();
+                        match authenticated {
+                            Some(true) => status.set_subtitle("Key saved; account status verified"),
+                            Some(false) => {
+                                status.set_subtitle("Key saved; account reports not authenticated")
+                            }
+                            None => status.set_subtitle(&format!(
+                                "Key saved; account state: {}",
+                                result.state
+                            )),
+                        }
+                    }
+                    Some(Err(_)) | None => {
+                        status.set_subtitle("Key saved; verification unavailable (offline or service missing)")
+                    }
+                }
+            });
         }
     });
     update_row.add_suffix(&update_btn);
@@ -1608,12 +1715,18 @@ pub fn build_preferences_dialog(
     refresh_button.connect_clicked(move |_| refresh_for_button());
     refresh();
 
+    let revisions_for_handle = revisions.clone();
     (
         dialog,
         SettingsDialogHandle {
             refresh,
             refresh_catalog: load_catalog.clone(),
             version_info: version_rows,
+            apply_revision: Rc::new(move |namespace, revision| {
+                revisions_for_handle
+                    .borrow_mut()
+                    .apply_updated(namespace, revision);
+            }),
         },
     )
 }

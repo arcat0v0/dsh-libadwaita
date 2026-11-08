@@ -75,13 +75,21 @@ pub fn show_onboarding_dialog(
 
     save_btn.connect_clicked(move |_| {
         let key = row_save.text().to_string();
-        let trimmed = key.trim();
 
-        if trimmed.is_empty() {
+        if key.trim().is_empty() {
             err_save.set_label("API key cannot be empty");
             err_save.set_visible(true);
             return;
         }
+        if let Some(failure) = crate::settings_cas::api_key_failure(&key) {
+            err_save.set_label(match failure {
+                "keyBlank" => "API key cannot be empty",
+                _ => "API key must be printable ASCII without spaces, quote wrapping, or NAME=value paste",
+            });
+            err_save.set_visible(true);
+            return;
+        }
+        let trimmed = key.trim();
 
         let _ = store_clone.set_key(DEFAULT_PROVIDER, trimmed);
         err_save.set_visible(false);

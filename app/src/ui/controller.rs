@@ -4408,9 +4408,10 @@ impl SessionController {
                                 ctrl.conversation_view.plugins_page().probe_market();
                             }
                         }
-                        IncomingNotification::SettingsUpdated(_) => {
+                        IncomingNotification::SettingsUpdated(params) => {
                             if let Some(ctrl) = ctrl_weak.upgrade() {
                                 if let Some(handle) = ctrl.settings_dialog.borrow().as_ref() {
+                                    handle.apply_revision(&params.namespace, params.revision);
                                     handle.refresh();
                                 }
                                 ctrl.conversation_view.plugins_page().reload_forms();
