@@ -141,13 +141,13 @@
 
 | 编号 | 功能点 | 状态 | 证据与剩余差异 |
 |---|---|---|---|
-| S01 | 设置外壳/配置表单/冲突保留草稿 | 部分实现 | `app/src/ui/settings.rs::build_preferences_dialog` 使用 `AdwPreferencesDialog`；Bridge→Settings Editor 调 `settings/describe`，保存调 `settings/mutate(expectedRevision)`，`-32020` 保留草稿并显示 `AdwBanner`；仍是 namespace + JSON patch，不是 schema 生成的字段表单。 |
+| S01 | 设置外壳/配置表单/冲突保留草稿 | 部分实现 | `build_preferences_dialog` 使用 `AdwPreferencesDialog`；Host Settings 按 schema 生成 typed 字段表单并 `settings/mutate(expectedRevision)` 保存；`SettingsRevisionCache`（`ui/settings_cas.rs`）由 describe 播种、`settings.updated` 通知与 `-32020` 冲突的 `data.actual` 回写，连续保存不再冲突。 |
 | S02 | 语言选择 | 部分实现 | General 页 Locale ComboRow 提供 System + 8 语言；`settings/describe` 有 locale namespace/字段时通过 `settings/mutate(expectedRevision)` 写入并回显当前值，否则禁用并标不可用；无 Rust 词典，界面文案不会即时翻译。 |
 | S03 | 代码工作工具开关 | 已实现 | General 页 Developer Tools 写入 UiPrefs，`ConversationView::set_trajectory_visible` 控制 Trajectory tab 显隐，启动时恢复本地设置。 |
 | S04 | 连接恢复/服务版本变化/版本行 | 部分实现 | `show_connection_lost`/`restart_supervisor` 提供重连，General 页显示 dsh/protocol 版本；版本值硬编码，无 release change 检测。 |
 | S05 | 打开配置文件 | 缺失 | 无打开 profile/cordis 配置文件的动作。 |
 | S06 | Models provider 行/编辑/排序/增删 | 部分实现 | Models 页动态调用 `model/catalog`，按 provider 展示 configured/not-configured 与模型列表，带 Refresh；无 provider 编辑、排序、增删或在线 discover。 |
-| S07 | API Key 只写/校验/保存/删除范围 | 部分实现 | `AdwPasswordEntryRow` 写入 Secret Service 并调 `credentials/rotate`，masked status 不回读；无 ASCII 校验、保存 spinner 和删除范围流程。 |
+| S07 | API Key 只写/校验/保存/删除范围 | 部分实现 | `AdwPasswordEntryRow` 写入 Secret Service 并调 `credentials/rotate`；保存前按上游 `apiKeyFailure` 规则校验（可打印 ASCII、拒绝空串/`NAME=value` 粘贴/引号包裹，空输入=保留现有 key），保存后经 `account/status` 探测并显示验证结果；无保存 spinner 和删除范围流程。 |
 | S08 | 首启 DeepSeek 引导与版本说明 | 部分实现 | `app/src/ui/onboarding.rs::show_onboarding_dialog` 在 `credentials/status` 未配置时显示 key 表单与 Configure Later，保存后 inject；无 WelcomeNotice 版本确认与 settings 持久化。 |
 | S09 | DeepSeek 账号登录/资料/余额/充值 | 部分实现 | Settings→Account 调 `account/status|profile|balance|sign-out`，错误显示 unavailable 而非零余额；浏览器 sign-in 明确标注不可用，无 watch、充值和配额弹窗。 |
 | S10 | Agent loop 并行上限 | 已实现 | Host Settings 的 `settings/describe` 驱动表单为 agent-loop primitive schema 字段生成 Switch/Spin/Entry/Combo 并 `settings/mutate(expectedRevision)` 保存；namespace 缺失时不显示。 |
@@ -304,5 +304,6 @@
 - 项 5 统计与生命周期卡片：每轮 token/速率/耗时 Stats 面板、运行计时器、compaction/turn-error/max-tokens/llm-retry 卡片已完成（`8cdc5f5`）。
 - 项 6 结构化工具卡：auto-review 拒绝优先卡（参数隐藏、原因归一化）、`grep/glob` 结构化 meta 卡（matches/paths/total/truncated/recovery）、`web_search/web_fetch` 结构化卡（来源列表、HTTP 状态、截断说明、外部打开）、PTC 子调用树（嵌套渲染，含嵌套 sub-call 的独立专用卡）、助手消息图片/文件块画廊已完成（`5318ac9`）；`parse_search_meta`/`parse_web_meta`/`parse_auto_review_denial`/PTC 组装等由 14 个单测覆盖。视觉截图验证受环境阻塞（headless sway 重启后新 GTK 窗口 VK surface lost、grim 无 screencopy；且本机 `DEEPSEEK_API_KEY` 已 401 失效无法发起真实模型轮次）。
 - 项 7 文件与 Markdown：文件面板改为层级树（目录优先排序、按需展开、折叠保留、消失目录剪枝、`FileTreeModel` 8 单测）、面包屑与刷新、预览定位、会话切换重置已完成（`TBD`）；同时修复右栏 dock 被 paned 挤到零宽不可见的问题（dock 最小宽度 340、`shrink_end_child(false)`）。GFM 已启用；PDF/Office 预览受 G07（Host 无 `officeToPdf`）限制延后。视觉验证：headless sway 中 Files tab 截图确认树渲染（docs/src/README.md 排序正确、面包屑、刷新后列出），目录行展开因 AT-SPI 不给 ActionRow 暴露 action 且无指针注入而未能截图验证。
-- 项 8–12：待实施。
+- 项 8 设置与凭证：`SettingsRevisionCache` CAS revision 回写（describe 播种、`settings.updated` 通知回写、冲突 `data.actual` 回写，设置页与 locale/theme 保存共用）、API key 字符集校验（settings 与 onboarding）与保存后 `account/status` 验证探测已完成（`30dd7ec`）；插件 inventory 的 fiberPhase/diagnostic 行级诊断此前已实现（P01 剩 preset 分组）；子智能体模型授权由 S11 typed 表单覆盖，运行期 `subagent/model-selection-policy` 为 Host log-only 事件且 GUI 无子代理模型选择器。验证：`settings_cas_tests` 5 单测 + 设置对话框打开截图（describe 后显示 "7 namespaces available"），Models 页交互输入因 headless a11y 无法翻页未验证。
+- 项 9–12：待实施。
 - 模型链路根因修复：bridge catalog 默认 provider 改为 `agentDefaultModel` 校验值（`deepseek-official`），App 采纳目录默认并纠正失效会话；BridgeCredentials 从 `*_API_KEY` 环境变量取种（`81f1d2c`）。
