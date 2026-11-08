@@ -280,7 +280,7 @@
 
 | 排名 | 主题 | 主要缺口 |
 |---:|---|---|
-| 1 | 消息流与历史 | 已补最近窗口加载、缺口修复与 attempt/revision 防护；仍缺 UI 替换/删除、流式尾部增量解析 |
+| 1 | 消息流与历史 | 已完成最近窗口加载、缺口修复、attempt/revision 防护、UI 块替换/删除对账与流式尾部增量解析 |
 | 2 | 审批/提问/计划 | 窗口级模态改为会话内 composer 接管；键盘仲裁、命令预览、推荐项预选、倒计时 |
 | 3 | 异步响应会话隔离 | SessionFollowed/History/Projections/Feedback/Terminal/Files 已加会话/代数守卫；dock 布局与反馈映射仍需按会话隔离 |
 | 4 | 重连与启动诊断 | 自动退避重连、恢复活动会话、保留 InitializeResult、插件级启动诊断 |
@@ -297,7 +297,7 @@
 
 ### 13.1 实施进度（2026-11-09）
 
-- 项 1 消息流与历史：最近窗口加载、缺口修复、attempt/revision 防护已完成（`c5d0854`）；UI 替换/删除仍待补，流式尾部增量解析已在项 9 完成。
+- 项 1 消息流与历史：最近窗口加载、缺口修复、attempt/revision 防护（`c5d0854`）与流式尾部增量解析（项 9）已完成；本轮补齐 UI 块替换/删除：`ConversationView` 以 block fingerprint 比较已渲染前缀，pending user 持久化替换（seq 由 -2 变为正数）与 abandoned live 移除（数量减少）都会清除旧控件并按当前 blocks 重建，追加仍走增量路径；live 定稿时先同步最终文本，messageId 迟到时向已建动作行补挂点赞/点踩/Feedback。验证：新增 5 个 conversation lib 单测（pending 文本/提交指纹、live 文本/attempt 指纹、前缀追加/替换/删除判定、pending 替换与 abandoned 删除的 transcript 端到端指纹变化），完整 39 个测试二进制通过。未验证：真实模型流式下 abandoned/替换的视觉效果（测试 key 401、无 live agent）。
 - 项 2 审批/提问/计划：composer 接管卡片、键盘仲裁、命令预览、推荐项预选、计划审查、会话路由与 fail-closed 已完成（`81f1d2c`）；倒计时/慢慢回答依赖 Host `remainingMs`/`attachWait`（G28），延后。
 - 项 3 异步响应会话隔离：主要 UiMessage 已加会话/代数守卫（`c5d0854`）；dock 布局与反馈映射的按会话隔离仍待补。
 - 项 4 重连与启动诊断：指数退避自动重连、恢复活动会话、保留 InitializeResult、console 诊断环形缓冲与设置页展示已完成（`644371b`）。

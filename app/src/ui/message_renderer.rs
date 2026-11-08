@@ -905,6 +905,8 @@ pub struct LiveAssistantWidgets {
     pub running: std::cell::Cell<bool>,
     pub fork_button: RefCell<Option<gtk4::Button>>,
     pub actions_built: std::cell::Cell<bool>,
+    pub actions_box: RefCell<Option<gtk4::Box>>,
+    pub feedback_built: std::cell::Cell<bool>,
 }
 
 #[derive(Clone)]
@@ -958,8 +960,17 @@ impl AssistantLiveHandle {
             let (actions, fork) = build_assistant_actions(&text, seq, message_id, time);
             widgets.bubble.append(&actions);
             widgets.actions_built.set(true);
+            widgets.feedback_built.set(message_id.is_some());
+            *widgets.actions_box.borrow_mut() = Some(actions);
             if widgets.fork_button.borrow().is_none() {
                 *widgets.fork_button.borrow_mut() = fork;
+            }
+        } else if let Some(message_id) = message_id {
+            if !widgets.feedback_built.get() {
+                if let Some(actions) = widgets.actions_box.borrow().as_ref() {
+                    append_feedback_controls(actions, message_id);
+                    widgets.feedback_built.set(true);
+                }
             }
         }
         drop(widgets);
@@ -1483,10 +1494,12 @@ pub fn build_assistant_message(
     bubble.append(&spinner);
 
     let mut fork_button = None;
+    let mut actions_box_handle = None;
     let actions_built = !is_live && (seq.is_some() || message_id.is_some());
     if actions_built {
         let (actions_box, fork) = build_assistant_actions(text, seq, message_id, time);
         bubble.append(&actions_box);
+        actions_box_handle = Some(actions_box);
         fork_button = fork;
     }
 
@@ -1510,6 +1523,8 @@ pub fn build_assistant_message(
         running: std::cell::Cell::new(is_live),
         fork_button: RefCell::new(fork_button),
         actions_built: std::cell::Cell::new(actions_built),
+        actions_box: RefCell::new(actions_box_handle),
+        feedback_built: std::cell::Cell::new(actions_built && message_id.is_some()),
     };
 
     let handle = AssistantLiveHandle {
@@ -1575,47 +1590,51 @@ fn build_assistant_actions(
         button
     });
     if let Some(message_id) = message_id {
-        let up = gtk4::Button::builder()
-            .icon_name("thumbs-up-symbolic")
-            .tooltip_text("Good response")
-            .css_classes(["flat", "circular"])
-            .build();
-        let down = gtk4::Button::builder()
-            .icon_name("thumbs-down-symbolic")
-            .tooltip_text("Bad response")
-            .css_classes(["flat", "circular"])
-            .build();
-        let controls = Rc::new(FeedbackControls {
-            message_id: message_id.to_string(),
-            up: up.clone(),
-            down: down.clone(),
-        });
-        FEEDBACK_CONTROLS.with(|registry| registry.borrow_mut().push(Rc::downgrade(&controls)));
-        let up_id = message_id.to_string();
-        let up_anchor = up.clone();
-        up.connect_clicked(move |_| {
-            choose_feedback_rating(&up_id, "positive", up_anchor.upcast_ref());
-        });
-        let down_id = message_id.to_string();
-        let down_anchor = down.clone();
-        down.connect_clicked(move |_| {
-            choose_feedback_rating(&down_id, "negative", down_anchor.upcast_ref());
-        });
-        actions_box.append(&up);
-        actions_box.append(&down);
-        let note = gtk4::Button::builder()
-            .label("Feedback")
-            .tooltip_text("Send session feedback")
-            .css_classes(["flat"])
-            .build();
-        let note_anchor = note.clone();
-        note.connect_clicked(move |_| {
-            open_session_feedback_dialog(note_anchor.upcast_ref());
-        });
-        actions_box.append(&note);
-        refresh_feedback_controls();
+        append_feedback_controls(&actions_box, message_id);
     }
     (actions_box, fork_btn)
+}
+
+fn append_feedback_controls(actions_box: &gtk4::Box, message_id: &str) {
+    let up = gtk4::Button::builder()
+        .icon_name("thumbs-up-symbolic")
+        .tooltip_text("Good response")
+        .css_classes(["flat", "circular"])
+        .build();
+    let down = gtk4::Button::builder()
+        .icon_name("thumbs-down-symbolic")
+        .tooltip_text("Bad response")
+        .css_classes(["flat", "circular"])
+        .build();
+    let controls = Rc::new(FeedbackControls {
+        message_id: message_id.to_string(),
+        up: up.clone(),
+        down: down.clone(),
+    });
+    FEEDBACK_CONTROLS.with(|registry| registry.borrow_mut().push(Rc::downgrade(&controls)));
+    let up_id = message_id.to_string();
+    let up_anchor = up.clone();
+    up.connect_clicked(move |_| {
+        choose_feedback_rating(&up_id, "positive", up_anchor.upcast_ref());
+    });
+    let down_id = message_id.to_string();
+    let down_anchor = down.clone();
+    down.connect_clicked(move |_| {
+        choose_feedback_rating(&down_id, "negative", down_anchor.upcast_ref());
+    });
+    actions_box.append(&up);
+    actions_box.append(&down);
+    let note = gtk4::Button::builder()
+        .label("Feedback")
+        .tooltip_text("Send session feedback")
+        .css_classes(["flat"])
+        .build();
+    let note_anchor = note.clone();
+    note.connect_clicked(move |_| {
+        open_session_feedback_dialog(note_anchor.upcast_ref());
+    });
+    actions_box.append(&note);
+    refresh_feedback_controls();
 }
 
 const FEEDBACK_CATEGORIES: [(&str, &str); 7] = [

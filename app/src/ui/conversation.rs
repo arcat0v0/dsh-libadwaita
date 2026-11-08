@@ -17,7 +17,9 @@ use crate::ui::todo_dock::TodoDock;
 use libadwaita as adw;
 use gtk4::prelude::*;
 use std::cell::{Cell, RefCell};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -153,6 +155,83 @@ fn apply_open_with_label(
     }
 }
 
+fn block_fingerprint(block: &RenderBlock) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    match block {
+        RenderBlock::UserMessage {
+            text, seq, images, ..
+        } => {
+            0u8.hash(&mut hasher);
+            seq.hash(&mut hasher);
+            if *seq < 0 {
+                text.hash(&mut hasher);
+                images.len().hash(&mut hasher);
+            }
+        }
+        RenderBlock::QuestionReply { seq, .. } => {
+            1u8.hash(&mut hasher);
+            seq.hash(&mut hasher);
+        }
+        RenderBlock::AssistantMessage { attempt_id, .. } => {
+            2u8.hash(&mut hasher);
+            attempt_id.hash(&mut hasher);
+        }
+        RenderBlock::ToolResult { seq, .. } => {
+            3u8.hash(&mut hasher);
+            seq.hash(&mut hasher);
+        }
+        RenderBlock::PlanModeBadge { seq, .. } => {
+            4u8.hash(&mut hasher);
+            seq.hash(&mut hasher);
+        }
+        RenderBlock::PlanCard { seq, .. } => {
+            5u8.hash(&mut hasher);
+            seq.hash(&mut hasher);
+        }
+        RenderBlock::TodoBlock { seq, .. } => {
+            6u8.hash(&mut hasher);
+            seq.hash(&mut hasher);
+        }
+        RenderBlock::DeliverablesBlock { seq, .. } => {
+            7u8.hash(&mut hasher);
+            seq.hash(&mut hasher);
+        }
+        RenderBlock::GenericEvent { seq, .. } => {
+            8u8.hash(&mut hasher);
+            seq.hash(&mut hasher);
+        }
+        RenderBlock::CompactionCard { seq, .. } => {
+            9u8.hash(&mut hasher);
+            seq.hash(&mut hasher);
+        }
+        RenderBlock::TurnError { seq, .. } => {
+            10u8.hash(&mut hasher);
+            seq.hash(&mut hasher);
+        }
+        RenderBlock::MaxTokensHint { seq } => {
+            11u8.hash(&mut hasher);
+            seq.hash(&mut hasher);
+        }
+        RenderBlock::RetryHint { seq, .. } => {
+            12u8.hash(&mut hasher);
+            seq.hash(&mut hasher);
+        }
+        RenderBlock::ForkBoundary { seq } => {
+            13u8.hash(&mut hasher);
+            seq.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+fn transcript_prefix_changed(rendered: &[u64], current: &[u64]) -> bool {
+    current.len() < rendered.len()
+        || current
+            .iter()
+            .zip(rendered.iter())
+            .any(|(left, right)| left != right)
+}
+
 pub struct ConversationView {
     stack: gtk4::Stack,
     composer: Composer,
@@ -196,6 +275,7 @@ pub struct ConversationView {
     view_stack: adw::ViewStack,
     on_view_selected: Rc<RefCell<Option<Box<dyn Fn(&str)>>>>,
     rendered_count: Cell<usize>,
+    rendered_keys: RefCell<Vec<u64>>,
     active_cwd: Rc<RefCell<PathBuf>>,
     title_activate: Rc<RefCell<Option<Box<dyn Fn()>>>>,
     hero_composer_slot: gtk4::Box,
@@ -702,6 +782,7 @@ impl ConversationView {
             view_stack,
             on_view_selected,
             rendered_count: Cell::new(0),
+            rendered_keys: RefCell::new(Vec::new()),
             active_cwd,
             title_activate,
             hero_composer_slot,
@@ -957,14 +1038,7 @@ impl ConversationView {
     }
 
     pub fn rerender_transcript(&self, transcript: &ConversationTranscript) {
-        while let Some(child) = self.transcript_box.first_child() {
-            self.transcript_box.remove(&child);
-        }
-        self.live_handle.borrow_mut().take();
-        self.block_handles.borrow_mut().clear();
-        *self.fork_handle.borrow_mut() = None;
-        self.turn_widgets.borrow_mut().clear();
-        self.rendered_count.set(0);
+        self.clear_rendered();
         self.update_transcript(transcript);
     }
 
@@ -1126,7 +1200,7 @@ impl ConversationView {
             .set_label(&format!("{}{}", existing, addition));
     }
 
-    fn render_grouped(&self, blocks: &[RenderBlock]) {
+    fn clear_rendered(&self) {
         while let Some(child) = self.transcript_box.first_child() {
             self.transcript_box.remove(&child);
         }
@@ -1135,6 +1209,11 @@ impl ConversationView {
         self.turn_widgets.borrow_mut().clear();
         *self.fork_handle.borrow_mut() = None;
         self.rendered_count.set(0);
+        self.rendered_keys.borrow_mut().clear();
+    }
+
+    fn render_grouped(&self, blocks: &[RenderBlock]) {
+        self.clear_rendered();
         let policy = PresentationPolicy::for_mode(self.view_mode.get());
         let last_turn_start = blocks
             .iter()
@@ -1209,6 +1288,7 @@ impl ConversationView {
             }
         }
         self.rendered_count.set(blocks.len());
+        *self.rendered_keys.borrow_mut() = blocks.iter().map(block_fingerprint).collect();
         if let Some(last_block) = blocks.last() {
             if let RenderBlock::AssistantMessage {
                 text,
@@ -1221,12 +1301,11 @@ impl ConversationView {
             } = last_block
             {
                 if let Some(handle) = self.live_handle.borrow().clone() {
-                    if *is_live {
-                        handle.update_text(text);
-                        if let Some(reasoning) = reasoning {
-                            handle.update_reasoning(reasoning);
-                        }
-                    } else {
+                    handle.update_text(text);
+                    if let Some(reasoning) = reasoning {
+                        handle.update_reasoning(reasoning);
+                    }
+                    if !*is_live {
                         handle.finalize(*seq, message_id.as_deref(), *time);
                     }
                 }
@@ -1382,26 +1461,23 @@ impl ConversationView {
 
     pub fn update_transcript(&self, transcript: &ConversationTranscript) {
         let blocks = transcript.blocks();
+        let keys: Vec<u64> = blocks.iter().map(block_fingerprint).collect();
+        if transcript_prefix_changed(&self.rendered_keys.borrow(), &keys) {
+            self.clear_rendered();
+        }
         let policy = PresentationPolicy::for_mode(self.view_mode.get());
         self.set_hero(blocks.is_empty());
         if policy.groups_intermediate() && blocks.len() > self.rendered_count.get() {
             self.render_grouped(blocks);
         }
         if blocks.is_empty() {
-            while let Some(child) = self.transcript_box.first_child() {
-                self.transcript_box.remove(&child);
-            }
-            self.live_handle.borrow_mut().take();
-            self.rendered_count.set(0);
+            self.clear_rendered();
             self.clear_turn_state();
             self.set_hero(true);
             return;
         }
 
         if self.rendered_count.get() == 0 {
-            while let Some(child) = self.transcript_box.first_child() {
-                self.transcript_box.remove(&child);
-            }
             self.turn_widgets.borrow_mut().clear();
             self.block_handles.borrow_mut().clear();
             *self.fork_handle.borrow_mut() = None;
@@ -1427,6 +1503,7 @@ impl ConversationView {
             }
             self.rendered_count.set(blocks.len());
         }
+        *self.rendered_keys.borrow_mut() = keys;
 
         if let Some(last_block) = blocks.last() {
             match last_block {
@@ -1441,12 +1518,11 @@ impl ConversationView {
                 } => {
                     let handle_opt = self.live_handle.borrow().clone();
                     if let Some(handle) = handle_opt {
-                        if *is_live {
-                            handle.update_text(text);
-                            if let Some(r) = reasoning {
-                                handle.update_reasoning(r);
-                            }
-                        } else {
+                        handle.update_text(text);
+                        if let Some(r) = reasoning {
+                            handle.update_reasoning(r);
+                        }
+                        if !*is_live {
                             handle.finalize(*seq, message_id.as_deref(), *time);
                             *self.live_handle.borrow_mut() = None;
                         }
@@ -1467,5 +1543,124 @@ impl ConversationView {
 impl Default for ConversationView {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{AssistantStreamFrame, SessionEvent, StreamChunk, StreamOutcome};
+
+    fn pending_user(text: &str) -> RenderBlock {
+        RenderBlock::UserMessage {
+            text: text.to_string(),
+            time: 0,
+            seq: -2,
+            images: Vec::new(),
+        }
+    }
+
+    fn assistant(text: &str, is_live: bool) -> RenderBlock {
+        RenderBlock::AssistantMessage {
+            text: text.to_string(),
+            reasoning: None,
+            tool_calls: Vec::new(),
+            attachments: Vec::new(),
+            is_live,
+            attempt_id: Some("attempt-1".to_string()),
+            seq: if is_live { None } else { Some(7) },
+            message_id: None,
+            time: 0,
+        }
+    }
+
+    #[test]
+    fn test_pending_user_fingerprint_tracks_text_and_commit() {
+        assert_ne!(
+            block_fingerprint(&pending_user("draft")),
+            block_fingerprint(&pending_user("sent"))
+        );
+        let mut committed = pending_user("sent");
+        if let RenderBlock::UserMessage { seq, .. } = &mut committed {
+            *seq = 7;
+        }
+        assert_ne!(
+            block_fingerprint(&pending_user("sent")),
+            block_fingerprint(&committed)
+        );
+    }
+
+    #[test]
+    fn test_live_assistant_fingerprint_ignores_text_but_tracks_attempt() {
+        assert_eq!(
+            block_fingerprint(&assistant("first", true)),
+            block_fingerprint(&assistant("second", true))
+        );
+        let mut other = assistant("second", true);
+        if let RenderBlock::AssistantMessage { attempt_id, .. } = &mut other {
+            *attempt_id = Some("attempt-2".to_string());
+        }
+        assert_ne!(
+            block_fingerprint(&assistant("second", true)),
+            block_fingerprint(&other)
+        );
+    }
+
+    #[test]
+    fn test_transcript_prefix_changed_detects_append_replace_and_delete() {
+        assert!(!transcript_prefix_changed(&[1, 2], &[1, 2, 3]));
+        assert!(transcript_prefix_changed(&[1, 2], &[9, 2]));
+        assert!(transcript_prefix_changed(&[1, 2], &[1]));
+        assert!(!transcript_prefix_changed(&[], &[1]));
+        assert!(!transcript_prefix_changed(&[1, 2], &[1, 2]));
+    }
+
+    #[test]
+    fn test_pending_user_replacement_changes_rendered_prefix() {
+        let mut transcript = ConversationTranscript::new();
+        transcript.push_pending_user("hi");
+        let before: Vec<u64> = transcript.blocks().iter().map(block_fingerprint).collect();
+        let event = SessionEvent {
+            event_type: "user/message".to_string(),
+            seq: 0,
+            time: 1,
+            data: serde_json::json!({"content": "hi"}),
+            ignorable: None,
+            surface_op: None,
+            source_event_seqs: None,
+        };
+        transcript.apply_event(event).unwrap();
+        let after: Vec<u64> = transcript.blocks().iter().map(block_fingerprint).collect();
+        assert!(transcript_prefix_changed(&before, &after));
+    }
+
+    #[test]
+    fn test_abandoned_live_assistant_changes_rendered_prefix() {
+        let mut transcript = ConversationTranscript::new();
+        transcript.apply_stream_frame(AssistantStreamFrame::Start {
+            attempt_id: "attempt-1".to_string(),
+            revision: 1,
+            turn: 1,
+            step: 1,
+        });
+        transcript.apply_stream_frame(AssistantStreamFrame::Chunk {
+            attempt_id: "attempt-1".to_string(),
+            revision: 2,
+            index: 0,
+            time: 1,
+            chunk: StreamChunk::TextDelta {
+                index: 0,
+                text: "hello".to_string(),
+            },
+        });
+        let before: Vec<u64> = transcript.blocks().iter().map(block_fingerprint).collect();
+        transcript.apply_stream_frame(AssistantStreamFrame::End {
+            attempt_id: "attempt-1".to_string(),
+            revision: 3,
+            index: 1,
+            outcome: StreamOutcome::Abandoned,
+        });
+        let after: Vec<u64> = transcript.blocks().iter().map(block_fingerprint).collect();
+        assert!(transcript_prefix_changed(&before, &after));
     }
 }
