@@ -73,14 +73,14 @@
 | M01 | 事件装配/历史前插/settlement | 部分实现 | `app/src/transcript.rs::ConversationTranscript::{apply_baseline,apply_stream_frame,apply_event,prepend_events}` 支持 baseline、live 替换、committed/abandoned、seq 去重与历史前插；检测到 gap 后只返回 `GapDetected`，无自动修复。 |
 | M02 | Chat 用户消息/steering/回显 | 已实现 | `SessionController::submit_text` 根据运行状态选择 prompt/steer，`ConversationTranscript::push_pending_user` 显示 pending，`user/message` 到达后原子替换，失败由 `UiMessage::EchoFailed` 恢复。 |
 | M03 | Assistant 文本/思考/工具 delta、定稿/中断 | 已实现 | `ConversationTranscript::apply_stream_frame` 聚合 text/reasoning/tool delta，`assistant/message` 与 committed 替换 live，abandoned 移除；`app/tests/transcript_tests.rs` 覆盖正常、废弃与 reasoning。 |
-| M04 | Markdown/GFM/表格/脚注/安全链接 | 部分实现 | `render_markdown` 支持表格（GtkGrid）、脚注、任务列表、代码与链接；`attach_link_handler` 允许 http/https/mailto，拦截 javascript/data/vbscript，文件链接切 Files/Preview 并定位行；缺流式尾部增量解析与表格虚拟化。 |
+| M04 | Markdown/GFM/表格/脚注/安全链接 | 部分实现 | `render_markdown` 支持表格（GtkGrid）、脚注、任务列表、代码与链接；`attach_link_handler` 允许 http/https/mailto，拦截 javascript/data/vbscript，文件链接切 Files/Preview 并定位行；流式尾部增量已实现（稳定前缀/尾部拆分，未闭合代码围栏不提前定稿）；缺超大表格虚拟化与超长行降级。 |
 | M05 | 代码高亮/复制/换行/行号/流式 fence | 部分实现 | `build_code_block` 使用 `sourceview5::View`、语言识别、行号与复制按钮，live handle 每次更新正文；无换行开关、未闭合 fence 专用策略与超长行降级。 |
 | M06 | TeX 数学与复制 | 有意简化 | 按 `docs/web-ui-map.md` §10.3 不引入 KaTeX/WebView；TeX 作为普通文本显示，不声称完成数学排版。 |
 | M07 | 图片/文件附件、画廊、灯箱 | 已实现 | Attach 按钮、文件拖放与 Ctrl+V 图片经 `attachment/upload` 后作为 prompt image 发送；`build_user_message` 用 GtkFlowBox 展示图片并点击打开 AdwDialog 灯箱，非图片插入 `@path` 文件 chip（名称/大小）；助手消息的 image/file content block 经 `parse_message_attachments` 渲染为缩略图与文件 chip。 |
 | M08 | 文件链接行号/HTTP 打开偏好 | 已实现 | `links::classify_link` 解析 `#L24-L30`/`:24-30`，`SessionController::open_link_target` 对 HTTP(S)/mailto 调系统 `UriLauncher`，对文件路径切 Preview 并 `PreviewPanel::set_pending_line` 滚动。 |
-| M09 | 消息复制/时间/fork/扩展动作 | 部分实现 | 用户与定稿 assistant 消息均有 Copy 按钮和本地 HH:MM 时间戳，assistant 保留 Fork；无通用扩展动作菜单或时间戳悬浮详情。 |
-| M10 | 工作过程分组/思考预览/整轮折叠 | 部分实现 | 会话头 DropDown 提供 Concise/Standard/Detailed/Expanded 并持久化；非 Expanded 将连续非错误 tool/generic/todo 块折叠为 Intermediate steps（Detailed 默认展开），错误块不隐藏；reasoning 仍在自身 Expander，未完全复刻上游整轮折叠时机。 |
-| M11 | 历史分页/锚点/轮次导航/回到底部 | 部分实现 | `ConversationView::new` 监听 transcript adjustment 上沿，`SessionController::load_older_history` 调 `session/page`，`UiMessage::HistoryPageLoaded` 前插并按距底部偏移恢复锚点，`set_history_loading` 显示加载行；无 turn outline、轮次导航与回到底部按钮。 |
+| M09 | 消息复制/时间/fork/扩展动作 | 部分实现 | 用户与定稿 assistant 消息均有 Copy 按钮和本地 HH:MM 时间戳；assistant 的 Fork 仅在最后一条已定稿消息显示（上游 branchUnavailable 边界），其余消息隐藏；无通用扩展动作菜单或时间戳悬浮详情。 |
+| M10 | 工作过程分组/思考预览/整轮折叠 | 部分实现 | 会话头 DropDown 提供 Concise/Standard/Detailed/Expanded 并持久化，四档按上游 presentation policy 区分：Compact 分组折叠且无过程明细/思考预览；Standard 折叠并显示运行过程明细与已结思考首行；Detailed 仅历史轮次分组、当前轮次内联；Expanded 不分组。缺 Host `collapseTiming`/`foldedReplies` 与整轮外折叠时机。 |
+| M11 | 历史分页/锚点/轮次导航/回到底部 | 部分实现 | `ConversationView::new` 监听 transcript adjustment 上沿，`SessionController::load_older_history` 调 `session/page`，`UiMessage::HistoryPageLoaded` 前插并按距底部偏移恢复锚点，`set_history_loading` 显示加载行；已实现尾部跟随（32px 回底阈值、上滚暂停、回底恢复）、浮动回底按钮与右侧轮次轨道（仅已加载轮次、活动轮次高亮、点击跳转、提示预览）；完整 turn outline 依赖 G12，未加载轮次的“先分页再跳转”未实现。 |
 | M12 | Token/速度/缓存统计与每轮面板 | 部分实现 | `agent.stream` usage chunk 更新会话头 token 胶囊，`session/projections` 的 tokenUsage 也会显示；无生成速度、缓存命中与每轮明细面板。 |
 | M13 | 命令/压缩/重试/错误/配额卡 | 部分实现 | `execute_command` 显示命令回执，`apply_event` 对未识别事件生成 `GenericEvent`，`SessionModel::handle_event` 记录 error code 供 continuation 使用；无压缩、重试、错误与配额专用卡。 |
 | M14 | 运行状态/计时/断线暂停 | 部分实现 | `Composer::set_is_running`、`ConversationView::set_status` 与 `set_disconnected` 显示 Running/Idle/Disconnected，`turn_start_times` 用于通知时长；无逐秒计时器和断线期间计时暂停显示。 |
@@ -297,13 +297,14 @@
 
 ### 13.1 实施进度（2026-11-09）
 
-- 项 1 消息流与历史：最近窗口加载、缺口修复、attempt/revision 防护已完成（`c5d0854`）；UI 替换/删除与流式尾部增量解析仍待补。
+- 项 1 消息流与历史：最近窗口加载、缺口修复、attempt/revision 防护已完成（`c5d0854`）；UI 替换/删除仍待补，流式尾部增量解析已在项 9 完成。
 - 项 2 审批/提问/计划：composer 接管卡片、键盘仲裁、命令预览、推荐项预选、计划审查、会话路由与 fail-closed 已完成（`81f1d2c`）；倒计时/慢慢回答依赖 Host `remainingMs`/`attachWait`（G28），延后。
 - 项 3 异步响应会话隔离：主要 UiMessage 已加会话/代数守卫（`c5d0854`）；dock 布局与反馈映射的按会话隔离仍待补。
 - 项 4 重连与启动诊断：指数退避自动重连、恢复活动会话、保留 InitializeResult、console 诊断环形缓冲与设置页展示已完成（`644371b`）。
 - 项 5 统计与生命周期卡片：每轮 token/速率/耗时 Stats 面板、运行计时器、compaction/turn-error/max-tokens/llm-retry 卡片已完成（`8cdc5f5`）。
 - 项 6 结构化工具卡：auto-review 拒绝优先卡（参数隐藏、原因归一化）、`grep/glob` 结构化 meta 卡（matches/paths/total/truncated/recovery）、`web_search/web_fetch` 结构化卡（来源列表、HTTP 状态、截断说明、外部打开）、PTC 子调用树（嵌套渲染，含嵌套 sub-call 的独立专用卡）、助手消息图片/文件块画廊已完成（`5318ac9`）；`parse_search_meta`/`parse_web_meta`/`parse_auto_review_denial`/PTC 组装等由 14 个单测覆盖。视觉截图验证受环境阻塞（headless sway 重启后新 GTK 窗口 VK surface lost、grim 无 screencopy；且本机 `DEEPSEEK_API_KEY` 已 401 失效无法发起真实模型轮次）。
-- 项 7 文件与 Markdown：文件面板改为层级树（目录优先排序、按需展开、折叠保留、消失目录剪枝、`FileTreeModel` 8 单测）、面包屑与刷新、预览定位、会话切换重置已完成（`TBD`）；同时修复右栏 dock 被 paned 挤到零宽不可见的问题（dock 最小宽度 340、`shrink_end_child(false)`）。GFM 已启用；PDF/Office 预览受 G07（Host 无 `officeToPdf`）限制延后。视觉验证：headless sway 中 Files tab 截图确认树渲染（docs/src/README.md 排序正确、面包屑、刷新后列出），目录行展开因 AT-SPI 不给 ActionRow 暴露 action 且无指针注入而未能截图验证。
+- 项 7 文件与 Markdown：文件面板改为层级树（目录优先排序、按需展开、折叠保留、消失目录剪枝、`FileTreeModel` 8 单测）、面包屑与刷新、预览定位、会话切换重置已完成（`7648161`）；同时修复右栏 dock 被 paned 挤到零宽不可见的问题（dock 最小宽度 340、`shrink_end_child(false)`）。GFM 已启用；PDF/Office 预览受 G07（Host 无 `officeToPdf`）限制延后。视觉验证：headless sway 中 Files tab 截图确认树渲染（docs/src/README.md 排序正确、面包屑、刷新后列出），目录行展开因 AT-SPI 不给 ActionRow 暴露 action 且无指针注入而未能截图验证。
 - 项 8 设置与凭证：`SettingsRevisionCache` CAS revision 回写（describe 播种、`settings.updated` 通知回写、冲突 `data.actual` 回写，设置页与 locale/theme 保存共用）、API key 字符集校验（settings 与 onboarding）与保存后 `account/status` 验证探测已完成（`30dd7ec`）；插件 inventory 的 fiberPhase/diagnostic 行级诊断此前已实现（P01 剩 preset 分组）；子智能体模型授权由 S11 typed 表单覆盖，运行期 `subagent/model-selection-policy` 为 Host log-only 事件且 GUI 无子代理模型选择器。验证：`settings_cas_tests` 5 单测 + 设置对话框打开截图（describe 后显示 "7 namespaces available"），Models 页交互输入因 headless a11y 无法翻页未验证。
-- 项 9–12：待实施。
+- 项 9 滚动与流式渲染：`ScrollFollow` 尾部跟随（32px 回底阈值、上滚暂停、回底恢复、会话切换重置）、浮动回底按钮、右侧轮次轨道（已加载轮次、活动轮次按视口上沿高亮、点击跳转、提示预览、≥2 轮显示）、流式 Markdown 稳定前缀/尾部分离（按空行切分且拒绝未闭合代码围栏，live assistant 仅重绘尾部）、`session/end-seed` fork 边界分隔、fork 仅出现在最后一条已定稿 assistant 消息、四档 presentation policy（步骤分组 collapsed/history/none、运行过程明细、已结思考首行预览）与定稿时补齐动作行已完成（`0fd9937`）；同时修复 trajectory `ColumnView` 未放入 `ScrolledWindow` 导致窗口最小高度随事件数增长的问题。验证：新增 21 个单测（scroll 5、stream 7、turn nav 5、presentation 4）+ 1 个 fork 边界 transcript 单测，35 个测试套件全部通过；headless sway 截图确认 fork 分隔条、8 轮轨道与活动轮次高亮、点击 Turn 1 跳到首轮并出现回底按钮、回底后按钮隐藏且活动标记回到第 8 轮。未验证：真实模型流式（本机 `DEEPSEEK_API_KEY` 仍 401）、完整 turn outline（G12）、`collapseTiming`/`foldedReplies` 与整轮外折叠时机。
+- 项 10–12：待实施。
 - 模型链路根因修复：bridge catalog 默认 provider 改为 `agentDefaultModel` 校验值（`deepseek-official`），App 采纳目录默认并纠正失效会话；BridgeCredentials 从 `*_API_KEY` 环境变量取种（`81f1d2c`）。
