@@ -11,10 +11,14 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc::unbounded_channel, RwLock};
 
+const DSH_VERSION_FALLBACK: &str = "0.2.2-rc.1";
+const PROTOCOL_VERSION_FALLBACK: &str = "1";
+
 #[derive(Clone)]
 pub struct SettingsDialogHandle {
     refresh: Rc<dyn Fn()>,
     refresh_catalog: Rc<dyn Fn()>,
+    version_info: Rc<dyn Fn(Option<&crate::protocol::InitializeResult>)>,
 }
 
 impl SettingsDialogHandle {
@@ -24,6 +28,10 @@ impl SettingsDialogHandle {
 
     pub fn refresh_model_catalog(&self) {
         (self.refresh_catalog)();
+    }
+
+    pub fn refresh_version_info(&self, init: Option<&crate::protocol::InitializeResult>) {
+        (self.version_info)(init);
     }
 }
 
@@ -573,15 +581,81 @@ pub fn build_preferences_dialog(
 
     let dsh_version_row = adw::ActionRow::builder()
         .title("dsh Version")
-        .subtitle("0.2.2-rc.1")
+        .subtitle(DSH_VERSION_FALLBACK)
         .build();
     general_group.add(&dsh_version_row);
 
     let protocol_version_row = adw::ActionRow::builder()
         .title("Protocol Version")
-        .subtitle("1")
+        .subtitle(PROTOCOL_VERSION_FALLBACK)
         .build();
     general_group.add(&protocol_version_row);
+
+    let diagnostics_list = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(2)
+        .build();
+    let diagnostics_expander = gtk4::Expander::builder()
+        .label("Recent diagnostics")
+        .child(&diagnostics_list)
+        .build();
+    general_group.add(&diagnostics_expander);
+
+    let diagnostics_conn = controller.as_ref().map(|ctrl| ctrl.connection_handle());
+    let load_diagnostics: Rc<dyn Fn()> = {
+        let conn = diagnostics_conn.clone();
+        let list = diagnostics_list.clone();
+        Rc::new(move || {
+            let Some(conn) = conn.clone() else {
+                return;
+            };
+            let rx = rpc_receiver::<serde_json::Value, DiagnosticsRecentResult>(
+                conn,
+                METHOD_DIAGNOSTICS_RECENT,
+                serde_json::json!({}),
+                Duration::from_secs(5),
+            );
+            let list_for_ui = list.clone();
+            gtk4::glib::MainContext::default().spawn_local(async move {
+                let mut rx = rx;
+                let Some(Ok(result)) = rx.recv().await else {
+                    return;
+                };
+                while let Some(child) = list_for_ui.first_child() {
+                    list_for_ui.remove(&child);
+                }
+                if result.entries.is_empty() {
+                    let row = adw::ActionRow::builder().title("No recent diagnostics").build();
+                    list_for_ui.append(&row);
+                    return;
+                }
+                for entry in result.entries.iter().rev() {
+                    let row = gtk4::Label::builder()
+                        .label(entry)
+                        .xalign(0.0)
+                        .wrap(true)
+                        .css_classes(["monospace", "caption", "dim-label"])
+                        .build();
+                    list_for_ui.append(&row);
+                }
+            });
+        })
+    };
+
+    let version_rows: Rc<dyn Fn(Option<&crate::protocol::InitializeResult>)> = {
+        let dsh_version_row = dsh_version_row.clone();
+        let protocol_version_row = protocol_version_row.clone();
+        Rc::new(move |init| match init {
+            Some(init) => {
+                dsh_version_row.set_subtitle(&init.dsh_version);
+                protocol_version_row.set_subtitle(&init.protocol_version.to_string());
+            }
+            None => {
+                dsh_version_row.set_subtitle(DSH_VERSION_FALLBACK);
+                protocol_version_row.set_subtitle(PROTOCOL_VERSION_FALLBACK);
+            }
+        })
+    };
 
     general_page.add(&general_group);
     dialog.add(&general_page);
@@ -1401,11 +1475,13 @@ pub fn build_preferences_dialog(
     dialog.add(&bridge_page);
 
     let refresh_controller = controller.clone();
+    let diagnostics_loader = load_diagnostics.clone();
     let values_for_refresh = settings_values_label.clone();
     let descriptors_for_refresh = descriptors_label.clone();
     let goal_title_for_refresh = goal_title_label.clone();
     let goal_detail_for_refresh = goal_detail_label.clone();
     let refresh: Rc<dyn Fn()> = Rc::new(move || {
+        diagnostics_loader();
         values_for_refresh.set_label("Loading settings…");
         descriptors_for_refresh.set_label("Loading descriptors…");
         goal_title_for_refresh.set_label("Loading goal…");
@@ -1537,6 +1613,7 @@ pub fn build_preferences_dialog(
         SettingsDialogHandle {
             refresh,
             refresh_catalog: load_catalog.clone(),
+            version_info: version_rows,
         },
     )
 }

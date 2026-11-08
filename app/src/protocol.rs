@@ -2756,7 +2756,13 @@ pub fn build_question_answer(
 }
 
 pub const METHOD_ATTACHMENT_UPLOAD: &str = "libadwaita/attachment/upload";
-pub const METHOD_ATTACHMENT_READ: &str = "libadwaita/attachment/read";
+pub const METHOD_DIAGNOSTICS_RECENT: &str = "libadwaita/diagnostics/recent";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticsRecentResult {
+    pub entries: Vec<String>,
+}pub const METHOD_ATTACHMENT_READ: &str = "libadwaita/attachment/read";
 pub const METHOD_SESSION_SEARCH: &str = "libadwaita/session/search";
 pub const METHOD_SESSION_PROJECTIONS: &str = "libadwaita/session/projections";
 pub const NOTIFICATION_SESSION_PROJECTION: &str = "session.projection";

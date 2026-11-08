@@ -431,6 +431,10 @@ impl HarnessSupervisor {
         self.stdout_purity_violations.load(Ordering::Acquire)
     }
 
+    pub async fn socket_path(&self) -> Option<PathBuf> {
+        self.socket_path.read().await.clone()
+    }
+
     pub async fn start(&self) -> Result<InitializeResult, SupervisorError> {
         {
             let mut sm = self.state_machine.lock().await;
@@ -439,8 +443,7 @@ impl HarnessSupervisor {
 
         ensure_managed_profile(&self.config.dsh_home, &self.config.profile_config)?;
 
-        let lock_path = self.config.dsh_home.join(".instance.lock");
-        let lock = OpenOptions::new()
+        let lock_path = self.config.dsh_home.join(".instance.lock");        let lock = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)

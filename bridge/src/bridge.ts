@@ -12,6 +12,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session';
 import { buildForkSeed } from '@deepseek-ai/dsh-session/fork';
 import { SessionPersistenceNotFoundError } from '@deepseek-ai/dsh-session-persistence';
 import type { BridgeCredentials } from './credentials.js';
+import { captureConsoleDiagnostics, DiagnosticsBuffer } from './diagnostics.js';
 import { RegistryProbe } from './registry-probe.js';
 import { BridgeServer } from './server.js';
 import {
@@ -330,6 +331,7 @@ export class BridgeService extends Service {
   private readonly pendingQuestionsBySession = new Map<string, SdkUserQuestionRequest>();
   private readonly projectionRevisions = new Map<string, number>();
   private readonly projectionSignatures = new Map<string, string>();
+  private readonly diagnostics = new DiagnosticsBuffer(50);
   private readonly registryProbe = new RegistryProbe();
 
   constructor(ctx: Context, config: BridgeConfig = {}) {
@@ -361,6 +363,7 @@ export class BridgeService extends Service {
 
   protected async [Service.init](): Promise<void> {
     await this.server.start();
+    void captureConsoleDiagnostics(this.diagnostics);
     void this.ensureDefaultWorkspace();
 
     this.ctx.on('agent/assistant-stream', (payload: unknown) => {
@@ -868,6 +871,8 @@ export class BridgeService extends Service {
         return this.handlePluginInventory();
       case 'libadwaita/model/discover':
         return this.handleModelDiscover(params as unknown as ModelDiscoverParams);
+      case 'libadwaita/diagnostics/recent':
+        return { entries: this.diagnostics.list() };
       case 'libadwaita/web-search/providers':
         return this.handleWebProviders();
       case 'libadwaita/subagent/list':

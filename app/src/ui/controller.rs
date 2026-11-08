@@ -182,10 +182,14 @@ pub enum UiMessage {
         result: Result<PluginVersionList, String>,
     },
     PluginUpdateDone(Result<PluginUpdateResult, String>),
-    SupervisorRestarted(BridgeConnection),
+    SupervisorRestarted {
+        connection: BridgeConnection,
+        init: Option<InitializeResult>,
+    },
     SupervisorStarted {
         supervisor: Arc<HarnessSupervisor>,
         connection: BridgeConnection,
+        init: Option<InitializeResult>,
     },
     SupervisorStartFailed(String),
     ConnectionLost,
@@ -455,6 +459,10 @@ pub struct SessionController {
     gap_repair: Rc<RefCell<Option<GapRepairState>>>,
     pending_images: Rc<RefCell<Vec<PendingImage>>>,
     pending_auto_send: Rc<RefCell<Option<String>>>,
+    reconnect_active: Rc<Cell<bool>>,
+    reconnect_generation: Rc<Cell<u64>>,
+    init_result: Rc<RefCell<Option<InitializeResult>>>,
+    has_supervisor: Rc<Cell<bool>>,
     pending_interactions: Rc<RefCell<HashMap<String, Vec<PendingInteraction>>>>,
     takeover_key: Rc<RefCell<Option<(String, u64)>>>,
     interaction_seq: Rc<Cell<u64>>,
@@ -531,6 +539,10 @@ impl SessionController {
             gap_repair: Rc::new(RefCell::new(None)),
             pending_images: Rc::new(RefCell::new(Vec::new())),
             pending_auto_send: Rc::new(RefCell::new(None)),
+            reconnect_active: Rc::new(Cell::new(false)),
+            reconnect_generation: Rc::new(Cell::new(0)),
+            init_result: Rc::new(RefCell::new(None)),
+            has_supervisor: Rc::new(Cell::new(false)),
             pending_interactions: Rc::new(RefCell::new(HashMap::new())),
             takeover_key: Rc::new(RefCell::new(None)),
             interaction_seq: Rc::new(Cell::new(1)),
@@ -648,7 +660,11 @@ impl SessionController {
         banner_for_retry.connect_button_clicked(move |banner| {
             banner.set_revealed(false);
             if let Some(ctrl) = ctrl_weak_banner.upgrade() {
-                ctrl.bootstrap_supervisor();
+                if ctrl.has_supervisor() {
+                    ctrl.start_reconnect_loop(true);
+                } else {
+                    ctrl.bootstrap_supervisor();
+                }
             }
         });
 
@@ -758,11 +774,12 @@ impl SessionController {
             };
 
             match supervisor.start().await {
-                Ok(_) => {
+                Ok(init) => {
                     if let Some(connection) = supervisor.connection().await {
                         let _ = ui_sender.send(UiMessage::SupervisorStarted {
                             supervisor,
                             connection,
+                            init: Some(init),
                         });
                     } else {
                         let _ = ui_sender.send(UiMessage::SupervisorStartFailed(
@@ -779,6 +796,19 @@ impl SessionController {
 
     fn weak_self(&self) -> Weak<SessionController> {
         self.self_weak.borrow().clone()
+    }
+
+    pub fn has_supervisor(&self) -> bool {
+        self.has_supervisor.get()
+    }
+
+    fn store_init_result(&self, init: Option<InitializeResult>) {
+        if init.is_some() {
+            *self.init_result.borrow_mut() = init;
+        }
+        if let Some(handle) = self.settings_dialog.borrow().as_ref() {
+            handle.refresh_version_info(self.init_result.borrow().as_ref());
+        }
     }
 
     pub fn active_session_id(&self) -> Option<String> {
@@ -3949,11 +3979,71 @@ impl SessionController {
             let sup_opt = sup_arc.read().await.clone();
             if let Some(sup) = sup_opt {
                 let _ = sup.stop().await;
-                if let Ok(_init) = sup.start().await {
+                if let Ok(init) = sup.start().await {
                     if let Some(conn) = sup.connection().await {
-                        let _ = ui_sender.send(UiMessage::SupervisorRestarted(conn));
+                        let _ = ui_sender.send(UiMessage::SupervisorRestarted {
+                            connection: conn,
+                            init: Some(init),
+                        });
                     }
                 }
+            }
+        });
+    }
+
+    pub fn next_reconnect_delay_ms(attempt: u32) -> u64 {
+        const CAP_MS: u64 = 30_000;
+        let step = attempt.min(5);
+        1000u64.saturating_mul(1u64 << step).min(CAP_MS)
+    }
+
+    pub fn start_reconnect_loop(&self, immediate: bool) {
+        if self.reconnect_active.get() {
+            return;
+        }
+        self.reconnect_active.set(true);
+        let generation = self.reconnect_generation.get().wrapping_add(1);
+        self.reconnect_generation.set(generation);
+        let sup_arc = self.supervisor.clone();
+        let ui_sender = self.ui_sender.clone();
+
+        tokio_runtime().spawn(async move {
+            let mut attempt: u32 = 0;
+            loop {
+                let delay_ms = if attempt == 0 && immediate {
+                    0
+                } else {
+                    Self::next_reconnect_delay_ms(attempt)
+                };
+                if delay_ms > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                }
+                let sup_opt = sup_arc.read().await.clone();
+                let Some(sup) = sup_opt else {
+                    return;
+                };
+                let mut connection = None;
+                let mut init = None;
+                if let Some(path) = sup.socket_path().await {
+                    if let Ok(conn) = BridgeConnection::connect_unix(&path).await {
+                        connection = Some(conn);
+                    }
+                }
+                if connection.is_none() && attempt % 3 == 2 {
+                    let _ = sup.stop().await;
+                    if let Ok(result) = sup.start().await {
+                        init = Some(result);
+                        connection = sup.connection().await;
+                    }
+                }
+                if let Some(conn) = connection {
+                    let _ = ui_sender.send(UiMessage::SupervisorRestarted {
+                        connection: conn,
+                        init,
+                    });
+                    return;
+                }
+                attempt += 1;
             }
         });
     }
@@ -4317,10 +4407,12 @@ impl SessionController {
                             show_onboarding_dialog(&win, ctrl, store.clone());
                         }
                     }
-                    UiMessage::SupervisorRestarted(new_conn) => {
+                    UiMessage::SupervisorRestarted { connection, init } => {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.reconnect_active.set(false);
+                            ctrl.store_init_result(init);
                             ctrl.show_ready();
-                            ctrl.set_connection(new_conn);
+                            ctrl.set_connection(connection);
                             let sess_id_opt =
                                 { active_sess.borrow().as_ref().map(|s| s.id.clone()) };
                             if let Some(id) = sess_id_opt {
@@ -4328,14 +4420,21 @@ impl SessionController {
                             }
                             ctrl.conversation_view.plugins_page().on_connection_ready();
                             ctrl.refresh_permission_catalog();
+                            if let Some(handle) = ctrl.settings_dialog.borrow().as_ref() {
+                                handle.refresh_version_info(ctrl.init_result.borrow().as_ref());
+                            }
                         }
-                        toast_overlay.add_toast(adw::Toast::new("dsh restarted successfully"));
+                        toast_overlay.add_toast(adw::Toast::new("dsh reconnected"));
                     }
                     UiMessage::SupervisorStarted {
                         supervisor,
                         connection,
+                        init,
                     } => {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.reconnect_active.set(false);
+                            ctrl.has_supervisor.set(true);
+                            ctrl.store_init_result(init);
                             ctrl.show_ready();
                             ctrl.mark_restore_pending();
                             ctrl.set_supervisor(supervisor);
@@ -4355,6 +4454,7 @@ impl SessionController {
                             ctrl.pending_draft.borrow_mut().take();
                             ctrl.fail_pending_interactions();
                             ctrl.show_connection_lost();
+                            ctrl.start_reconnect_loop(false);
                         }
                     }
                     UiMessage::SessionReleased => {
