@@ -32,6 +32,7 @@ pub enum RenderBlock {
         is_live: bool,
         attempt_id: Option<String>,
         seq: Option<i64>,
+        message_id: Option<String>,
         time: u64,
     },
     ToolResult {
@@ -306,6 +307,7 @@ impl ConversationTranscript {
                 is_live: true,
                 attempt_id: Some(b.attempt_id),
                 seq: None,
+                message_id: None,
                 time: 0,
             };
 
@@ -360,6 +362,7 @@ impl ConversationTranscript {
                     is_live: true,
                     attempt_id: Some(attempt_id),
                     seq: None,
+                    message_id: None,
                     time: 0,
                 });
             }
@@ -469,6 +472,7 @@ impl ConversationTranscript {
                 is_live: true,
                 attempt_id: Some(attempt_id.to_string()),
                 seq: None,
+                message_id: None,
                 time: 0,
             });
         }
@@ -541,6 +545,7 @@ impl ConversationTranscript {
             "assistant/message" => {
                 let text = Self::extract_assistant_text(&event.data);
                 let attachments = parse_message_attachments(&event.data);
+                let message_id = event.data["message"]["id"].as_str().map(str::to_string);
                 let mut matched_idx = None;
 
                 for (idx, block) in self.blocks.iter_mut().enumerate().rev() {
@@ -551,12 +556,14 @@ impl ConversationTranscript {
                             text: b_text,
                             time: b_time,
                             attachments: b_attachments,
+                            message_id: b_message_id,
                             ..
                         } => {
                             if *is_live || *seq == Some(event.seq) {
                                 *is_live = false;
                                 *seq = Some(event.seq);
                                 *b_time = event.time;
+                                *b_message_id = message_id.clone();
                                 if !text.is_empty() {
                                     *b_text = text.clone();
                                 }
@@ -581,6 +588,7 @@ impl ConversationTranscript {
                         is_live: false,
                         attempt_id: None,
                         seq: Some(event.seq),
+                        message_id,
                         time: event.time,
                     });
                     self.live_attempt = None;
@@ -1250,24 +1258,25 @@ pub fn parse_message_attachments(data: &serde_json::Value) -> Vec<MessageAttachm
     for block in blocks {
         let block_type = block["type"].as_str().unwrap_or_default();
         if block_type == "image" {
-            let attachment_id = block["attachment"]
-                .as_str()
-                .map(str::to_string)
-                .or_else(|| block["attachment"]["id"].as_str().map(str::to_string))
-                .or_else(|| block["attachment"]["attachmentId"].as_str().map(str::to_string))
+            let reference = parse_image_attachment_ref(&block["attachment"]);
+            let attachment_id = reference
+                .as_ref()
+                .map(|value| value.attachment_id.clone())
+                .or_else(|| block["attachment"].as_str().map(str::to_string))
                 .or_else(|| block["attachmentId"].as_str().map(str::to_string));
             attachments.push(MessageAttachment::Image(UserImageAttachment {
-                name: block["attachment"]["name"]
-                    .as_str()
-                    .or_else(|| block["name"].as_str())
-                    .map(str::to_string),
-                mime_type: block["attachment"]["mediaType"]
-                    .as_str()
-                    .or_else(|| block["mimeType"].as_str())
-                    .unwrap_or("image/png")
-                    .to_string(),
+                name: reference
+                    .as_ref()
+                    .and_then(|value| value.name.clone())
+                    .or_else(|| block["name"].as_str().map(str::to_string)),
+                mime_type: reference
+                    .as_ref()
+                    .map(|value| value.media_type.clone())
+                    .or_else(|| block["mimeType"].as_str().map(str::to_string))
+                    .unwrap_or_else(|| "image/png".to_string()),
                 data: block["data"].as_str().map(str::to_string),
                 attachment_id,
+                reference,
             }));
         } else if block_type == "file" {
             let attachment_id = block["attachment"]["attachmentId"]

@@ -9,6 +9,7 @@ pub mod file_tree;
 pub mod files_panel;
 pub mod goal_bar;
 pub mod hero;
+pub mod image_cache;
 pub mod interaction_card;
 pub mod layout;
 pub mod message_renderer;

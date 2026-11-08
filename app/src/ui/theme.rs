@@ -281,6 +281,19 @@ menubutton.dsh-icon-button > button:active, menubutton.dsh-icon-button > button:
 .dsh-composer-shell {
   background: transparent;
 }
+.dsh-composer-attachments {
+  background: transparent;
+}
+.dsh-feedback-chip {
+  min-height: 28px;
+  padding: 0 12px;
+  border-radius: 999px;
+  font-size: 13px;
+}
+.dsh-feedback-chip:checked {
+  background: var(--accent-bg-color);
+  color: var(--accent-fg-color);
+}
 .dsh-interaction-card {
   margin: 6px 24px 10px;
   border: 1px solid color-mix(in srgb, var(--warning-color) 35%, var(--border-color));

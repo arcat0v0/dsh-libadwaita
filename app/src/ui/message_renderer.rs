@@ -1,4 +1,5 @@
 use crate::protocol::{MessageFeedbackItem, TodoItem, UserImageAttachment};
+use crate::ui::image_cache::{ImageCache, ImageClaim};
 use crate::transcript::{MessageAttachment, MessageFileAttachment, RenderBlock, ToolCallItem};
 use crate::ui::controller::SessionController;
 use crate::ui::presentation::PresentationPolicy;
@@ -10,9 +11,153 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
+struct FeedbackControls {
+    message_id: String,
+    up: gtk4::Button,
+    down: gtk4::Button,
+}
+
 thread_local! {
     static UI_CONTROLLER: RefCell<Option<Weak<SessionController>>> = const { RefCell::new(None) };
     static FEEDBACK: RefCell<HashMap<String, MessageFeedbackItem>> = RefCell::new(HashMap::new());
+    static FEEDBACK_CONTROLS: RefCell<Vec<Weak<FeedbackControls>>> = const { RefCell::new(Vec::new()) };
+    static IMAGE_CACHE: RefCell<ImageCache<Vec<u8>>> = RefCell::new(ImageCache::default());
+    static IMAGE_WAITERS: RefCell<HashMap<(String, String), Vec<gtk4::glib::WeakRef<gtk4::Picture>>>> = RefCell::new(HashMap::new());
+}
+
+pub fn release_image_session(session_id: &str) {
+    IMAGE_CACHE.with(|cache| {
+        cache.borrow_mut().release_session(session_id);
+    });
+    IMAGE_WAITERS.with(|waiters| {
+        waiters
+            .borrow_mut()
+            .retain(|(session, _), _| session != session_id);
+    });
+}
+
+pub fn request_image(session_id: &str, image: &UserImageAttachment, picture: &gtk4::Picture) {
+    if let Some(data) = image.data.as_deref() {
+        if let Some(bytes) = crate::attachments::decode_base64(data) {
+            if let (Some(attachment_id), Some(_)) = (image.attachment_id.as_deref(), image.reference.as_ref()) {
+                IMAGE_CACHE.with(|cache| {
+                    cache
+                        .borrow_mut()
+                        .seed(session_id, attachment_id, bytes.clone());
+                });
+            }
+            set_picture_bytes(picture, &bytes);
+        }
+        return;
+    }
+    let (Some(attachment_id), Some(_)) = (image.attachment_id.as_deref(), image.reference.as_ref()) else {
+        return;
+    };
+    let claim = IMAGE_CACHE.with(|cache| {
+        cache
+            .borrow_mut()
+            .claim(session_id, attachment_id)
+    });
+    match claim {
+        ImageClaim::Ready => {
+            let bytes = IMAGE_CACHE.with(|cache| {
+                cache
+                    .borrow()
+                    .peek(session_id, attachment_id)
+                    .cloned()
+            });
+            if let Some(bytes) = bytes {
+                set_picture_bytes(picture, &bytes);
+            }
+        }
+        ImageClaim::Pending => register_image_waiter(session_id, attachment_id, picture),
+        ImageClaim::Load => {
+            register_image_waiter(session_id, attachment_id, picture);
+            spawn_image_load(session_id.to_string(), image.clone());
+        }
+    }
+}
+
+fn register_image_waiter(session_id: &str, attachment_id: &str, picture: &gtk4::Picture) {
+    IMAGE_WAITERS.with(|waiters| {
+        waiters
+            .borrow_mut()
+            .entry((session_id.to_string(), attachment_id.to_string()))
+            .or_default()
+            .push(picture.downgrade());
+    });
+}
+
+fn spawn_image_load(session_id: String, image: UserImageAttachment) {
+    let Some(attachment_id) = image.attachment_id.clone() else {
+        return;
+    };
+    let Some(controller) = controller_ref() else {
+        return;
+    };
+    let conn = controller.connection_handle();
+    let session_for_load = session_id.clone();
+    let attachment_for_load = attachment_id.clone();
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<
+        Result<crate::protocol::AttachmentReadResult, String>,
+    >();
+    crate::ui::controller::tokio_runtime().spawn(async move {
+        let conn_opt = conn.read().await.clone();
+        let Some(conn) = conn_opt else {
+            return;
+        };
+        let result = conn
+            .call::<crate::protocol::AttachmentReadParams, crate::protocol::AttachmentReadResult>(
+                crate::protocol::METHOD_ATTACHMENT_READ,
+                crate::protocol::AttachmentReadParams {
+                    session_id: session_for_load,
+                    attachment_id: attachment_for_load,
+                    encoding: Some("base64".to_string()),
+                    attachment: image.reference,
+                },
+                std::time::Duration::from_secs(15),
+            )
+            .await
+            .map_err(|err| err.to_string());
+        let _ = sender.send(result);
+    });
+    gtk4::glib::MainContext::default().spawn_local(async move {
+        let result = receiver.recv().await;
+        let waiters = take_image_waiters(&session_id, &attachment_id);
+        match result {
+            Some(Ok(read)) => {
+                if let Some(bytes) = crate::attachments::decode_base64(&read.data) {
+                    IMAGE_CACHE.with(|cache| {
+                        cache
+                            .borrow_mut()
+                            .complete(&session_id, &attachment_id, bytes.clone());
+                    });
+                    for picture in waiters {
+                        set_picture_bytes(&picture, &bytes);
+                    }
+                } else {
+                    IMAGE_CACHE.with(|cache| {
+                        cache.borrow_mut().fail(&session_id, &attachment_id);
+                    });
+                }
+            }
+            _ => {
+                IMAGE_CACHE.with(|cache| {
+                    cache.borrow_mut().fail(&session_id, &attachment_id);
+                });
+            }
+        }
+    });
+}
+
+fn take_image_waiters(session_id: &str, attachment_id: &str) -> Vec<gtk4::Picture> {
+    IMAGE_WAITERS.with(|waiters| {
+        waiters
+            .borrow_mut()
+            .remove(&(session_id.to_string(), attachment_id.to_string()))
+            .map(|entries| entries.into_iter().filter_map(|weak| weak.upgrade()).collect())
+            .unwrap_or_default()
+    })
 }
 
 pub fn set_controller(controller: &Rc<SessionController>) {
@@ -29,6 +174,44 @@ pub fn set_feedback_items(items: &[MessageFeedbackItem]) {
             map.insert(item.message_id.clone(), item.clone());
         }
     });
+    refresh_feedback_controls();
+}
+
+pub fn set_feedback_item(item: MessageFeedbackItem) {
+    let message_id = item.message_id.clone();
+    FEEDBACK.with(|feedback| {
+        feedback.borrow_mut().insert(message_id, item);
+    });
+    refresh_feedback_controls();
+}
+
+pub fn remove_feedback_item(message_id: &str) {
+    FEEDBACK.with(|feedback| {
+        feedback.borrow_mut().remove(message_id);
+    });
+    refresh_feedback_controls();
+}
+
+fn refresh_feedback_controls() {
+    FEEDBACK_CONTROLS.with(|controls| {
+        let mut controls = controls.borrow_mut();
+        controls.retain(|control| control.strong_count() > 0);
+        for control in controls.iter().filter_map(Weak::upgrade) {
+            let rating = feedback_for(&control.message_id).map(|item| item.rating);
+            apply_rating_style(&control.up, rating.as_deref() == Some("positive"), "Good response");
+            apply_rating_style(&control.down, rating.as_deref() == Some("negative"), "Bad response");
+        }
+    });
+}
+
+fn apply_rating_style(button: &gtk4::Button, active: bool, base_tooltip: &str) {
+    if active {
+        button.add_css_class("accent");
+        button.set_tooltip_text(Some(&format!("{} (click to remove)", base_tooltip)));
+    } else {
+        button.remove_css_class("accent");
+        button.set_tooltip_text(Some(base_tooltip));
+    }
 }
 
 fn feedback_for(message_id: &str) -> Option<MessageFeedbackItem> {
@@ -721,6 +904,7 @@ pub struct LiveAssistantWidgets {
     pub reasoning_text: RefCell<String>,
     pub running: std::cell::Cell<bool>,
     pub fork_button: RefCell<Option<gtk4::Button>>,
+    pub actions_built: std::cell::Cell<bool>,
 }
 
 #[derive(Clone)]
@@ -764,17 +948,18 @@ impl AssistantLiveHandle {
         self.refresh_reasoning_header();
     }
 
-    pub fn finalize(&self, seq: Option<i64>, time: u64) {
+    pub fn finalize(&self, seq: Option<i64>, message_id: Option<&str>, time: u64) {
         let widgets = self.inner.borrow();
         widgets.running.set(false);
         widgets.spinner.stop();
         widgets.spinner.set_visible(false);
-        if widgets.fork_button.borrow().is_none() {
-            if let Some(message_seq) = seq {
-                let text = widgets.text.borrow().clone();
-                let (actions, fork) = build_assistant_actions(&text, message_seq, time);
-                widgets.bubble.append(&actions);
-                *widgets.fork_button.borrow_mut() = Some(fork);
+        if !widgets.actions_built.get() && (seq.is_some() || message_id.is_some()) {
+            let text = widgets.text.borrow().clone();
+            let (actions, fork) = build_assistant_actions(&text, seq, message_id, time);
+            widgets.bubble.append(&actions);
+            widgets.actions_built.set(true);
+            if widgets.fork_button.borrow().is_none() {
+                *widgets.fork_button.borrow_mut() = fork;
             }
         }
         drop(widgets);
@@ -806,7 +991,7 @@ pub fn build_user_message(
     _seq: i64,
     images: &[UserImageAttachment],
 ) -> gtk4::Box {
-    let masked = crate::drafts::mask_secret_patterns(text);
+    let masked = crate::secret_mask::mask_secret_patterns(text);
     let row = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Horizontal)
         .halign(gtk4::Align::End)
@@ -1122,48 +1307,12 @@ fn build_user_image(image: &UserImageAttachment) -> gtk4::Button {
         dialog.set_child(Some(&scroll));
         dialog.present(Some(&picture_for_dialog));
     });
-    if let Some(data) = &image.data {
+    if let Some(session_id) = controller_ref().and_then(|controller| controller.active_session_id()) {
+        request_image(&session_id, image, &picture);
+    } else if let Some(data) = image.data.as_deref() {
         if let Some(bytes) = crate::attachments::decode_base64(data) {
             set_picture_bytes(&picture, &bytes);
         }
-    } else if let Some(attachment_id) = &image.attachment_id {
-        let Some(controller) = controller_ref() else {
-            return button;
-        };
-        let Some(session_id) = controller.active_session_id() else {
-            return button;
-        };
-        let conn = controller.connection_handle();
-        let attachment_id = attachment_id.clone();
-        let (sender, mut receiver) =
-            tokio::sync::mpsc::unbounded_channel::<Result<crate::protocol::AttachmentReadResult, String>>();
-        crate::ui::controller::tokio_runtime().spawn(async move {
-            let conn_opt = conn.read().await.clone();
-            let Some(conn) = conn_opt else {
-                return;
-            };
-            let result = conn
-                .call::<crate::protocol::AttachmentReadParams, crate::protocol::AttachmentReadResult>(
-                    crate::protocol::METHOD_ATTACHMENT_READ,
-                    crate::protocol::AttachmentReadParams {
-                        session_id,
-                        attachment_id,
-                        encoding: Some("base64".to_string()),
-                    },
-                    std::time::Duration::from_secs(15),
-                )
-                .await
-                .map_err(|err| err.to_string());
-            let _ = sender.send(result);
-        });
-        let picture_for_load = picture.clone();
-        gtk4::glib::MainContext::default().spawn_local(async move {
-            if let Some(Ok(read)) = receiver.recv().await {
-                if let Some(bytes) = crate::attachments::decode_base64(&read.data) {
-                    set_picture_bytes(&picture_for_load, &bytes);
-                }
-            }
-        });
     }
     button
 }
@@ -1187,6 +1336,7 @@ pub fn build_assistant_message(
     attachments: &[MessageAttachment],
     is_live: bool,
     seq: Option<i64>,
+    message_id: Option<&str>,
     time: u64,
     policy: PresentationPolicy,
 ) -> (gtk4::Box, AssistantLiveHandle) {
@@ -1333,12 +1483,11 @@ pub fn build_assistant_message(
     bubble.append(&spinner);
 
     let mut fork_button = None;
-    if !is_live {
-        if let Some(message_seq) = seq {
-            let (actions_box, fork) = build_assistant_actions(text, message_seq, time);
-            bubble.append(&actions_box);
-            fork_button = Some(fork);
-        }
+    let actions_built = !is_live && (seq.is_some() || message_id.is_some());
+    if actions_built {
+        let (actions_box, fork) = build_assistant_actions(text, seq, message_id, time);
+        bubble.append(&actions_box);
+        fork_button = fork;
     }
 
     row.append(&bubble);
@@ -1360,6 +1509,7 @@ pub fn build_assistant_message(
         reasoning_text: RefCell::new(reasoning_text.to_string()),
         running: std::cell::Cell::new(is_live),
         fork_button: RefCell::new(fork_button),
+        actions_built: std::cell::Cell::new(actions_built),
     };
 
     let handle = AssistantLiveHandle {
@@ -1375,9 +1525,10 @@ pub fn build_assistant_message(
 
 fn build_assistant_actions(
     text: &str,
-    message_seq: i64,
+    message_seq: Option<i64>,
+    message_id: Option<&str>,
     time: u64,
-) -> (gtk4::Box, gtk4::Button) {
+) -> (gtk4::Box, Option<gtk4::Button>) {
     let actions_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Horizontal)
         .spacing(6)
@@ -1411,109 +1562,201 @@ fn build_assistant_actions(
             actions_box.append(&time_label);
         }
     }
-    let fork_btn = gtk4::Button::builder()
-        .icon_name("view-more-symbolic")
-        .tooltip_text("Fork from here")
-        .css_classes(["flat", "circular"])
-        .visible(false)
-        .build();
-    fork_btn.set_action_name(Some("win.fork-session"));
-    fork_btn.set_action_target_value(Some(&message_seq.to_variant()));
-    actions_box.append(&fork_btn);
-    let message_id = message_seq.to_string();
-    let existing = feedback_for(&message_id);
-    let up = gtk4::Button::builder()
-        .icon_name("thumbs-up-symbolic")
-        .tooltip_text("Good response")
-        .css_classes(["flat", "circular"])
-        .build();
-    if existing.as_ref().map(|item| item.rating.as_str()) == Some("positive") {
-        up.add_css_class("accent");
+    let fork_btn = message_seq.map(|message_seq| {
+        let button = gtk4::Button::builder()
+            .icon_name("view-more-symbolic")
+            .tooltip_text("Fork from here")
+            .css_classes(["flat", "circular"])
+            .visible(false)
+            .build();
+        button.set_action_name(Some("win.fork-session"));
+        button.set_action_target_value(Some(&message_seq.to_variant()));
+        actions_box.append(&button);
+        button
+    });
+    if let Some(message_id) = message_id {
+        let up = gtk4::Button::builder()
+            .icon_name("thumbs-up-symbolic")
+            .tooltip_text("Good response")
+            .css_classes(["flat", "circular"])
+            .build();
+        let down = gtk4::Button::builder()
+            .icon_name("thumbs-down-symbolic")
+            .tooltip_text("Bad response")
+            .css_classes(["flat", "circular"])
+            .build();
+        let controls = Rc::new(FeedbackControls {
+            message_id: message_id.to_string(),
+            up: up.clone(),
+            down: down.clone(),
+        });
+        FEEDBACK_CONTROLS.with(|registry| registry.borrow_mut().push(Rc::downgrade(&controls)));
+        let up_id = message_id.to_string();
+        let up_anchor = up.clone();
+        up.connect_clicked(move |_| {
+            choose_feedback_rating(&up_id, "positive", up_anchor.upcast_ref());
+        });
+        let down_id = message_id.to_string();
+        let down_anchor = down.clone();
+        down.connect_clicked(move |_| {
+            choose_feedback_rating(&down_id, "negative", down_anchor.upcast_ref());
+        });
+        actions_box.append(&up);
+        actions_box.append(&down);
+        let note = gtk4::Button::builder()
+            .label("Feedback")
+            .tooltip_text("Send session feedback")
+            .css_classes(["flat"])
+            .build();
+        let note_anchor = note.clone();
+        note.connect_clicked(move |_| {
+            open_session_feedback_dialog(note_anchor.upcast_ref());
+        });
+        actions_box.append(&note);
+        refresh_feedback_controls();
     }
-    let down = gtk4::Button::builder()
-        .icon_name("thumbs-down-symbolic")
-        .tooltip_text("Bad response")
-        .css_classes(["flat", "circular"])
-        .build();
-    if existing.as_ref().map(|item| item.rating.as_str()) == Some("negative") {
-        down.add_css_class("accent");
-    }
-    let up_id = message_id.clone();
-    let up_version = existing.as_ref().map(|item| item.version.clone());
-    let up_existing = existing.clone();
-    up.connect_clicked(move |_| {
-        with_controller(|ctrl| {
-            if up_existing.as_ref().map(|item| item.rating.as_str()) == Some("positive") {
-                if let Some(item) = &up_existing {
-                    ctrl.delete_feedback(&up_id, &item.version);
-                }
-            } else {
-                ctrl.put_feedback(&up_id, "positive", up_version.clone(), None, None);
-            }
-        });
-    });
-    let down_id = message_id.clone();
-    let down_version = existing.as_ref().map(|item| item.version.clone());
-    let down_existing = existing;
-    down.connect_clicked(move |_| {
-        with_controller(|ctrl| {
-            if down_existing.as_ref().map(|item| item.rating.as_str()) == Some("negative") {
-                if let Some(item) = &down_existing {
-                    ctrl.delete_feedback(&down_id, &item.version);
-                }
-            } else {
-                ctrl.put_feedback(&down_id, "negative", down_version.clone(), None, None);
-            }
-        });
-    });
-    actions_box.append(&up);
-    actions_box.append(&down);
-    let note = gtk4::Button::builder()
-        .label("Feedback")
-        .css_classes(["flat"])
-        .build();
-    let note_parent = actions_box.clone();
-    note.connect_clicked(move |_| {
-        let dialog = libadwaita::Dialog::builder()
-            .title("Session Feedback")
-            .content_width(420)
-            .build();
-        let content = gtk4::Box::builder()
-            .orientation(gtk4::Orientation::Vertical)
-            .spacing(10)
-            .margin_start(16)
-            .margin_end(16)
-            .margin_top(16)
-            .margin_bottom(16)
-            .build();
-        let entry = libadwaita::EntryRow::builder()
-            .title("What went wrong or right?")
-            .build();
-        let entry_list = gtk4::ListBox::builder()
-            .css_classes(["boxed-list"])
-            .selection_mode(gtk4::SelectionMode::None)
-            .build();
-        entry_list.append(&entry);
-        content.append(&entry_list);
-        let send = gtk4::Button::builder()
-            .label("Record")
-            .css_classes(["suggested-action"])
-            .build();
-        let dialog_for_send = dialog.clone();
-        let entry_for_send = entry.clone();
-        send.connect_clicked(move |_| {
-            let text = entry_for_send.text().to_string();
-            if !text.trim().is_empty() {
-                with_controller(|ctrl| ctrl.record_session_feedback(&text));
-            }
-            dialog_for_send.close();
-        });
-        content.append(&send);
-        dialog.set_child(Some(&content));
-        dialog.present(Some(&note_parent));
-    });
-    actions_box.append(&note);
     (actions_box, fork_btn)
+}
+
+const FEEDBACK_CATEGORIES: [(&str, &str); 7] = [
+    ("task-result", "Task result"),
+    ("instruction-following", "Instruction following"),
+    ("product-interaction", "Product interaction"),
+    ("service-stability", "Service stability"),
+    ("resource-cost", "Resource cost"),
+    ("security-privacy-permission", "Security & privacy"),
+    ("other", "Other"),
+];
+
+fn choose_feedback_rating(message_id: &str, rating: &str, anchor: &gtk4::Widget) {
+    if let Some(item) = feedback_for(message_id) {
+        if item.rating == rating {
+            with_controller(|controller| controller.delete_feedback(message_id, &item.version));
+            return;
+        }
+    }
+    open_message_feedback_dialog(message_id, rating, anchor);
+}
+
+fn open_message_feedback_dialog(message_id: &str, rating: &str, anchor: &gtk4::Widget) {
+    let message_id_for_submit = message_id.to_string();
+    let rating_for_submit = rating.to_string();
+    let title = if rating == "positive" {
+        "Good response"
+    } else {
+        "Bad response"
+    };
+    feedback_dialog(
+        title,
+        "Submit",
+        anchor,
+        move |category, note| {
+            let version = feedback_for(&message_id_for_submit).map(|item| item.version);
+            with_controller(|controller| {
+                controller.put_feedback(
+                    &message_id_for_submit,
+                    &rating_for_submit,
+                    version,
+                    note,
+                    category,
+                );
+            });
+        },
+    );
+}
+
+fn open_session_feedback_dialog(anchor: &gtk4::Widget) {
+    feedback_dialog("Session feedback", "Record", anchor, move |category, note| {
+        with_controller(|controller| controller.record_session_feedback(note.as_deref().unwrap_or(""), category));
+    });
+}
+
+fn feedback_dialog<F>(
+    title: &str,
+    submit_label: &str,
+    anchor: &gtk4::Widget,
+    on_submit: F,
+) where
+    F: Fn(Option<String>, Option<String>) + 'static,
+{
+    let dialog = libadwaita::Dialog::builder()
+        .title(title)
+        .content_width(488)
+        .build();
+    let content = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(12)
+        .margin_start(18)
+        .margin_end(18)
+        .margin_top(12)
+        .margin_bottom(18)
+        .build();
+    let chips = gtk4::FlowBox::builder()
+        .selection_mode(gtk4::SelectionMode::None)
+        .column_spacing(8)
+        .row_spacing(8)
+        .max_children_per_line(3)
+        .build();
+    let selected: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let toggles: Rc<RefCell<Vec<(String, gtk4::ToggleButton)>>> = Rc::new(RefCell::new(Vec::new()));
+    for (value, label) in FEEDBACK_CATEGORIES {
+        let chip = gtk4::ToggleButton::builder()
+            .label(label)
+            .css_classes(["dsh-feedback-chip"])
+            .build();
+        let selected_for_chip = selected.clone();
+        let toggles_for_chip = toggles.clone();
+        let value = value.to_string();
+        let value_for_chip = value.clone();
+        chip.connect_toggled(move |button| {
+            if button.is_active() {
+                *selected_for_chip.borrow_mut() = Some(value_for_chip.clone());
+                let others: Vec<gtk4::ToggleButton> = toggles_for_chip
+                    .borrow()
+                    .iter()
+                    .map(|(_, other)| other.clone())
+                    .collect();
+                for other in others {
+                    if &other != button {
+                        other.set_active(false);
+                    }
+                }
+            } else if selected_for_chip.borrow().as_deref() == Some(value_for_chip.as_str()) {
+                *selected_for_chip.borrow_mut() = None;
+            }
+        });
+        toggles.borrow_mut().push((value, chip.clone()));
+        chips.append(&chip);
+    }
+    content.append(&chips);
+    let note = gtk4::TextView::builder()
+        .wrap_mode(gtk4::WrapMode::WordChar)
+        .accepts_tab(false)
+        .build();
+    let note_scroll = gtk4::ScrolledWindow::builder()
+        .min_content_height(116)
+        .max_content_height(280)
+        .child(&note)
+        .css_classes(["card"])
+        .build();
+    content.append(&note_scroll);
+    let submit = gtk4::Button::builder()
+        .label(submit_label)
+        .css_classes(["suggested-action", "pill"])
+        .build();
+    let dialog_for_submit = dialog.clone();
+    let note_for_submit = note.clone();
+    submit.connect_clicked(move |_| {
+        let buffer = note_for_submit.buffer();
+        let (start, end) = buffer.bounds();
+        let text = buffer.text(&start, &end, false).trim().to_string();
+        let category = selected.borrow().clone();
+        on_submit(category, (!text.is_empty()).then_some(text));
+        dialog_for_submit.close();
+    });
+    content.append(&submit);
+    dialog.set_child(Some(&content));
+    dialog.present(Some(anchor));
 }
 
 pub fn build_tool_result(call_id: &str, name: &str, result: &str, is_error: bool, _seq: i64) -> gtk4::Box {
@@ -1681,6 +1924,7 @@ pub fn render_block(
             attachments,
             is_live,
             seq,
+            message_id,
             time,
             ..
         } => {
@@ -1691,6 +1935,7 @@ pub fn render_block(
                 attachments,
                 *is_live,
                 *seq,
+                message_id.as_deref(),
                 *time,
                 policy,
             );

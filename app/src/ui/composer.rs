@@ -1,8 +1,20 @@
 use crate::ui::copy::Copybook;
 use gtk4::prelude::*;
+use std::cell::RefCell;
+use std::rc::Rc;
+
+pub struct ComposerAttachmentView {
+    pub id: String,
+    pub name: String,
+    pub image: bool,
+    pub data: String,
+    pub bytes: usize,
+}
 
 pub struct Composer {
     container: gtk4::Box,
+    attachment_rail: gtk4::FlowBox,
+    on_remove_attachment: Rc<RefCell<Box<dyn Fn(String)>>>,
     text_view: gtk4::TextView,
     send_button: gtk4::Button,
     attach_button: gtk4::Button,
@@ -75,6 +87,18 @@ impl Composer {
                 placeholder.set_visible(buffer.text(&start, &end, false).is_empty());
             }
         });
+        let attachment_rail = gtk4::FlowBox::builder()
+            .selection_mode(gtk4::SelectionMode::None)
+            .max_children_per_line(6)
+            .column_spacing(6)
+            .row_spacing(6)
+            .css_classes(["dsh-composer-attachments"])
+            .margin_start(10)
+            .margin_end(10)
+            .margin_top(8)
+            .visible(false)
+            .build();
+        card_content.append(&attachment_rail);
         card_content.append(&editor_overlay);
 
         let action_bar = gtk4::Box::builder()
@@ -152,6 +176,8 @@ impl Composer {
 
         Self {
             container,
+            attachment_rail,
+            on_remove_attachment: Rc::new(RefCell::new(Box::new(|_| {}))),
             text_view,
             send_button,
             attach_button: attach_btn,
@@ -179,6 +205,105 @@ impl Composer {
 
     pub fn attach_button(&self) -> &gtk4::Button {
         &self.attach_button
+    }
+
+    pub fn set_on_remove_attachment<F: Fn(String) + 'static>(&self, callback: F) {
+        *self.on_remove_attachment.borrow_mut() = Box::new(callback);
+    }
+
+    pub fn set_attachments(&self, attachments: &[ComposerAttachmentView]) {
+        while let Some(child) = self.attachment_rail.first_child() {
+            self.attachment_rail.remove(&child);
+        }
+        self.attachment_rail.set_visible(!attachments.is_empty());
+        for attachment in attachments {
+            let item = gtk4::Box::builder()
+                .orientation(gtk4::Orientation::Vertical)
+                .spacing(2)
+                .css_classes(["card"])
+                .margin_start(2)
+                .margin_end(2)
+                .margin_top(2)
+                .margin_bottom(2)
+                .build();
+            if attachment.image {
+                let picture = gtk4::Picture::builder()
+                    .content_fit(gtk4::ContentFit::Cover)
+                    .can_shrink(true)
+                    .width_request(72)
+                    .height_request(52)
+                    .build();
+                if let Some(bytes) = crate::attachments::decode_base64(&attachment.data) {
+                    if let Ok(texture) = gtk4::gdk::Texture::from_bytes(
+                        &gtk4::glib::Bytes::from_owned(bytes),
+                    ) {
+                        picture.set_paintable(Some(&texture));
+                    }
+                }
+                let frame = gtk4::ScrolledWindow::builder()
+                    .min_content_width(72)
+                    .min_content_height(52)
+                    .max_content_width(72)
+                    .max_content_height(52)
+                    .hscrollbar_policy(gtk4::PolicyType::Never)
+                    .vscrollbar_policy(gtk4::PolicyType::Never)
+                    .child(&picture)
+                    .build();
+                frame.set_size_request(72, 52);
+                item.append(&frame);
+            } else {
+                let row = gtk4::Box::builder()
+                    .orientation(gtk4::Orientation::Horizontal)
+                    .spacing(4)
+                    .margin_start(6)
+                    .margin_end(6)
+                    .margin_top(4)
+                    .margin_bottom(2)
+                    .build();
+                row.append(&gtk4::Image::from_icon_name("text-x-generic-symbolic"));
+                let size =
+                    crate::ui::conversation::compact_token_count(attachment.bytes as u64);
+                let label = if size.is_empty() {
+                    attachment.name.clone()
+                } else {
+                    format!("{} · {}", attachment.name, size)
+                };
+                row.append(
+                    &gtk4::Label::builder()
+                        .label(&label)
+                        .css_classes(["caption"])
+                        .build(),
+                );
+                item.append(&row);
+            }
+            let footer = gtk4::Box::builder()
+                .orientation(gtk4::Orientation::Horizontal)
+                .spacing(2)
+                .margin_start(4)
+                .margin_end(4)
+                .margin_bottom(3)
+                .build();
+            footer.append(
+                &gtk4::Label::builder()
+                    .label(&attachment.name)
+                    .ellipsize(gtk4::pango::EllipsizeMode::Middle)
+                    .max_width_chars(14)
+                    .css_classes(["dim-label", "caption"])
+                    .hexpand(true)
+                    .build(),
+            );
+            let remove = gtk4::Button::builder()
+                .icon_name("window-close-symbolic")
+                .tooltip_text("Remove attachment")
+                .css_classes(["flat", "circular"])
+                .build();
+            let on_remove = self.on_remove_attachment.clone();
+            let id = attachment.id.clone();
+            remove.connect_clicked(move |_| (on_remove.borrow())(id.clone()));
+            footer.append(&remove);
+            item.append(&footer);
+            self.attachment_rail.append(&item);
+        }
     }
 
     pub fn model_button(&self) -> &gtk4::Button {

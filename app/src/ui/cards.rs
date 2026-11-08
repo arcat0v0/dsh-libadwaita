@@ -854,6 +854,7 @@ fn render_single_tool_card(info: &ToolCallInfo) -> gtk4::Box {
                         mime_type: value["mimeType"].as_str().unwrap_or("image/png").to_string(),
                         data,
                         attachment_id,
+                        reference: crate::protocol::parse_image_attachment_ref(&value),
                     },
                 );
                 card.append(&thumbnail);

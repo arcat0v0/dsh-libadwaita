@@ -874,6 +874,8 @@ pub enum PromptContentBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
+    #[serde(rename = "file")]
+    File { data: String, name: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1001,6 +1003,12 @@ pub struct QueueItem {
     pub content: Vec<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueueAttachment {
+    Image(ImageAttachmentRef),
+    File { name: String, bytes: Option<u64> },
+}
+
 impl QueueItem {
     pub fn text(&self) -> String {
         let mut parts = Vec::new();
@@ -1012,6 +1020,34 @@ impl QueueItem {
             }
         }
         parts.join("\n")
+    }
+
+    pub fn attachments(&self) -> Vec<QueueAttachment> {
+        let mut attachments = Vec::new();
+        for block in &self.content {
+            match block["type"].as_str() {
+                Some("image") => {
+                    if let Some(reference) = parse_image_attachment_ref(&block["attachment"]) {
+                        attachments.push(QueueAttachment::Image(reference));
+                    }
+                }
+                Some("file") => {
+                    let name = block["attachment"]["name"]
+                        .as_str()
+                        .or_else(|| block["name"].as_str())
+                        .unwrap_or_default();
+                    if name.is_empty() {
+                        continue;
+                    }
+                    attachments.push(QueueAttachment::File {
+                        name: name.to_string(),
+                        bytes: block["attachment"]["bytes"].as_u64(),
+                    });
+                }
+                _ => {}
+            }
+        }
+        attachments
     }
 }
 
@@ -2793,6 +2829,8 @@ pub struct AttachmentReadParams {
     pub attachment_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encoding: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachment: Option<ImageAttachmentRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2868,11 +2906,44 @@ pub struct SessionProjectionNotificationParams {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ImageAttachmentRef {
+    pub attachment_id: String,
+    pub media_type: String,
+    pub bytes: u64,
+    pub width: u64,
+    pub height: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UserImageAttachment {
     pub name: Option<String>,
     pub mime_type: String,
     pub data: Option<String>,
     pub attachment_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<ImageAttachmentRef>,
+}
+
+pub fn parse_image_attachment_ref(value: &serde_json::Value) -> Option<ImageAttachmentRef> {
+    let attachment_id = value["attachmentId"]
+        .as_str()
+        .or_else(|| value["id"].as_str())?
+        .to_string();
+    Some(ImageAttachmentRef {
+        attachment_id,
+        media_type: value["mediaType"]
+            .as_str()
+            .or_else(|| value["mimeType"].as_str())
+            .unwrap_or("image/png")
+            .to_string(),
+        bytes: value["bytes"].as_u64().unwrap_or(0),
+        width: value["width"].as_u64().unwrap_or(0),
+        height: value["height"].as_u64().unwrap_or(0),
+        name: value["name"].as_str().map(str::to_string),
+    })
 }
 
 pub fn parse_user_images(data: &serde_json::Value) -> Vec<UserImageAttachment> {
@@ -2884,19 +2955,22 @@ pub fn parse_user_images(data: &serde_json::Value) -> Vec<UserImageAttachment> {
         if block["type"] != "image" {
             continue;
         }
-        let attachment_id = block["attachment"]
-            .as_str()
-            .map(str::to_string)
-            .or_else(|| block["attachment"]["id"].as_str().map(str::to_string))
+        let reference = parse_image_attachment_ref(&block["attachment"]);
+        let attachment_id = reference
+            .as_ref()
+            .map(|value| value.attachment_id.clone())
+            .or_else(|| block["attachment"].as_str().map(str::to_string))
             .or_else(|| block["attachmentId"].as_str().map(str::to_string));
         images.push(UserImageAttachment {
             name: block["name"].as_str().map(str::to_string),
-            mime_type: block["mimeType"]
-                .as_str()
-                .unwrap_or("image/png")
-                .to_string(),
+            mime_type: reference
+                .as_ref()
+                .map(|value| value.media_type.clone())
+                .or_else(|| block["mimeType"].as_str().map(str::to_string))
+                .unwrap_or_else(|| "image/png".to_string()),
             data: block["data"].as_str().map(str::to_string),
             attachment_id,
+            reference,
         });
     }
     images

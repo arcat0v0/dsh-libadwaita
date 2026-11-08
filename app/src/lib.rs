@@ -12,6 +12,7 @@ pub mod drafts;
 pub mod interaction;
 pub mod protocol;
 pub mod schedule_model;
+pub mod secret_mask;
 pub mod session;
 pub mod session_state;
 pub mod supervisor;

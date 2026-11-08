@@ -809,8 +809,8 @@ impl ConversationView {
         &self.goal_bar
     }
 
-    pub fn update_queue(&self, items: &[QueueItem]) {
-        self.queue_dock.update(items);
+    pub fn update_queue(&self, session_id: &str, items: &[QueueItem]) {
+        self.queue_dock.update(session_id, items);
     }
 
     pub fn todo_dock(&self) -> &TodoDock {
@@ -1119,6 +1119,7 @@ impl ConversationView {
                 reasoning,
                 is_live,
                 seq,
+                message_id,
                 time,
                 ..
             } = last_block
@@ -1130,7 +1131,7 @@ impl ConversationView {
                             handle.update_reasoning(reasoning);
                         }
                     } else {
-                        handle.finalize(*seq, *time);
+                        handle.finalize(*seq, message_id.as_deref(), *time);
                     }
                 }
             }
@@ -1275,7 +1276,7 @@ impl ConversationView {
         self.set_hero(true);
         self.set_title(Copybook::for_code("system").new_session);
         self.set_status("Idle");
-        self.queue_dock.update(&[]);
+        self.queue_dock.update("", &[]);
         self.reset_meters();
     }
 
@@ -1338,6 +1339,7 @@ impl ConversationView {
                     reasoning,
                     is_live,
                     seq,
+                    message_id,
                     time,
                     ..
                 } => {
@@ -1349,14 +1351,14 @@ impl ConversationView {
                                 handle.update_reasoning(r);
                             }
                         } else {
-                            handle.finalize(*seq, *time);
+                            handle.finalize(*seq, message_id.as_deref(), *time);
                             *self.live_handle.borrow_mut() = None;
                         }
                     }
                 }
                 _ => {
                     if let Some(handle) = self.live_handle.borrow_mut().take() {
-                        handle.finalize(None, 0);
+                        handle.finalize(None, None, 0);
                     }
                 }
             }

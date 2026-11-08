@@ -284,6 +284,19 @@ pub enum UiMessage {
         session_id: String,
         items: Vec<MessageFeedbackItem>,
     },
+    FeedbackSaved {
+        session_id: String,
+        item: MessageFeedbackItem,
+    },
+    FeedbackRemoved {
+        session_id: String,
+        message_id: String,
+    },
+    FeedbackConflict {
+        session_id: String,
+        message_id: String,
+        item: Option<MessageFeedbackItem>,
+    },
     AccountLoaded {
         status: Result<AccountStatusResult, String>,
         profile: Result<AccountProfileResult, String>,
@@ -291,12 +304,6 @@ pub enum UiMessage {
     },
     CredentialRecordsLoaded(Vec<CredentialRecordItem>),
     QuestionReopened(SdkUserQuestionRequest),
-    ImageAttached {
-        name: String,
-        mime_type: String,
-        data: String,
-    },
-    FileAttached(String),
     SessionSearchLoaded(Vec<SessionSearchItem>),
     ProjectionsLoaded {
         session_id: String,
@@ -330,10 +337,13 @@ pub enum UiMessage {
 }
 
 #[derive(Clone)]
-struct PendingImage {
+struct PendingAttachment {
+    id: String,
     name: String,
     mime_type: String,
     data: String,
+    bytes: usize,
+    image: bool,
 }
 
 struct GapRepairState {
@@ -427,6 +437,24 @@ impl UserQuestionResponder for QuestionHandler {
     }
 }
 
+
+fn feedback_conflict_item(
+    error: &ConnectionError,
+) -> Option<Option<MessageFeedbackItem>> {
+    let ConnectionError::Remote { code, data, .. } = error else {
+        return None;
+    };
+    if *code != ERR_FEEDBACK_CONFLICT {
+        return None;
+    }
+    Some(
+        data.as_ref()
+            .and_then(|value| value.get("item"))
+            .filter(|value| !value.is_null())
+            .and_then(|value| serde_json::from_value(value.clone()).ok()),
+    )
+}
+
 pub struct SessionController {
     connection: Arc<RwLock<Option<BridgeConnection>>>,
     supervisor: Arc<RwLock<Option<Arc<HarnessSupervisor>>>>,
@@ -457,7 +485,8 @@ pub struct SessionController {
     history_loading: Rc<Cell<bool>>,
     follow_generation: Rc<Cell<u64>>,
     gap_repair: Rc<RefCell<Option<GapRepairState>>>,
-    pending_images: Rc<RefCell<Vec<PendingImage>>>,
+    pending_attachments: Rc<RefCell<HashMap<String, Vec<PendingAttachment>>>>,
+    attachment_seq: Rc<Cell<u64>>,
     pending_auto_send: Rc<RefCell<Option<String>>>,
     reconnect_active: Rc<Cell<bool>>,
     reconnect_generation: Rc<Cell<u64>>,
@@ -537,7 +566,8 @@ impl SessionController {
             history_loading: Rc::new(Cell::new(false)),
             follow_generation: Rc::new(Cell::new(0)),
             gap_repair: Rc::new(RefCell::new(None)),
-            pending_images: Rc::new(RefCell::new(Vec::new())),
+            pending_attachments: Rc::new(RefCell::new(HashMap::new())),
+            attachment_seq: Rc::new(Cell::new(1)),
             pending_auto_send: Rc::new(RefCell::new(None)),
             reconnect_active: Rc::new(Cell::new(false)),
             reconnect_generation: Rc::new(Cell::new(0)),
@@ -731,6 +761,15 @@ impl SessionController {
         }
 
         crate::ui::message_renderer::set_controller(&controller);
+        let weak_for_attachments = Rc::downgrade(&controller);
+        controller
+            .conversation_view
+            .composer()
+            .set_on_remove_attachment(move |attachment_id| {
+                if let Some(ctrl) = weak_for_attachments.upgrade() {
+                    ctrl.remove_pending_attachment(&attachment_id);
+                }
+            });
         controller
             .conversation_view
             .set_trajectory_visible(controller.prefs.borrow().developer_tools);
@@ -1338,19 +1377,22 @@ impl SessionController {
         let name = crate::attachments::display_name(path);
         match crate::attachments::classify_path(path) {
             crate::attachments::AttachmentKind::Image(mime) => {
-                self.upload_attachment(name, mime.to_string(), bytes, true);
+                self.stage_attachment(name, mime.to_string(), bytes, true);
             }
             crate::attachments::AttachmentKind::File => {
-                let reference = crate::attachments::file_reference_text(path);
-                self.upload_attachment(name, "application/octet-stream".to_string(), bytes, false);
-                self.insert_composer_text(&reference);
+                self.stage_attachment(
+                    name,
+                    "application/octet-stream".to_string(),
+                    bytes,
+                    false,
+                );
             }
         }
     }
 
     pub fn attach_clipboard_texture(&self, texture: &gtk4::gdk::Texture) {
         let bytes = texture.save_to_png_bytes();
-        self.upload_attachment(
+        self.stage_attachment(
             "clipboard.png".to_string(),
             "image/png".to_string(),
             bytes.as_ref().to_vec(),
@@ -1358,42 +1400,87 @@ impl SessionController {
         );
     }
 
-    fn upload_attachment(&self, name: String, mime_type: String, bytes: Vec<u8>, image: bool) {
+    fn stage_attachment(&self, name: String, mime_type: String, bytes: Vec<u8>, image: bool) {
         let Some(session_id) = self.active_session_id() else {
             let _ = self.ui_sender.send(UiMessage::Toast(
                 "Open a session before attaching".to_string(),
             ));
             return;
         };
-        let data = crate::attachments::encode_base64(&bytes);
-        let params = AttachmentUploadParams {
-            session_id,
-            name: name.clone(),
-            data: data.clone(),
-            mime_type: Some(mime_type.clone()),
+        let id = format!("att-{}", self.attachment_seq.get());
+        self.attachment_seq.set(self.attachment_seq.get() + 1);
+        let attachment = PendingAttachment {
+            id,
+            name,
+            mime_type,
+            data: crate::attachments::encode_base64(&bytes),
+            bytes: bytes.len(),
+            image,
         };
-        let ui_sender = self.ui_sender.clone();
-        self.dispatch_call(
-            METHOD_ATTACHMENT_UPLOAD,
-            params,
-            Duration::from_secs(30),
-            move |result: Result<AttachmentUploadResult, ConnectionError>| match result {
-                Ok(_) if image => UiMessage::ImageAttached {
-                    name,
-                    mime_type,
-                    data,
-                },
-                Ok(_) => UiMessage::FileAttached(String::new()),
-                Err(err) => UiMessage::Toast(format!("Attachment upload failed: {}", err)),
-            },
-        );
-        let _ = ui_sender;
+        self.pending_attachments
+            .borrow_mut()
+            .entry(session_id)
+            .or_default()
+            .push(attachment);
+        self.refresh_composer_attachments();
+    }
+
+    pub fn remove_pending_attachment(&self, attachment_id: &str) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        if let Some(items) = self.pending_attachments.borrow_mut().get_mut(&session_id) {
+            items.retain(|item| item.id != attachment_id);
+        }
+        self.refresh_composer_attachments();
+    }
+
+    fn clear_pending_attachments(&self, session_id: &str) {
+        self.pending_attachments.borrow_mut().remove(session_id);
+        self.refresh_composer_attachments();
+    }
+
+    pub fn refresh_composer_attachments(&self) {
+        let Some(session_id) = self.active_session_id() else {
+            self.conversation_view.composer().set_attachments(&[]);
+            return;
+        };
+        let views: Vec<crate::ui::composer::ComposerAttachmentView> = self
+            .pending_attachments
+            .borrow()
+            .get(&session_id)
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| crate::ui::composer::ComposerAttachmentView {
+                        id: item.id.clone(),
+                        name: item.name.clone(),
+                        image: item.image,
+                        data: item.data.clone(),
+                        bytes: item.bytes,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.conversation_view.composer().set_attachments(&views);
     }
 
     pub fn submit_text(&self, text: &str, steer: bool) {
         let trimmed = text.trim();
-        let images = self.pending_images.borrow().clone();
-        if trimmed.is_empty() && images.is_empty() {
+        let Some(session_id) = self.active_session_id() else {
+            if !trimmed.is_empty() {
+                *self.pending_auto_send.borrow_mut() = Some(trimmed.to_string());
+                self.start_session_in(None, None, None);
+            }
+            return;
+        };
+        let attachments = self
+            .pending_attachments
+            .borrow()
+            .get(&session_id)
+            .cloned()
+            .unwrap_or_default();
+        if trimmed.is_empty() && attachments.is_empty() {
             return;
         }
         if trimmed.starts_with('/') {
@@ -1407,25 +1494,24 @@ impl SessionController {
             .map(|session| session.status == SessionStatus::Running)
             .unwrap_or(false);
         let mode = if running && steer { "steer" } else { "prompt" };
-        let Some(session_id) = self.active_session_id() else {
-            if !trimmed.is_empty() {
-                *self.pending_auto_send.borrow_mut() = Some(trimmed.to_string());
-                self.start_session_in(None, None, None);
-            }
-            return;
-        };
         let pending_text = if text.trim().is_empty() {
-            "[image]"
+            if attachments.iter().any(|attachment| attachment.image) {
+                "[image]"
+            } else {
+                "[file]"
+            }
         } else {
             text
         };
-        let pending_images: Vec<UserImageAttachment> = images
+        let pending_images: Vec<UserImageAttachment> = attachments
             .iter()
+            .filter(|attachment| attachment.image)
             .map(|image| UserImageAttachment {
                 name: Some(image.name.clone()),
                 mime_type: image.mime_type.clone(),
                 data: Some(image.data.clone()),
                 attachment_id: None,
+                reference: None,
             })
             .collect();
         {
@@ -1444,12 +1530,19 @@ impl SessionController {
                 text: text.to_string(),
             });
         }
-        for image in &images {
-            content_blocks.push(PromptContentBlock::Image {
-                data: image.data.clone(),
-                mime_type: image.mime_type.clone(),
-                name: Some(image.name.clone()),
-            });
+        for attachment in &attachments {
+            if attachment.image {
+                content_blocks.push(PromptContentBlock::Image {
+                    data: attachment.data.clone(),
+                    mime_type: attachment.mime_type.clone(),
+                    name: Some(attachment.name.clone()),
+                });
+            } else {
+                content_blocks.push(PromptContentBlock::File {
+                    data: attachment.data.clone(),
+                    name: attachment.name.clone(),
+                });
+            }
         }
         let params = SessionPromptParams {
             session_id: session_id.clone(),
@@ -3099,6 +3192,9 @@ impl SessionController {
     }
 
     pub fn archive_session(&self, session_id: &str) {
+        crate::ui::message_renderer::release_image_session(session_id);
+        self.pending_attachments.borrow_mut().remove(session_id);
+        self.refresh_composer_attachments();
         let sess_id = session_id.to_string();
         let conn_arc = self.connection.clone();
         let ui_sender = self.ui_sender.clone();
@@ -4255,6 +4351,7 @@ impl SessionController {
                                 ctrl.submit_text(&text, false);
                             }
                             ctrl.refresh_takeover();
+                            ctrl.refresh_composer_attachments();
                         }
                     }
                     UiMessage::Notification(notif) => match notif {
@@ -4348,7 +4445,7 @@ impl SessionController {
                                 .map(|sess| sess.id == p.session_id)
                                 .unwrap_or(false);
                             if matches_active {
-                                conv_view.update_queue(&p.items);
+                                conv_view.update_queue(&p.session_id, &p.items);
                             }
                         }
                         IncomingNotification::SessionProjection(p) => {
@@ -4504,7 +4601,12 @@ impl SessionController {
                     }
                     UiMessage::SessionReleased => {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
+                            if let Some(session_id) = ctrl.active_session_id() {
+                                crate::ui::message_renderer::release_image_session(&session_id);
+                                ctrl.pending_attachments.borrow_mut().remove(&session_id);
+                            }
                             ctrl.clear_active_session_ui();
+                            ctrl.refresh_composer_attachments();
                         }
                     }
                     UiMessage::SessionForked(session_id) => {
@@ -4524,7 +4626,7 @@ impl SessionController {
                             .map(|sess| sess.id == session_id)
                             .unwrap_or(false);
                         if matches_active {
-                            conv_view.update_queue(&items);
+                            conv_view.update_queue(&session_id, &items);
                         }
                     }
                     UiMessage::CommandsLoaded(commands) => {
@@ -4702,28 +4804,13 @@ impl SessionController {
                     }
                     UiMessage::EchoAck { session_id } => {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.clear_pending_attachments(&session_id);
                             if ctrl.active_session_id().as_deref() == Some(session_id.as_str()) {
                                 let buffer = conv_view.composer().text_view().buffer();
                                 buffer.set_text("");
-                                ctrl.pending_images.borrow_mut().clear();
                                 ctrl.clear_composer_draft(&session_id);
                             }
                         }
-                    }
-                    UiMessage::ImageAttached {
-                        name,
-                        mime_type,
-                        data,
-                    } => {
-                        if let Some(ctrl) = ctrl_weak.upgrade() {
-                            ctrl.pending_images.borrow_mut().push(PendingImage {
-                                name: name.clone(),
-                                mime_type,
-                                data,
-                            });
-                        }
-                        toast_overlay
-                            .add_toast(adw::Toast::new(&format!("Image attached: {}", name)));
                     }
                     UiMessage::SessionSearchLoaded(items) => {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
@@ -4740,13 +4827,6 @@ impl SessionController {
                                 })
                                 .collect::<Vec<_>>();
                             ctrl.sidebar.show_search_results(&results);
-                        }
-                    }
-                    UiMessage::FileAttached(path) => {
-                        if !path.is_empty() {
-                            if let Some(ctrl) = ctrl_weak.upgrade() {
-                                ctrl.insert_composer_text(&format!("@{} ", path));
-                            }
                         }
                     }
                     UiMessage::EchoFailed {
@@ -4982,6 +5062,42 @@ impl SessionController {
                             ctrl_weak.upgrade().and_then(|ctrl| ctrl.active_session_id());
                         if active_id.as_deref() == Some(session_id.as_str()) {
                             crate::ui::message_renderer::set_feedback_items(&items);
+                        }
+                    }
+                    UiMessage::FeedbackSaved { session_id, item } => {
+                        let active_id =
+                            ctrl_weak.upgrade().and_then(|ctrl| ctrl.active_session_id());
+                        if active_id.as_deref() == Some(session_id.as_str()) {
+                            crate::ui::message_renderer::set_feedback_item(item);
+                        }
+                    }
+                    UiMessage::FeedbackRemoved {
+                        session_id,
+                        message_id,
+                    } => {
+                        let active_id =
+                            ctrl_weak.upgrade().and_then(|ctrl| ctrl.active_session_id());
+                        if active_id.as_deref() == Some(session_id.as_str()) {
+                            crate::ui::message_renderer::remove_feedback_item(&message_id);
+                        }
+                    }
+                    UiMessage::FeedbackConflict {
+                        session_id,
+                        message_id,
+                        item,
+                    } => {
+                        let active_id =
+                            ctrl_weak.upgrade().and_then(|ctrl| ctrl.active_session_id());
+                        if active_id.as_deref() == Some(session_id.as_str()) {
+                            match item {
+                                Some(item) => {
+                                    crate::ui::message_renderer::set_feedback_item(item)
+                                }
+                                None => {
+                                    crate::ui::message_renderer::remove_feedback_item(&message_id)
+                                }
+                            }
+                            toast_overlay.add_toast(adw::Toast::new("Feedback changed elsewhere"));
                         }
                     }
                     UiMessage::PluginsInventoryLoaded(result) => {
@@ -5394,6 +5510,8 @@ impl SessionController {
         let Some(session_id) = self.active_session_id() else {
             return;
         };
+        let request_session = session_id.clone();
+        let request_message = message_id.to_string();
         let params = MessageFeedbackPutParams {
             session_id,
             message_id: message_id.to_string(),
@@ -5406,9 +5524,19 @@ impl SessionController {
             METHOD_MESSAGE_FEEDBACK_PUT,
             params,
             Duration::from_secs(10),
-            |result: Result<MessageFeedbackPutResult, ConnectionError>| match result {
-                Ok(_) => UiMessage::Toast("Feedback saved".to_string()),
-                Err(err) => UiMessage::Toast(format!("Feedback failed: {}", err)),
+            move |result: Result<MessageFeedbackPutResult, ConnectionError>| match result {
+                Ok(result) => UiMessage::FeedbackSaved {
+                    session_id: request_session.clone(),
+                    item: result.item,
+                },
+                Err(err) => match feedback_conflict_item(&err) {
+                    Some(item) => UiMessage::FeedbackConflict {
+                        session_id: request_session.clone(),
+                        message_id: request_message.clone(),
+                        item,
+                    },
+                    None => UiMessage::Toast(format!("Feedback failed: {}", err)),
+                },
             },
         );
     }
@@ -5417,6 +5545,8 @@ impl SessionController {
         let Some(session_id) = self.active_session_id() else {
             return;
         };
+        let request_session = session_id.clone();
+        let request_message = message_id.to_string();
         let params = MessageFeedbackDeleteParams {
             session_id,
             message_id: message_id.to_string(),
@@ -5426,21 +5556,31 @@ impl SessionController {
             METHOD_MESSAGE_FEEDBACK_DELETE,
             params,
             Duration::from_secs(10),
-            |result: Result<MessageFeedbackDeleteResult, ConnectionError>| match result {
-                Ok(_) => UiMessage::Toast("Feedback removed".to_string()),
-                Err(err) => UiMessage::Toast(format!("Feedback delete failed: {}", err)),
+            move |result: Result<MessageFeedbackDeleteResult, ConnectionError>| match result {
+                Ok(_) => UiMessage::FeedbackRemoved {
+                    session_id: request_session.clone(),
+                    message_id: request_message.clone(),
+                },
+                Err(err) => match feedback_conflict_item(&err) {
+                    Some(item) => UiMessage::FeedbackConflict {
+                        session_id: request_session.clone(),
+                        message_id: request_message.clone(),
+                        item,
+                    },
+                    None => UiMessage::Toast(format!("Feedback delete failed: {}", err)),
+                },
             },
         );
     }
 
-    pub fn record_session_feedback(&self, text: &str) {
+    pub fn record_session_feedback(&self, text: &str, category: Option<String>) {
         let Some(session_id) = self.active_session_id() else {
             return;
         };
         let params = SessionFeedbackRecordParams {
             session_id,
-            text: Some(text.to_string()),
-            category: None,
+            text: (!text.trim().is_empty()).then(|| text.to_string()),
+            category,
         };
         self.dispatch_call(
             METHOD_SESSION_FEEDBACK_RECORD,

@@ -636,3 +636,79 @@ fn test_session_end_seed_renders_fork_boundary() {
         RenderBlock::UserMessage { .. }
     ));
 }
+
+#[test]
+fn test_assistant_message_carries_persisted_message_id() {
+    let mut transcript = ConversationTranscript::new();
+    let event = SessionEvent {
+        event_type: "assistant/message".to_string(),
+        seq: 4,
+        time: 2000,
+        data: serde_json::json!({
+            "turn": 1,
+            "step": 1,
+            "message": {
+                "id": "msg-7f6c",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "done"}]
+            }
+        }),
+        ignorable: None,
+        surface_op: Some(serde_json::json!("append")),
+        source_event_seqs: None,
+    };
+    transcript.apply_event(event).unwrap();
+    match &transcript.blocks()[0] {
+        RenderBlock::AssistantMessage { message_id, .. } => {
+            assert_eq!(message_id.as_deref(), Some("msg-7f6c"));
+        }
+        other => panic!("expected AssistantMessage, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_live_assistant_gets_message_id_when_committed() {
+    let mut transcript = ConversationTranscript::new();
+    transcript.apply_stream_frame(AssistantStreamFrame::Start {
+        attempt_id: "att-9".to_string(),
+        revision: 1,
+        turn: 1,
+        step: 0,
+    });
+    transcript.apply_stream_frame(AssistantStreamFrame::End {
+        attempt_id: "att-9".to_string(),
+        revision: 2,
+        index: 0,
+        outcome: StreamOutcome::Committed {
+            event_type: "assistant/message".to_string(),
+            seq: 3,
+        },
+    });
+    let event = SessionEvent {
+        event_type: "assistant/message".to_string(),
+        seq: 3,
+        time: 3000,
+        data: serde_json::json!({
+            "turn": 1,
+            "step": 0,
+            "message": {
+                "id": "msg-a1b2",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "hello"}]
+            }
+        }),
+        ignorable: None,
+        surface_op: Some(serde_json::json!("append")),
+        source_event_seqs: None,
+    };
+    transcript.apply_event(event).unwrap();
+    match transcript.blocks().last().expect("assistant block") {
+        RenderBlock::AssistantMessage {
+            is_live, message_id, ..
+        } => {
+            assert!(!is_live);
+            assert_eq!(message_id.as_deref(), Some("msg-a1b2"));
+        }
+        other => panic!("expected AssistantMessage, got {other:?}"),
+    }
+}

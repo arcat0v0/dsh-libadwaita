@@ -1259,6 +1259,7 @@ export class BridgeService extends Service {
       saveImages?: (
         inputs: Array<{ data: Uint8Array; mediaType: string; name?: string }>,
       ) => Promise<Array<{ id: string }>>;
+      admitEncodedFile?: (input: { data: string; name?: string }) => Promise<unknown>;
     };
     let imageRefs: Array<{ id: string }> = [];
     if (encodedImages.length > 0) {
@@ -1283,7 +1284,36 @@ export class BridgeService extends Service {
         );
       }
     }
+    const encodedFiles = params.contentBlocks.filter(
+      (block): block is { type: 'file'; data: string; name?: string } =>
+        block.type === 'file' && 'data' in block && typeof block.data === 'string',
+    );
+    const fileRefs: unknown[] = [];
+    if (encodedFiles.length > 0) {
+      if (!attachments?.admitEncodedFile) {
+        throw new BridgeError(
+          BRIDGE_ERROR_CODES.ATTACHMENT_INVALID,
+          'file attachment store is not available',
+        );
+      }
+      try {
+        for (const file of encodedFiles) {
+          fileRefs.push(
+            await attachments.admitEncodedFile({
+              data: file.data,
+              ...(file.name === undefined ? {} : { name: file.name }),
+            }),
+          );
+        }
+      } catch (error) {
+        throw new BridgeError(
+          BRIDGE_ERROR_CODES.ATTACHMENT_INVALID,
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
     let imageIndex = 0;
+    let fileIndex = 0;
     const blocks: SdkPromptContentBlock[] = params.contentBlocks.map((block) => {
       if (block.type === 'text' && 'text' in block) {
         return { type: 'text', text: String(block.text) };
@@ -1291,6 +1321,9 @@ export class BridgeService extends Service {
       if (block.type === 'image' && 'data' in block && typeof block.data === 'string') {
         const ref = imageRefs[imageIndex++];
         return ref ? { type: 'image', attachment: ref } : block;
+      }
+      if (block.type === 'file' && 'data' in block && typeof block.data === 'string') {
+        return { type: 'file', attachment: fileRefs[fileIndex++] };
       }
       return block;
     });
@@ -2923,6 +2956,34 @@ export class BridgeService extends Service {
 
   private async handleAttachmentRead(params: AttachmentReadParams): Promise<AttachmentReadResult> {
     await this.resolveSessionEntry(params.sessionId);
+    if (params.attachment !== undefined) {
+      const attachments = this.ctx.get('attachments') as unknown as {
+        readImage?: (ref: object, signal?: AbortSignal) => Promise<{ data: Uint8Array }>;
+      };
+      if (!attachments?.readImage) {
+        throw new BridgeError(
+          BRIDGE_ERROR_CODES.ATTACHMENT_NOT_FOUND,
+          'attachment store is not available',
+        );
+      }
+      try {
+        const stored = await attachments.readImage(params.attachment);
+        const bytes = Buffer.from(stored.data);
+        return {
+          attachmentId: params.attachment.attachmentId,
+          name: params.attachment.name ?? 'image',
+          size: bytes.length,
+          mimeType: params.attachment.mediaType,
+          encoding: 'base64',
+          data: bytes.toString('base64'),
+        };
+      } catch (error) {
+        throw new BridgeError(
+          BRIDGE_ERROR_CODES.ATTACHMENT_NOT_FOUND,
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
     if (!/^[0-9a-f-]{36}$/i.test(params.attachmentId)) {
       throw new BridgeError(BRIDGE_ERROR_CODES.ATTACHMENT_INVALID, 'invalid attachment id');
     }

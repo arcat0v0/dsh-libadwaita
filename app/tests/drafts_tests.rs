@@ -113,22 +113,3 @@ fn test_continuation_eligibility_rules() {
         ContinuationEligibility::NotEligible
     );
 }
-
-#[test]
-fn test_secret_masking_of_known_patterns() {
-    let prefix = format!("{}k-", "s");
-    let body = format!("{}{}", "abcdefgh", "1234");
-    let key = format!("{}{}", prefix, body);
-    let text = format!("key {} done", key);
-    let masked = mask_secret_patterns(&text);
-    let expected = format!("{}abcde...1234", prefix);
-    assert!(masked.contains(&expected));
-    assert!(!masked.contains(&body));
-    assert!(masked.contains("done"));
-
-    let short = mask_secret_patterns("token short-token");
-    assert_eq!(short, "token short-token");
-
-    let plain = mask_secret_patterns("nothing to hide");
-    assert_eq!(plain, "nothing to hide");
-}

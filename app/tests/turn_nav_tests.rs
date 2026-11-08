@@ -21,6 +21,7 @@ fn assistant(text: &str, seq: Option<i64>, is_live: bool) -> RenderBlock {
         is_live,
         attempt_id: None,
         seq,
+        message_id: seq.map(|value| format!("msg-{}", value)),
         time: 0,
     }
 }

@@ -987,10 +987,20 @@ export interface AttachmentUploadResult {
   mimeType: string;
 }
 
+export interface AttachmentImageRef {
+  attachmentId: string;
+  mediaType: string;
+  bytes: number;
+  width: number;
+  height: number;
+  name?: string;
+}
+
 export interface AttachmentReadParams {
   sessionId: string;
   attachmentId: string;
   encoding?: 'base64' | 'text';
+  attachment?: AttachmentImageRef;
 }
 
 export interface AttachmentReadResult {

@@ -95,7 +95,7 @@ impl QueueDock {
         &self.container
     }
 
-    pub fn update(&self, items: &[QueueItem]) {
+    pub fn update(&self, session_id: &str, items: &[QueueItem]) {
         while let Some(child) = self.list_box.first_child() {
             self.list_box.remove(&child);
         }
@@ -105,6 +105,10 @@ impl QueueDock {
 
         for item in items {
             let row = gtk4::Box::builder()
+                .orientation(gtk4::Orientation::Vertical)
+                .spacing(4)
+                .build();
+            let top = gtk4::Box::builder()
                 .orientation(gtk4::Orientation::Horizontal)
                 .spacing(8)
                 .build();
@@ -117,14 +121,15 @@ impl QueueDock {
             let badge = gtk4::Label::builder()
                 .label(badge_text)
                 .css_classes(["dim-label", "caption", "accent-badge"])
+                .valign(gtk4::Align::Center)
                 .build();
-            row.append(&badge);
+            top.append(&badge);
 
             let entry = gtk4::Entry::builder()
                 .text(&item.text())
                 .hexpand(true)
                 .build();
-            row.append(&entry);
+            top.append(&entry);
 
             let save_btn = gtk4::Button::builder()
                 .icon_name("document-save-symbolic")
@@ -136,7 +141,7 @@ impl QueueDock {
             save_btn.connect_clicked(move |_| {
                 (on_edit.borrow())(item_id.clone(), entry.text().to_string());
             });
-            row.append(&save_btn);
+            top.append(&save_btn);
 
             if item.placement == QueuePlacement::Queued {
                 queued_ids.push(item.id.clone());
@@ -148,7 +153,7 @@ impl QueueDock {
                 let on_steer_item = self.on_steer_item.clone();
                 let item_id = item.id.clone();
                 steer_btn.connect_clicked(move |_| (on_steer_item.borrow())(item_id.clone()));
-                row.append(&steer_btn);
+                top.append(&steer_btn);
             }
 
             let remove_btn = gtk4::Button::builder()
@@ -159,7 +164,80 @@ impl QueueDock {
             let on_remove = self.on_remove.clone();
             let item_id = item.id.clone();
             remove_btn.connect_clicked(move |_| (on_remove.borrow())(item_id.clone()));
-            row.append(&remove_btn);
+            top.append(&remove_btn);
+            row.append(&top);
+
+            let attachments = item.attachments();
+            if !attachments.is_empty() {
+                let strip = gtk4::Box::builder()
+                    .orientation(gtk4::Orientation::Horizontal)
+                    .spacing(6)
+                    .margin_start(8)
+                    .build();
+                for attachment in attachments {
+                    match attachment {
+                        crate::protocol::QueueAttachment::Image(reference) => {
+                            let picture = gtk4::Picture::builder()
+                                .content_fit(gtk4::ContentFit::Cover)
+                                .can_shrink(true)
+                                .width_request(56)
+                                .height_request(44)
+                                .build();
+                            if !session_id.is_empty() {
+                                let image = crate::protocol::UserImageAttachment {
+                                    name: reference.name.clone(),
+                                    mime_type: reference.media_type.clone(),
+                                    data: None,
+                                    attachment_id: Some(reference.attachment_id.clone()),
+                                    reference: Some(reference),
+                                };
+                                crate::ui::message_renderer::request_image(
+                                    session_id,
+                                    &image,
+                                    &picture,
+                                );
+                            }
+                            let frame = gtk4::ScrolledWindow::builder()
+                                .min_content_width(56)
+                                .min_content_height(44)
+                                .max_content_width(56)
+                                .max_content_height(44)
+                                .hscrollbar_policy(gtk4::PolicyType::Never)
+                                .vscrollbar_policy(gtk4::PolicyType::Never)
+                                .child(&picture)
+                                .build();
+                            frame.set_size_request(56, 44);
+                            strip.append(&frame);
+                        }
+                        crate::protocol::QueueAttachment::File { name, bytes } => {
+                            let chip = gtk4::Box::builder()
+                                .orientation(gtk4::Orientation::Horizontal)
+                                .spacing(4)
+                                .css_classes(["card"])
+                                .margin_top(2)
+                                .margin_bottom(2)
+                                .build();
+                            chip.append(&gtk4::Image::from_icon_name("text-x-generic-symbolic"));
+                            let size = bytes
+                                .map(crate::ui::conversation::compact_token_count)
+                                .unwrap_or_default();
+                            let label = if size.is_empty() {
+                                name
+                            } else {
+                                format!("{} · {}", name, size)
+                            };
+                            chip.append(
+                                &gtk4::Label::builder()
+                                    .label(&label)
+                                    .css_classes(["caption"])
+                                    .build(),
+                            );
+                            strip.append(&chip);
+                        }
+                    }
+                }
+                row.append(&strip);
+            }
 
             self.list_box.append(&row);
         }

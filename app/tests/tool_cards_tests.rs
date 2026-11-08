@@ -403,6 +403,11 @@ fn test_parse_message_attachments_images_and_files() {
         panic!("expected image attachment");
     };
     assert_eq!(image.attachment_id.as_deref(), Some("img1"));
+    let reference = image.reference.as_ref().expect("durable image reference");
+    assert_eq!(reference.media_type, "image/png");
+    assert_eq!(reference.bytes, 10);
+    assert_eq!(reference.width, 32);
+    assert_eq!(reference.height, 32);
     let dsh_libadwaita::transcript::MessageAttachment::File(file) = &attachments[1] else {
         panic!("expected file attachment");
     };
