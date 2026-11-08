@@ -5,6 +5,7 @@ pub mod controller;
 pub mod conversation;
 pub mod copy;
 pub mod desktop;
+pub mod file_tree;
 pub mod files_panel;
 pub mod goal_bar;
 pub mod hero;

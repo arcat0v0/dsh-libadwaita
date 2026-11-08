@@ -1,5 +1,6 @@
 use crate::protocol::{FileEntry, FilesReadBytesResult, FilesReadResult, FilesStatResult};
 use crate::ui::controller::SessionController;
+use crate::ui::file_tree::{breadcrumb_segments, FileTreeModel, FlattenRow};
 use gtk4::glib;
 use gtk4::prelude::*;
 use libadwaita as adw;
@@ -12,10 +13,11 @@ pub struct FilesPanel {
     container: gtk4::Box,
     list_box: gtk4::ListBox,
     status_label: gtk4::Label,
-    path_label: gtk4::Label,
+    breadcrumb_box: gtk4::Box,
     controller: RefCell<Option<Rc<SessionController>>>,
     preview: RefCell<Option<Rc<PreviewPanel>>>,
-    current_path: RefCell<String>,
+    model: RefCell<FileTreeModel>,
+    breadcrumb_path: RefCell<Option<String>>,
 }
 
 impl FilesPanel {
@@ -34,14 +36,13 @@ impl FilesPanel {
             .spacing(8)
             .build();
 
-        let path_label = gtk4::Label::builder()
-            .label(".")
-            .css_classes(["dim-label", "caption"])
+        let breadcrumb_box = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Horizontal)
+            .spacing(2)
             .hexpand(true)
             .halign(gtk4::Align::Start)
-            .ellipsize(gtk4::pango::EllipsizeMode::Middle)
             .build();
-        header.append(&path_label);
+        header.append(&breadcrumb_box);
 
         let refresh_btn = gtk4::Button::builder()
             .icon_name("view-refresh-symbolic")
@@ -75,10 +76,11 @@ impl FilesPanel {
             container,
             list_box,
             status_label,
-            path_label,
+            breadcrumb_box,
             controller: RefCell::new(None),
             preview: RefCell::new(None),
-            current_path: RefCell::new(".".to_string()),
+            model: RefCell::new(FileTreeModel::new("")),
+            breadcrumb_path: RefCell::new(None),
         });
 
         let weak = Rc::downgrade(&panel);
@@ -88,6 +90,7 @@ impl FilesPanel {
             }
         });
 
+        panel.render_breadcrumb();
         panel
     }
 
@@ -103,35 +106,58 @@ impl FilesPanel {
         *self.preview.borrow_mut() = Some(preview);
     }
 
-    pub fn reload(&self) {
+    pub fn reload(self: &Rc<Self>) {
         let Some(controller) = self.controller.borrow().clone() else {
             return;
         };
-        let path = self.current_path.borrow().clone();
-        controller.refresh_files(&path);
+        self.model.borrow_mut().reset();
+        *self.breadcrumb_path.borrow_mut() = None;
+        self.render_breadcrumb();
+        self.render_rows();
+        controller.refresh_files(".");
     }
 
-    pub fn navigate_to(&self, path: &str) {
-        *self.current_path.borrow_mut() = path.to_string();
-        self.reload();
-    }
-
-    pub fn preview_file(&self, path: &str) {
+    pub fn preview_file(self: &Rc<Self>, path: &str) {
+        self.locate(path);
         let Some(controller) = self.controller.borrow().clone() else {
             return;
         };
         controller.preview_file(path);
     }
 
-    pub fn apply_listing(self: &Rc<Self>, path: &str, entries: &[FileEntry]) {
-        while let Some(child) = self.list_box.first_child() {
-            self.list_box.remove(&child);
+    pub fn locate(self: &Rc<Self>, path: &str) {
+        let plan = {
+            let mut model = self.model.borrow_mut();
+            if model.root().is_empty() {
+                return;
+            }
+            if !breadcrumb_segments(model.root(), path).is_empty() {
+                *self.breadcrumb_path.borrow_mut() = Some(path.to_string());
+            }
+            model.expand_ancestors(path)
+        };
+        if let Some(controller) = self.controller.borrow().clone() {
+            for directory in plan.to_fetch {
+                controller.refresh_files(&directory);
+            }
         }
-        self.path_label.set_label(path);
+        self.render_breadcrumb();
+        self.render_rows();
+    }
+
+    pub fn apply_listing(self: &Rc<Self>, path: &str, workdir: &str, entries: &[FileEntry]) {
+        {
+            let mut model = self.model.borrow_mut();
+            if !workdir.is_empty() {
+                model.set_root(workdir);
+            } else if model.root().is_empty() {
+                model.set_root(path);
+            }
+            model.apply_listing(path, entries);
+        }
+        self.render_breadcrumb();
+        self.render_rows();
         self.status_label.set_label(&format!("{} entries", entries.len()));
-        for entry in entries {
-            self.list_box.append(&build_entry_row(entry, self));
-        }
     }
 
     pub fn set_status(&self, text: &str) {
@@ -151,44 +177,190 @@ impl FilesPanel {
     pub fn preview_panel(&self) -> Option<Rc<PreviewPanel>> {
         self.preview.borrow().clone()
     }
+
+    fn fetch_directory(self: &Rc<Self>, path: &str) {
+        {
+            let mut model = self.model.borrow_mut();
+            if model.level(path).is_some() || model.is_loading(path) {
+                return;
+            }
+            model.mark_loading(path);
+        }
+        if let Some(controller) = self.controller.borrow().clone() {
+            controller.refresh_files(path);
+        }
+        self.render_rows();
+    }
+
+    fn render_rows(self: &Rc<Self>) {
+        while let Some(child) = self.list_box.first_child() {
+            self.list_box.remove(&child);
+        }
+        let rows = self.model.borrow().flatten();
+        if rows.is_empty() {
+            let root_empty = self.model.borrow().level(".").is_none();
+            if root_empty {
+                let loading = gtk4::Label::builder()
+                    .label("Loading workspace tree…")
+                    .css_classes(["dim-label", "caption"])
+                    .halign(gtk4::Align::Start)
+                    .build();
+                self.list_box.append(&loading);
+            }
+            return;
+        }
+        for row in rows {
+            self.list_box.append(&build_tree_row(&row, self));
+        }
+    }
+
+    fn render_breadcrumb(self: &Rc<Self>) {
+        while let Some(child) = self.breadcrumb_box.first_child() {
+            self.breadcrumb_box.remove(&child);
+        }
+        let workdir = self.model.borrow().root().to_string();
+        let target = self.breadcrumb_path.borrow().clone();
+        let segments = match target {
+            Some(path) if !workdir.is_empty() => breadcrumb_segments(&workdir, &path),
+            _ if !workdir.is_empty() => breadcrumb_segments(&workdir, "."),
+            _ => Vec::new(),
+        };
+        if segments.is_empty() {
+            let placeholder = gtk4::Label::builder()
+                .label("No workspace")
+                .css_classes(["dim-label", "caption"])
+                .halign(gtk4::Align::Start)
+                .build();
+            self.breadcrumb_box.append(&placeholder);
+            return;
+        }
+        for (index, (name, path)) in segments.iter().enumerate() {
+            if index > 0 {
+                let separator = gtk4::Label::builder()
+                    .label("›")
+                    .css_classes(["dim-label", "caption"])
+                    .build();
+                self.breadcrumb_box.append(&separator);
+            }
+            let button = gtk4::Button::builder()
+                .label(name)
+                .css_classes(["flat"])
+                .build();
+            let weak = Rc::downgrade(self);
+            let chain: Vec<String> = segments
+                .iter()
+                .take(index + 1)
+                .map(|(_, segment)| segment.clone())
+                .collect();
+            let segment_path = path.clone();
+            button.connect_clicked(move |_| {
+                if let Some(panel) = weak.upgrade() {
+                    for ancestor in &chain {
+                        panel.model.borrow_mut().expand(ancestor);
+                    }
+                    panel.fetch_directory(&segment_path);
+                    panel.render_rows();
+                }
+            });
+            self.breadcrumb_box.append(&button);
+        }
+    }
 }
 
-fn build_entry_row(entry: &FileEntry, panel: &Rc<FilesPanel>) -> gtk4::Widget {
+fn build_tree_row(row: &FlattenRow, panel: &Rc<FilesPanel>) -> gtk4::Widget {
+    let entry = &row.entry;
+    let is_directory = entry.kind == "directory";
     let icon = match entry.kind.as_str() {
         "directory" => "folder-symbolic",
         "symlink" => "emblem-symbolic-link-symbolic",
         _ => "text-x-generic-symbolic",
     };
-    let row = adw::ActionRow::builder()
+    let (expanded, loading, failure) = {
+        let model = panel.model.borrow();
+        (
+            model.is_expanded(&entry.path),
+            model.is_loading(&entry.path),
+            model.failure(&entry.path),
+        )
+    };
+    let subtitle = if is_directory {
+        if loading {
+            "Loading…".to_string()
+        } else if failure {
+            "Failed to load".to_string()
+        } else if expanded {
+            "directory · expanded".to_string()
+        } else {
+            "directory".to_string()
+        }
+    } else {
+        format!("{} — {} bytes", entry.kind, entry.size)
+    };
+    let action_row = adw::ActionRow::builder()
         .title(&entry.name)
-        .subtitle(&format!("{} — {} bytes", entry.kind, entry.size))
+        .subtitle(&subtitle)
         .activatable(true)
+        .margin_start(row.depth as i32 * 18)
         .build();
-    row.add_prefix(&gtk4::Image::from_icon_name(icon));
 
-    let save = gtk4::Button::builder()
-        .icon_name("document-save-symbolic")
-        .tooltip_text("Save As")
-        .css_classes(["flat", "circular"])
-        .valign(gtk4::Align::Center)
-        .build();
-    let save_panel = panel.clone();
-    let save_path = entry.path.clone();
-    save.connect_clicked(move |_| save_panel.save_file(&save_path));
-    row.add_suffix(&save);
+    if is_directory {
+        let chevron = gtk4::Image::from_icon_name(if expanded {
+            "pan-down-symbolic"
+        } else {
+            "pan-right-symbolic"
+        });
+        let toggle = gtk4::Button::builder()
+            .child(&chevron)
+            .css_classes(["flat", "circular"])
+            .valign(gtk4::Align::Center)
+            .build();
+        let weak = Rc::downgrade(panel);
+        let path = entry.path.clone();
+        toggle.connect_clicked(move |_| {
+            let Some(panel) = weak.upgrade() else {
+                return;
+            };
+            let now_expanded = panel.model.borrow_mut().toggle(&path);
+            if now_expanded {
+                panel.fetch_directory(&path);
+            } else {
+                panel.render_rows();
+            }
+        });
+        action_row.add_prefix(&toggle);
+    }
+    action_row.add_prefix(&gtk4::Image::from_icon_name(icon));
+
+    if !is_directory {
+        let save = gtk4::Button::builder()
+            .icon_name("document-save-symbolic")
+            .tooltip_text("Save As")
+            .css_classes(["flat", "circular"])
+            .valign(gtk4::Align::Center)
+            .build();
+        let save_panel = panel.clone();
+        let save_path = entry.path.clone();
+        save.connect_clicked(move |_| save_panel.save_file(&save_path));
+        action_row.add_suffix(&save);
+    }
 
     let panel = panel.clone();
     let path = entry.path.clone();
     let kind = entry.kind.clone();
-    row.connect_activated(move |_| {
+    action_row.connect_activated(move |_| {
         if kind == "directory" {
-            panel.navigate_to(&path);
+            let now_expanded = panel.model.borrow_mut().toggle(&path);
+            if now_expanded {
+                panel.fetch_directory(&path);
+            } else {
+                panel.render_rows();
+            }
         } else {
             panel.preview_file(&path);
         }
     });
 
-    row.upcast()
+    action_row.upcast()
 }
 
 pub struct PreviewPanel {

@@ -2697,6 +2697,7 @@ impl SessionController {
         let Some(session_id) = self.active_session_id() else {
             return;
         };
+        self.right_dock.files_panel().locate(path);
         let conn_arc = self.connection.clone();
         let ui_sender = self.ui_sender.clone();
         let path = path.to_string();
@@ -4592,14 +4593,7 @@ impl SessionController {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
                             if ctrl.active_session_id().as_deref() == Some(session_id.as_str()) {
                                 let panel = ctrl.right_dock.files_panel();
-                                panel.apply_listing(&path, &entries);
-                                if !workdir.is_empty() {
-                                    panel.set_status(&format!(
-                                        "{} entries under {}",
-                                        entries.len(),
-                                        workdir
-                                    ));
-                                }
+                                panel.apply_listing(&path, &workdir, &entries);
                             }
                         }
                     }

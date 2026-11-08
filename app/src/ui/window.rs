@@ -168,10 +168,11 @@ impl MainWindow {
             .orientation(gtk4::Orientation::Horizontal)
             .position(720)
             .shrink_start_child(false)
-            .shrink_end_child(true)
+            .shrink_end_child(false)
             .build();
         paned.set_start_child(Some(conversation_view.widget()));
         paned.set_end_child(Some(right_dock.widget()));
+        right_dock.widget().set_size_request(340, -1);
         right_dock.widget().set_visible(false);
 
         split_view.set_content(Some(&paned));
