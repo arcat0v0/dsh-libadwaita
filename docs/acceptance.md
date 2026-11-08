@@ -166,13 +166,13 @@
 
 | 编号 | 功能点 | 状态 | 证据与剩余差异 |
 |---|---|---|---|
-| P01 | 插件列表/状态诊断/刷新 | 部分实现 | Settings→Plugins 调 `plugin/inventory` 渲染 bundles/plugins，Refresh 重新读取；无 pending/failed/unloading 诊断和 preset 分组。 |
+| P01 | 插件列表/状态诊断/刷新 | 部分实现 | Settings→Plugins 调 `plugin/inventory` 渲染 bundles/plugins，Refresh 重新读取；组件行显示 fiberPhase（等待依赖/加载中/运行中/异常/卸载中）与 Host diagnostic；preset 分组仍缺。 |
 | P02 | Bundle/组件启停与 restart-required | 部分实现 | `toggle_plugin` 调 `plugin/enable|disable`，restartRequired 显示 Banner，Restart Now 冷启动并 follow 活动会话；inventory 行本身无启停开关，也未恢复全部打开会话。 |
 | P03 | 插件配置表单 | 缺失 | 无 bundle/row/namespace 动态配置表单。 |
-| P04 | Bundle 详情文档与错误重试 | 已实现 | inventory 行 Details 调 `plugin/detail`，result.document 存在时用 Markdown 渲染，否则显示 pretty JSON；Retry 调 `plugin/retry`。 |
+| P04 | Bundle 详情文档与错误重试 | 已实现 | 详情按 `name@version` 缓存，调 `plugin/detail`（missing bundle 使用 npmFileSources）；成功渲染 Markdown，失败显示 Host 原因（过大/网络/凭据/Git/无效）与重试；README 图片渲染为占位 chip（协议未提供图片代理）；无 document 时显示“暂无详细介绍”。 |
 | P05 | 添加插件与 inspect 预检 | 已实现 | Settings→Plugins 的 spec 行支持 npm name/local path/Git URL，Inspect 调 `plugin/inspect` 并显示 JSON，Install 调 `plugin/install`。 |
-| P06 | 安装进度/日志/取消/恢复/构建审批 | 部分实现 | `plugin.install-state`/`plugin.install-log` 经 `SettingsDialogHandle` 更新阶段和日志，Cancel 调 `plugin/cancel-install`，Wait 方法已接；进度不是独立模态，无 approvedBuilds 审批与断线恢复。 |
-| P07 | 卸载/更新/版本检查与恢复 | 部分实现 | inventory 行提供 Remove 确认、Versions 与 Update 对话框，分别调 `plugin/remove|versions|update`；无失败恢复旧版或更新状态流。 |
+| P06 | 安装进度/日志/取消/恢复/构建审批 | 部分实现 | `plugin.install-state`/`plugin.install-log` 经 `SettingsDialogHandle` 更新阶段和日志，Cancel 调 `plugin/cancel-install`，Wait 方法已接；安装 RPC 丢失时进入 Unconfirmed 并自动 `wait-install` 对账、无结果时重读 inventory；missing bundle 可从包页/开关走 catalog 安装。进度不是独立模态，无 approvedBuilds 审批。 |
+| P07 | 卸载/更新/版本检查与恢复 | 部分实现 | inventory 行提供 Remove 确认、Versions 与 Update 对话框，分别调 `plugin/remove|versions|update`；更新 RPC 丢失时刷新 inventory 并重查版本，Lost 提示以实际状态为准；版本检查与恢复结果卡已接，无独立更新输出流。 |
 | P08 | 安装源选择/记忆/探测 | 部分实现 | Registry ComboRow 调用 `plugin/registries` 填充，选择持久化到 UiPrefs 并传给 inspect/install；无 registry 测速与推荐。 |
 | P09 | 插件市场索引/搜索/分页/安装确认 | 缺失 | bridge 未定义 `plugin-market/*`，Settings 明确显示“插件市场依赖 Web Host，本客户端暂不支持”，不伪造空列表。 |
 | P10 | 设置→内置插件只读清单/页面重试 | 部分实现 | inventory 只读清单支持名称搜索、Refresh 与 Retry（`plugin/retry`）；无 Loader 条目诊断、分组或页面模块重试。 |
@@ -227,7 +227,7 @@
 | G21 | S17 | implemented | `goal/get|edit|pause|resume|clear` 与 `goal.updated` 已实现；GUI GoalBar 已接 get/updated/edit/pause/resume/clear（objective only）。 |
 | G22 | P04–P08 | implemented | `plugin/detail|inspect|install|cancel-install|wait-install|remove|versions|update|registries` 与 install-state/log notifications 已实现；GUI 已接 detail README、registries selector、versions/update/remove 与 cancel，仍无 approvedBuilds 构建审批。 |
 | G23 | P09 | base-blocked | `@deepseek-ai/dsh-plugin-market`、`dsh-plugin-market-index` 与 `dsh-experimental-plugin-market-bundle` 不在 base 组合，bridge 无 `plugin-market/*`；GUI 显示不可用而非空市场。 |
-| G24 | P01/P03/P10 | implemented-partial | GUI 使用 `plugin/inventory`，已接名称搜索、Refresh、Retry 与详情；仍无 Loader pending/failed/unloading 诊断、preset 分组与页面模块重试。 |
+| G24 | P01/P03/P10 | implemented-partial | GUI 使用 `plugin/inventory`，已接名称搜索、Refresh、Retry、组件 fiberPhase/diagnostic 展示与详情；仍无 preset 分组与页面模块重试。 |
 | G25 | O12 | implemented | `job/list|follow|kill` 与 `job.output` 已实现并接入 header Jobs popover。 |
 | G26 | N24/O13 | implemented-partial | `schedule/catalog|create|edit|run|history|delete` 与 `schedule.changed` 已实现并接入 SchedulesPage；未定义 delivery-limits/pause/resume。 |
 | G27 | C13 | base-blocked | `cordis_define` 动态实例控制属于 `packages/extensions/ui-cordis`/web-app runner，base 不挂载；协议不定义 `cordis-control/*`。 |
@@ -306,5 +306,6 @@
 - 项 7 文件与 Markdown：文件面板改为层级树（目录优先排序、按需展开、折叠保留、消失目录剪枝、`FileTreeModel` 8 单测）、面包屑与刷新、预览定位、会话切换重置已完成（`7648161`）；同时修复右栏 dock 被 paned 挤到零宽不可见的问题（dock 最小宽度 340、`shrink_end_child(false)`）。GFM 已启用；PDF/Office 预览受 G07（Host 无 `officeToPdf`）限制延后。视觉验证：headless sway 中 Files tab 截图确认树渲染（docs/src/README.md 排序正确、面包屑、刷新后列出），目录行展开因 AT-SPI 不给 ActionRow 暴露 action 且无指针注入而未能截图验证。
 - 项 8 设置与凭证：`SettingsRevisionCache` CAS revision 回写（describe 播种、`settings.updated` 通知回写、冲突 `data.actual` 回写，设置页与 locale/theme 保存共用）、API key 字符集校验（settings 与 onboarding）与保存后 `account/status` 验证探测已完成（`30dd7ec`）；插件 inventory 的 fiberPhase/diagnostic 行级诊断此前已实现（P01 剩 preset 分组）；子智能体模型授权由 S11 typed 表单覆盖，运行期 `subagent/model-selection-policy` 为 Host log-only 事件且 GUI 无子代理模型选择器。验证：`settings_cas_tests` 5 单测 + 设置对话框打开截图（describe 后显示 "7 namespaces available"），Models 页交互输入因 headless a11y 无法翻页未验证。
 - 项 9 滚动与流式渲染：`ScrollFollow` 尾部跟随（32px 回底阈值、上滚暂停、回底恢复、会话切换重置）、浮动回底按钮、右侧轮次轨道（已加载轮次、活动轮次按视口上沿高亮、点击跳转、提示预览、≥2 轮显示）、流式 Markdown 稳定前缀/尾部分离（按空行切分且拒绝未闭合代码围栏，live assistant 仅重绘尾部）、`session/end-seed` fork 边界分隔、fork 仅出现在最后一条已定稿 assistant 消息、四档 presentation policy（步骤分组 collapsed/history/none、运行过程明细、已结思考首行预览）与定稿时补齐动作行已完成（`0fd9937`）；同时修复 trajectory `ColumnView` 未放入 `ScrolledWindow` 导致窗口最小高度随事件数增长的问题。验证：新增 21 个单测（scroll 5、stream 7、turn nav 5、presentation 4）+ 1 个 fork 边界 transcript 单测，35 个测试套件全部通过；headless sway 截图确认 fork 分隔条、8 轮轨道与活动轮次高亮、点击 Turn 1 跳到首轮并出现回底按钮、回底后按钮隐藏且活动标记回到第 8 轮。未验证：真实模型流式（本机 `DEEPSEEK_API_KEY` 仍 401）、完整 turn outline（G12）、`collapseTiming`/`foldedReplies` 与整轮外折叠时机。
-- 项 10–12：待实施。
+- 项 10 插件管理：missing bundle 安装（`catalog_install_plan` 仅接受 missing + installTarget，排除 unsupported-platform/只读；包页“安装”按钮与启用开关自动改走 catalog 安装，registry target 带 saveExact）、安装 RPC 丢失自动 `wait-install` 对账且无结果时重读 inventory、更新 RPC 丢失后刷新 inventory 并重查版本、组件行显示 Host diagnostic、详情按 `name@version` 缓存并在失败时显示原因与重试、README 图片占位 chip 已完成（`9f36a76`）。验证：新增 5 个 model 单测（catalog 规则、detail key/version、diagnostic、图片占位）+ 1 个安装丢失对账 reducer 单测，35 个测试套件通过；headless 截图确认插件页与“自动授权审查”详情页（组件行、来源信息、README 图片占位）。未验证：真实 missing bundle 的安装按钮点击（测试 profile 中无 missing bundle）、真实安装/更新断线对账（无可用 API key，且不触发网络安装）。
+- 项 11–12：待实施。
 - 模型链路根因修复：bridge catalog 默认 provider 改为 `agentDefaultModel` 校验值（`deepseek-official`），App 采纳目录默认并纠正失效会话；BridgeCredentials 从 `*_API_KEY` 环境变量取种（`81f1d2c`）。
