@@ -57,16 +57,6 @@ impl Default for TranscriptView {
     }
 }
 
-impl TranscriptView {
-    pub fn groups_intermediate(self) -> bool {
-        self != Self::Expanded
-    }
-
-    pub fn expands_groups(self) -> bool {
-        self == Self::Detailed
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiPrefs {

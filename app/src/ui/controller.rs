@@ -4214,8 +4214,18 @@ impl SessionController {
                         }
 
                         conv_view.reset_meters();
+                        let switched = active_sess
+                            .borrow()
+                            .as_ref()
+                            .map(|session| session.id != session_id)
+                            .unwrap_or(true);
                         let sess_model = SessionModel::from_follow(follow);
-                        conv_view.update_transcript(&sess_model.transcript);
+                        if switched {
+                            conv_view.reset_scroll_follow();
+                            conv_view.rerender_transcript(&sess_model.transcript);
+                        } else {
+                            conv_view.update_transcript(&sess_model.transcript);
+                        }
                         *active_sess.borrow_mut() = Some(sess_model);
                         if let Some(sess) = active_sess.borrow().as_ref() {
                             conv_view.composer().set_plan_mode(sess.plan_mode);

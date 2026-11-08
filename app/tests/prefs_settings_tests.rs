@@ -142,11 +142,18 @@ fn test_transcript_view_and_registry_persist() {
 }
 
 #[test]
-fn test_transcript_view_grouping_mapping() {
-    assert!(TranscriptView::Concise.groups_intermediate());
-    assert!(TranscriptView::Standard.groups_intermediate());
-    assert!(TranscriptView::Detailed.groups_intermediate());
-    assert!(!TranscriptView::Expanded.groups_intermediate());
-    assert!(TranscriptView::Detailed.expands_groups());
-    assert!(!TranscriptView::Standard.expands_groups());
+fn test_transcript_view_persists_four_modes() {
+    for mode in [
+        TranscriptView::Concise,
+        TranscriptView::Standard,
+        TranscriptView::Detailed,
+        TranscriptView::Expanded,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("ui-prefs.json");
+        let mut prefs = UiPrefs::default();
+        prefs.transcript_view = mode;
+        prefs.save(&path).unwrap();
+        assert_eq!(UiPrefs::load(&path).transcript_view, mode);
+    }
 }

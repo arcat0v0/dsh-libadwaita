@@ -104,10 +104,16 @@ impl TrajectoryView {
             .hscrollbar_policy(gtk4::PolicyType::Automatic)
             .child(&inspector)
             .build();
+        let event_scroll = gtk4::ScrolledWindow::builder()
+            .vexpand(true)
+            .hexpand(true)
+            .hscrollbar_policy(gtk4::PolicyType::Automatic)
+            .child(&column_view)
+            .build();
         let paned = gtk4::Paned::builder()
             .orientation(gtk4::Orientation::Horizontal)
             .position(520)
-            .start_child(&column_view)
+            .start_child(&event_scroll)
             .end_child(&inspector_scroll)
             .vexpand(true)
             .build();

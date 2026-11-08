@@ -6,14 +6,18 @@ use crate::ui::desktop::{open_path_in_default_app, open_terminal_in_dir};
 use crate::ui::message_renderer::{render_block, AssistantLiveHandle};
 use crate::ui::goal_bar::GoalBar;
 use crate::ui::plugins_page::PluginsPage;
+use crate::ui::presentation::{PresentationPolicy, StepGrouping};
 use crate::ui::queue_dock::QueueDock;
 use crate::ui::schedules::SchedulesPage;
+use crate::ui::scroll_follow::ScrollFollow;
 use crate::ui::trajectory::TrajectoryView;
+use crate::ui::turn_nav::{active_turn, fork_target_index, turn_markers, TurnMarker};
 use crate::ui_prefs::TranscriptView;
 use crate::ui::todo_dock::TodoDock;
 use libadwaita as adw;
 use gtk4::prelude::*;
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -75,6 +79,64 @@ pub fn context_breakdown_rows(breakdown: &serde_json::Value) -> Vec<(&'static st
     .collect()
 }
 
+pub fn intermediate_detail(block: &RenderBlock) -> Option<String> {
+    match block {
+        RenderBlock::ToolResult { info, .. } => {
+            Some(info.name.clone()).filter(|name| !name.is_empty())
+        }
+        RenderBlock::GenericEvent { event_type, .. } => Some(event_type.clone()),
+        _ => None,
+    }
+}
+
+fn update_active_turn(
+    adjustment: &gtk4::Adjustment,
+    transcript_box: &gtk4::Box,
+    widgets: &Rc<RefCell<Vec<(u32, gtk4::Widget)>>>,
+    buttons: &Rc<RefCell<Vec<(u32, gtk4::Button)>>>,
+) {
+    let offsets: Vec<(u32, f64)> = widgets
+        .borrow()
+        .iter()
+        .filter_map(|(turn, widget)| {
+            widget
+                .compute_point(transcript_box, &gtk4::graphene::Point::new(0.0, 0.0))
+                .map(|point| (*turn, f64::from(point.y())))
+        })
+        .collect();
+    let Some(active) = active_turn(&offsets, adjustment.value()) else {
+        return;
+    };
+    for (turn, button) in buttons.borrow().iter() {
+        if *turn == active {
+            button.add_css_class("dsh-turn-mark-active");
+        } else {
+            button.remove_css_class("dsh-turn-mark-active");
+        }
+    }
+}
+
+fn jump_to_turn(
+    turn: u32,
+    transcript_box: &gtk4::Box,
+    adjustment: &gtk4::Adjustment,
+    widgets: &Rc<RefCell<Vec<(u32, gtk4::Widget)>>>,
+) {
+    let Some(widget) = widgets
+        .borrow()
+        .iter()
+        .find(|(marker, _)| *marker == turn)
+        .map(|(_, widget)| widget.clone())
+    else {
+        return;
+    };
+    let Some(point) = widget.compute_point(transcript_box, &gtk4::graphene::Point::new(0.0, 0.0))
+    else {
+        return;
+    };
+    adjustment.set_value(f64::from(point.y()).max(0.0));
+}
+
 pub struct ConversationView {
     stack: gtk4::Stack,
     composer: Composer,
@@ -100,6 +162,14 @@ pub struct ConversationView {
     transcript_scroll: gtk4::ScrolledWindow,
     on_load_older: Rc<RefCell<Option<Box<dyn Fn()>>>>,
     live_handle: RefCell<Option<AssistantLiveHandle>>,
+    scroll_follow: Rc<Cell<ScrollFollow>>,
+    back_to_bottom: gtk4::Button,
+    turn_rail: gtk4::Box,
+    turn_markers: RefCell<Vec<TurnMarker>>,
+    turn_widgets: Rc<RefCell<Vec<(u32, gtk4::Widget)>>>,
+    rail_buttons: Rc<RefCell<Vec<(u32, gtk4::Button)>>>,
+    block_handles: RefCell<HashMap<usize, AssistantLiveHandle>>,
+    fork_handle: RefCell<Option<(usize, AssistantLiveHandle)>>,
     schedules_page: SchedulesPage,
     plugins_page: PluginsPage,
     trajectory_page: adw::ViewStackPage,
@@ -335,23 +405,6 @@ impl ConversationView {
             .orientation(gtk4::Orientation::Vertical)
             .build();
 
-        let transcript_scroll = gtk4::ScrolledWindow::builder()
-            .vexpand(true)
-            .hscrollbar_policy(gtk4::PolicyType::Never)
-            .build();
-
-        let load_slot_for_scroll: Rc<RefCell<Option<Box<dyn Fn()>>>> =
-            Rc::new(RefCell::new(None));
-        let load_slot_clone = load_slot_for_scroll.clone();
-        let adjustment = transcript_scroll.vadjustment();
-        adjustment.connect_value_changed(move |adj| {
-            if adj.value() <= 8.0 {
-                if let Some(handler) = load_slot_clone.borrow().as_ref() {
-                    handler();
-                }
-            }
-        });
-
         let transcript_box = gtk4::Box::builder()
             .orientation(gtk4::Orientation::Vertical)
             .spacing(12)
@@ -369,8 +422,97 @@ impl ConversationView {
         let welcome_bubble = welcome_bubble.container;
         transcript_box.append(&welcome_bubble);
 
+        let transcript_scroll = gtk4::ScrolledWindow::builder()
+            .vexpand(true)
+            .hscrollbar_policy(gtk4::PolicyType::Never)
+            .build();
         transcript_scroll.set_child(Some(&transcript_box));
-        chat_box.append(&transcript_scroll);
+
+        let back_to_bottom = gtk4::Button::builder()
+            .icon_name("go-bottom-symbolic")
+            .tooltip_text("Back to bottom")
+            .halign(gtk4::Align::End)
+            .valign(gtk4::Align::End)
+            .margin_end(18)
+            .margin_bottom(18)
+            .css_classes(["circular", "osd", "dsh-scroll-bottom"])
+            .visible(false)
+            .build();
+
+        let turn_rail = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Vertical)
+            .spacing(3)
+            .halign(gtk4::Align::End)
+            .valign(gtk4::Align::Center)
+            .margin_end(8)
+            .css_classes(["dsh-turn-rail"])
+            .visible(false)
+            .build();
+
+        let overlay = gtk4::Overlay::new();
+        overlay.set_child(Some(&transcript_scroll));
+        overlay.set_vexpand(true);
+        overlay.add_overlay(&back_to_bottom);
+        overlay.add_overlay(&turn_rail);
+        chat_box.append(&overlay);
+
+        let scroll_follow = Rc::new(Cell::new(ScrollFollow::new(true)));
+        let turn_widgets: Rc<RefCell<Vec<(u32, gtk4::Widget)>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        let rail_buttons: Rc<RefCell<Vec<(u32, gtk4::Button)>>> =
+            Rc::new(RefCell::new(Vec::new()));
+
+        let load_slot_for_scroll: Rc<RefCell<Option<Box<dyn Fn()>>>> =
+            Rc::new(RefCell::new(None));
+
+        let back_click_adjustment = transcript_scroll.vadjustment();
+        let back_click_follow = scroll_follow.clone();
+        back_to_bottom.connect_clicked(move |_| {
+            back_click_follow.set(ScrollFollow::new(true));
+            back_click_adjustment.set_value(
+                (back_click_adjustment.upper() - back_click_adjustment.page_size()).max(0.0),
+            );
+        });
+
+        let adjustment = transcript_scroll.vadjustment();
+        let follow_for_scroll = scroll_follow.clone();
+        let button_for_scroll = back_to_bottom.clone();
+        let box_for_scroll = transcript_box.clone();
+        let widgets_for_scroll = turn_widgets.clone();
+        let buttons_for_scroll = rail_buttons.clone();
+        let load_slot_clone = load_slot_for_scroll.clone();
+        adjustment.connect_value_changed(move |adj| {
+            let mut follow = follow_for_scroll.get();
+            follow.sample(adj.value(), adj.upper(), adj.page_size());
+            follow_for_scroll.set(follow);
+            button_for_scroll.set_visible(!follow.following());
+            update_active_turn(
+                adj,
+                &box_for_scroll,
+                &widgets_for_scroll,
+                &buttons_for_scroll,
+            );
+            if adj.value() <= 8.0 {
+                if let Some(handler) = load_slot_clone.borrow().as_ref() {
+                    handler();
+                }
+            }
+        });
+
+        let follow_for_changed = scroll_follow.clone();
+        let adjustment_for_changed = transcript_scroll.vadjustment();
+        adjustment.connect_changed(move |_| {
+            if !follow_for_changed.get().following() {
+                return;
+            }
+            let adjust = adjustment_for_changed.clone();
+            let follow = follow_for_changed.clone();
+            gtk4::glib::idle_add_local_once(move || {
+                if follow.get().following() {
+                    adjust.set_value((adjust.upper() - adjust.page_size()).max(0.0));
+                }
+            });
+        });
 
         let chat_page = view_stack.add_titled(&chat_box, Some("chat"), "Chat");
         chat_page.set_icon_name(Some("chat-bubbles-symbolic"));
@@ -466,6 +608,14 @@ impl ConversationView {
             transcript_scroll,
             on_load_older: load_slot_for_scroll,
             live_handle: RefCell::new(None),
+            scroll_follow,
+            back_to_bottom,
+            turn_rail,
+            turn_markers: RefCell::new(Vec::new()),
+            turn_widgets,
+            rail_buttons,
+            block_handles: RefCell::new(HashMap::new()),
+            fork_handle: RefCell::new(None),
             schedules_page,
             plugins_page,
             trajectory_page: traj_page,
@@ -704,11 +854,20 @@ impl ConversationView {
         });
     }
 
+    pub fn reset_scroll_follow(&self) {
+        self.scroll_follow.set(ScrollFollow::new(true));
+        self.back_to_bottom.set_visible(false);
+        self.scroll_transcript_to_bottom();
+    }
+
     pub fn rerender_transcript(&self, transcript: &ConversationTranscript) {
         while let Some(child) = self.transcript_box.first_child() {
             self.transcript_box.remove(&child);
         }
         self.live_handle.borrow_mut().take();
+        self.block_handles.borrow_mut().clear();
+        *self.fork_handle.borrow_mut() = None;
+        self.turn_widgets.borrow_mut().clear();
         self.rendered_count.set(0);
         self.update_transcript(transcript);
     }
@@ -876,10 +1035,18 @@ impl ConversationView {
             self.transcript_box.remove(&child);
         }
         self.live_handle.borrow_mut().take();
+        self.block_handles.borrow_mut().clear();
+        self.turn_widgets.borrow_mut().clear();
+        *self.fork_handle.borrow_mut() = None;
         self.rendered_count.set(0);
-        let mode = self.view_mode.get();
-        let mut group: Option<(gtk4::Expander, gtk4::Box, usize)> = None;
-        for block in blocks {
+        let policy = PresentationPolicy::for_mode(self.view_mode.get());
+        let last_turn_start = blocks
+            .iter()
+            .rposition(|block| matches!(block, RenderBlock::UserMessage { .. }))
+            .unwrap_or(0);
+        let markers = turn_markers(blocks);
+        let mut group: Option<(gtk4::Expander, gtk4::Box, usize, bool)> = None;
+        for (index, block) in blocks.iter().enumerate() {
             let intermediate = matches!(
                 block,
                 RenderBlock::ToolResult { info, .. } if !info.is_error
@@ -888,7 +1055,10 @@ impl ConversationView {
                 RenderBlock::GenericEvent { .. }
                     | RenderBlock::TodoBlock { .. }
             );
-            if intermediate {
+            let in_live_turn = index >= last_turn_start;
+            let grouped = policy.groups_intermediate()
+                && (policy.step_grouping != StepGrouping::History || !in_live_turn);
+            if intermediate && grouped {
                 if group.is_none() {
                     let inner = gtk4::Box::builder()
                         .orientation(gtk4::Orientation::Vertical)
@@ -897,30 +1067,48 @@ impl ConversationView {
                     let expander = gtk4::Expander::builder()
                         .label("Intermediate steps")
                         .child(&inner)
-                        .expanded(mode.expands_groups())
+                        .expanded(false)
                         .build();
                     self.transcript_box.append(&expander);
-                    group = Some((expander, inner, 0));
+                    group = Some((expander, inner, 0, in_live_turn));
                 }
-                if let Some((expander, inner, count)) = group.as_mut() {
-                    let (widget, handle) = render_block(block);
+                if let Some((expander, inner, count, live_group)) = group.as_mut() {
+                    let (widget, handle) = render_block(block, policy);
                     if let Some(handle) = handle {
+                        self.block_handles
+                            .borrow_mut()
+                            .insert(index, handle.clone());
                         *self.live_handle.borrow_mut() = Some(handle);
                     }
                     inner.append(&widget);
                     *count += 1;
-                    expander.set_label(Some(&format!(
+                    let mut label = format!(
                         "{} intermediate step{}",
                         *count,
                         if *count == 1 { "" } else { "s" }
-                    )));
+                    );
+                    if policy.live_process_detail && *live_group {
+                        if let Some(detail) = intermediate_detail(block) {
+                            label.push_str(" · ");
+                            label.push_str(&detail);
+                        }
+                    }
+                    expander.set_label(Some(&label));
                 }
             } else {
                 group = None;
-                let (widget, handle) = render_block(block);
+                let (widget, handle) = render_block(block, policy);
                 self.transcript_box.append(&widget);
                 if let Some(handle) = handle {
+                    self.block_handles
+                        .borrow_mut()
+                        .insert(index, handle.clone());
                     *self.live_handle.borrow_mut() = Some(handle);
+                }
+                if let Some(marker) = markers.iter().find(|marker| marker.block_index == index) {
+                    self.turn_widgets
+                        .borrow_mut()
+                        .push((marker.turn, widget.clone().upcast()));
                 }
             }
         }
@@ -930,6 +1118,8 @@ impl ConversationView {
                 text,
                 reasoning,
                 is_live,
+                seq,
+                time,
                 ..
             } = last_block
             {
@@ -940,11 +1130,86 @@ impl ConversationView {
                             handle.update_reasoning(reasoning);
                         }
                     } else {
-                        handle.finalize();
+                        handle.finalize(*seq, *time);
                     }
                 }
             }
         }
+        self.refresh_turn_rail(blocks);
+        self.refresh_fork_target(blocks);
+    }
+
+    fn refresh_turn_rail(&self, blocks: &[RenderBlock]) {
+        let markers = turn_markers(blocks);
+        if *self.turn_markers.borrow() == markers {
+            return;
+        }
+        *self.turn_markers.borrow_mut() = markers.clone();
+        while let Some(child) = self.turn_rail.first_child() {
+            self.turn_rail.remove(&child);
+        }
+        let mut buttons = self.rail_buttons.borrow_mut();
+        buttons.clear();
+        for marker in &markers {
+            let tooltip = if marker.preview.is_empty() {
+                format!("Turn {}", marker.turn)
+            } else {
+                format!("Turn {} · {}", marker.turn, marker.preview)
+            };
+            let button = gtk4::Button::builder()
+                .tooltip_text(&tooltip)
+                .css_classes(["dsh-turn-mark"])
+                .build();
+            let turn = marker.turn;
+            let box_for_click = self.transcript_box.clone();
+            let adjustment_for_click = self.transcript_scroll.vadjustment();
+            let widgets_for_click = self.turn_widgets.clone();
+            button.connect_clicked(move |_| {
+                jump_to_turn(
+                    turn,
+                    &box_for_click,
+                    &adjustment_for_click,
+                    &widgets_for_click,
+                );
+            });
+            self.turn_rail.append(&button);
+            buttons.push((marker.turn, button));
+        }
+        self.turn_rail.set_visible(markers.len() >= 2);
+        if let Some(last) = markers.last() {
+            if let Some((_, button)) = buttons.iter().find(|(turn, _)| *turn == last.turn) {
+                button.add_css_class("dsh-turn-mark-active");
+            }
+        }
+    }
+
+    fn refresh_fork_target(&self, blocks: &[RenderBlock]) {
+        let target = fork_target_index(blocks);
+        let mut slot = self.fork_handle.borrow_mut();
+        if slot.as_ref().map(|(index, _)| *index) == target {
+            return;
+        }
+        if let Some((_, handle)) = slot.take() {
+            handle.set_fork_visible(false);
+        }
+        if let Some(index) = target {
+            if let Some(handle) = self.block_handles.borrow().get(&index) {
+                handle.set_fork_visible(true);
+                *slot = Some((index, handle.clone()));
+            }
+        }
+    }
+
+    fn clear_turn_state(&self) {
+        *self.turn_markers.borrow_mut() = Vec::new();
+        self.turn_widgets.borrow_mut().clear();
+        while let Some(child) = self.turn_rail.first_child() {
+            self.turn_rail.remove(&child);
+        }
+        self.rail_buttons.borrow_mut().clear();
+        self.turn_rail.set_visible(false);
+        self.block_handles.borrow_mut().clear();
+        *self.fork_handle.borrow_mut() = None;
     }
 
     pub fn set_hero(&self, hero: bool) {
@@ -1004,6 +1269,9 @@ impl ConversationView {
         self.transcript_box.append(&self.welcome_bubble);
         self.live_handle.borrow_mut().take();
         self.rendered_count.set(0);
+        self.clear_turn_state();
+        self.scroll_follow.set(ScrollFollow::new(true));
+        self.back_to_bottom.set_visible(false);
         self.set_hero(true);
         self.set_title(Copybook::for_code("system").new_session);
         self.set_status("Idle");
@@ -1017,10 +1285,9 @@ impl ConversationView {
 
     pub fn update_transcript(&self, transcript: &ConversationTranscript) {
         let blocks = transcript.blocks();
+        let policy = PresentationPolicy::for_mode(self.view_mode.get());
         self.set_hero(blocks.is_empty());
-        if self.view_mode.get().groups_intermediate()
-            && blocks.len() > self.rendered_count.get()
-        {
+        if policy.groups_intermediate() && blocks.len() > self.rendered_count.get() {
             self.render_grouped(blocks);
         }
         if blocks.is_empty() {
@@ -1029,6 +1296,7 @@ impl ConversationView {
             }
             self.live_handle.borrow_mut().take();
             self.rendered_count.set(0);
+            self.clear_turn_state();
             self.set_hero(true);
             return;
         }
@@ -1037,15 +1305,27 @@ impl ConversationView {
             while let Some(child) = self.transcript_box.first_child() {
                 self.transcript_box.remove(&child);
             }
+            self.turn_widgets.borrow_mut().clear();
+            self.block_handles.borrow_mut().clear();
+            *self.fork_handle.borrow_mut() = None;
         }
 
         let current_count = self.rendered_count.get();
         if blocks.len() > current_count {
-            for block in &blocks[current_count..] {
-                let (widget, handle) = render_block(block);
+            let markers = turn_markers(blocks);
+            for (index, block) in blocks.iter().enumerate().skip(current_count) {
+                let (widget, handle) = render_block(block, policy);
                 self.transcript_box.append(&widget);
-                if let Some(h) = handle {
-                    *self.live_handle.borrow_mut() = Some(h);
+                if let Some(handle) = handle {
+                    self.block_handles
+                        .borrow_mut()
+                        .insert(index, handle.clone());
+                    *self.live_handle.borrow_mut() = Some(handle);
+                }
+                if let Some(marker) = markers.iter().find(|marker| marker.block_index == index) {
+                    self.turn_widgets
+                        .borrow_mut()
+                        .push((marker.turn, widget.clone().upcast()));
                 }
             }
             self.rendered_count.set(blocks.len());
@@ -1057,6 +1337,8 @@ impl ConversationView {
                     text,
                     reasoning,
                     is_live,
+                    seq,
+                    time,
                     ..
                 } => {
                     let handle_opt = self.live_handle.borrow().clone();
@@ -1067,18 +1349,20 @@ impl ConversationView {
                                 handle.update_reasoning(r);
                             }
                         } else {
-                            handle.finalize();
+                            handle.finalize(*seq, *time);
                             *self.live_handle.borrow_mut() = None;
                         }
                     }
                 }
                 _ => {
                     if let Some(handle) = self.live_handle.borrow_mut().take() {
-                        handle.finalize();
+                        handle.finalize(None, 0);
                     }
                 }
             }
         }
+        self.refresh_turn_rail(blocks);
+        self.refresh_fork_target(blocks);
     }
 }
 

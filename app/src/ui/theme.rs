@@ -304,6 +304,34 @@ menubutton.dsh-icon-button > button:active, menubutton.dsh-icon-button > button:
   margin: 2px 16px 2px 38px;
   padding-left: 8px;
 }
+.dsh-scroll-bottom {
+  box-shadow: 0 2px 8px var(--shade-color);
+}
+.dsh-turn-rail {
+  padding: 6px 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--popover-bg-color) 82%, transparent);
+  border: 1px solid var(--border-color);
+}
+.dsh-turn-mark {
+  min-width: 8px;
+  min-height: 8px;
+  padding: 0;
+  border-radius: 999px;
+  background-color: var(--border-color);
+  border: none;
+  box-shadow: none;
+}
+.dsh-turn-mark:hover {
+  background-color: var(--accent-bg-color);
+}
+.dsh-turn-mark-active {
+  background-color: var(--accent-bg-color);
+  min-height: 16px;
+}
+.dsh-fork-boundary {
+  padding: 2px 24px;
+}
 .dsh-hero {
   background: transparent;
 }

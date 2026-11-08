@@ -590,3 +590,49 @@ fn test_terminal_error_code_scan() {
         Some("STREAM_CLOSED".to_string())
     );
 }
+
+#[test]
+fn test_session_end_seed_renders_fork_boundary() {
+    let mut transcript = ConversationTranscript::new();
+    let event = |event_type: &str, seq: i64, data: serde_json::Value| SessionEvent {
+        event_type: event_type.to_string(),
+        seq,
+        time: 1000 + seq as u64,
+        data,
+        ignorable: None,
+        surface_op: None,
+        source_event_seqs: None,
+    };
+    transcript
+        .apply_event(event(
+            "user/message",
+            0,
+            serde_json::json!({"role": "user", "content": [{"type": "text", "text": "inherited"}]}),
+        ))
+        .unwrap();
+    transcript
+        .apply_event(event(
+            "assistant/message",
+            1,
+            serde_json::json!({"message": {"content": [{"type": "text", "text": "inherited reply"}]}}),
+        ))
+        .unwrap();
+    assert_eq!(
+        transcript
+            .apply_event(event("session/end-seed", 2, serde_json::json!({"inherited": true})))
+            .unwrap(),
+        TranscriptUpdate::Appended(2)
+    );
+    assert_eq!(transcript.blocks()[2], RenderBlock::ForkBoundary { seq: 2 });
+    transcript
+        .apply_event(event(
+            "user/message",
+            3,
+            serde_json::json!({"role": "user", "content": [{"type": "text", "text": "new prompt"}]}),
+        ))
+        .unwrap();
+    assert!(matches!(
+        transcript.blocks()[3],
+        RenderBlock::UserMessage { .. }
+    ));
+}

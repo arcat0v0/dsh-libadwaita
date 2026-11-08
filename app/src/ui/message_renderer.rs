@@ -1,6 +1,7 @@
 use crate::protocol::{MessageFeedbackItem, TodoItem, UserImageAttachment};
 use crate::transcript::{MessageAttachment, MessageFileAttachment, RenderBlock, ToolCallItem};
 use crate::ui::controller::SessionController;
+use crate::ui::presentation::PresentationPolicy;
 use gtk4::prelude::*;
 use libadwaita::prelude::*;
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
@@ -599,11 +600,20 @@ pub fn build_code_block(lang: &str, code: &str) -> gtk4::Box {
 
 pub struct LiveAssistantWidgets {
     pub container: gtk4::Box,
+    pub bubble: gtk4::Box,
     pub content_box: gtk4::Box,
+    pub stable_box: gtk4::Box,
+    pub tail_box: gtk4::Box,
     pub spinner: gtk4::Spinner,
     pub reasoning_box: gtk4::Box,
     pub reasoning_label: gtk4::Label,
     pub reasoning_expander: gtk4::Expander,
+    pub policy: PresentationPolicy,
+    pub stable_end: std::cell::Cell<usize>,
+    pub text: RefCell<String>,
+    pub reasoning_text: RefCell<String>,
+    pub running: std::cell::Cell<bool>,
+    pub fork_button: RefCell<Option<gtk4::Button>>,
 }
 
 #[derive(Clone)]
@@ -614,23 +624,72 @@ pub struct AssistantLiveHandle {
 impl AssistantLiveHandle {
     pub fn update_text(&self, text: &str) {
         let widgets = self.inner.borrow();
-        while let Some(child) = widgets.content_box.first_child() {
-            widgets.content_box.remove(&child);
+        *widgets.text.borrow_mut() = text.to_string();
+        let previous = widgets.stable_end.get();
+        let end = crate::ui::stream_markdown::stable_end(text, previous);
+        if end > previous {
+            while let Some(child) = widgets.stable_box.first_child() {
+                widgets.stable_box.remove(&child);
+            }
+            if end > 0 {
+                widgets
+                    .stable_box
+                    .append(&render_markdown(&text[..end]));
+            }
+            widgets.stable_end.set(end);
         }
-        let rendered = render_markdown(text);
-        widgets.content_box.append(&rendered);
+        while let Some(child) = widgets.tail_box.first_child() {
+            widgets.tail_box.remove(&child);
+        }
+        if end < text.len() {
+            widgets.tail_box.append(&render_markdown(&text[end..]));
+        }
     }
 
     pub fn update_reasoning(&self, reasoning: &str) {
         let widgets = self.inner.borrow();
+        *widgets.reasoning_text.borrow_mut() = reasoning.to_string();
         widgets.reasoning_label.set_label(reasoning);
-        widgets.reasoning_expander.set_visible(!reasoning.is_empty());
+        widgets
+            .reasoning_expander
+            .set_visible(!reasoning.is_empty());
+        drop(widgets);
+        self.refresh_reasoning_header();
     }
 
-    pub fn finalize(&self) {
+    pub fn finalize(&self, seq: Option<i64>, time: u64) {
         let widgets = self.inner.borrow();
+        widgets.running.set(false);
         widgets.spinner.stop();
         widgets.spinner.set_visible(false);
+        if widgets.fork_button.borrow().is_none() {
+            if let Some(message_seq) = seq {
+                let text = widgets.text.borrow().clone();
+                let (actions, fork) = build_assistant_actions(&text, message_seq, time);
+                widgets.bubble.append(&actions);
+                *widgets.fork_button.borrow_mut() = Some(fork);
+            }
+        }
+        drop(widgets);
+        self.refresh_reasoning_header();
+    }
+
+    pub fn set_fork_visible(&self, visible: bool) {
+        let widgets = self.inner.borrow();
+        if let Some(button) = widgets.fork_button.borrow().as_ref() {
+            button.set_visible(visible);
+        }
+    }
+
+    fn refresh_reasoning_header(&self) {
+        let widgets = self.inner.borrow();
+        let header = crate::ui::presentation::reasoning_header(
+            widgets.reasoning_expander.is_expanded(),
+            widgets.policy.settled_reasoning_preview,
+            widgets.running.get(),
+            &widgets.reasoning_text.borrow(),
+        );
+        widgets.reasoning_expander.set_label(Some(&header));
     }
 }
 
@@ -1022,6 +1081,7 @@ pub fn build_assistant_message(
     is_live: bool,
     seq: Option<i64>,
     time: u64,
+    policy: PresentationPolicy,
 ) -> (gtk4::Box, AssistantLiveHandle) {
     let row = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Horizontal)
@@ -1070,7 +1130,12 @@ pub fn build_assistant_message(
         .build();
 
     let reasoning_expander = gtk4::Expander::builder()
-        .label("Reasoning Process")
+        .label(crate::ui::presentation::reasoning_header(
+            false,
+            policy.settled_reasoning_preview,
+            is_live,
+            reasoning_text,
+        ))
         .child(&reasoning_label)
         .visible(!reasoning_text.is_empty())
         .build();
@@ -1084,10 +1149,25 @@ pub fn build_assistant_message(
         .margin_top(4)
         .margin_bottom(8)
         .build();
+    let stable_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .build();
+    let tail_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .build();
+    content_box.append(&stable_box);
+    content_box.append(&tail_box);
 
-    if !text.is_empty() {
-        let rendered = render_markdown(text);
-        content_box.append(&rendered);
+    let stable_end = if is_live {
+        crate::ui::stream_markdown::stable_end(text, 0)
+    } else {
+        text.len()
+    };
+    if stable_end > 0 {
+        stable_box.append(&render_markdown(&text[..stable_end]));
+    }
+    if stable_end < text.len() {
+        tail_box.append(&render_markdown(&text[stable_end..]));
     }
     bubble.append(&content_box);
     if !attachments.is_empty() {
@@ -1145,164 +1225,188 @@ pub fn build_assistant_message(
         .build();
     bubble.append(&spinner);
 
+    let mut fork_button = None;
     if !is_live {
         if let Some(message_seq) = seq {
-            let actions_box = gtk4::Box::builder()
-                .orientation(gtk4::Orientation::Horizontal)
-                .spacing(6)
-                .halign(gtk4::Align::End)
-                .margin_end(10)
-                .margin_bottom(8)
-                .build();
-            let copy_btn = gtk4::Button::builder()
-                .icon_name("edit-copy-symbolic")
-                .tooltip_text("Copy full message")
-                .css_classes(["flat", "circular"])
-                .build();
-            let copy_text = text.to_string();
-            copy_btn.connect_clicked(move |_| {
-                if let Some(display) = gtk4::gdk::Display::default() {
-                    display.clipboard().set_text(&copy_text);
-                }
-            });
-            actions_box.append(&copy_btn);
-            if time > 0 {
-                let stamp = gtk4::glib::DateTime::from_unix_local((time / 1000) as i64)
-                    .ok()
-                    .and_then(|date| date.format("%H:%M").ok())
-                    .map(|value| value.to_string())
-                    .unwrap_or_default();
-                if !stamp.is_empty() {
-                    let time_label = gtk4::Label::builder()
-                        .label(&stamp)
-                        .css_classes(["dim-label", "caption"])
-                        .build();
-                    actions_box.append(&time_label);
-                }
-            }
-            let fork_btn = gtk4::Button::builder()
-                .icon_name("view-more-symbolic")
-                .tooltip_text("Fork from here")
-                .css_classes(["flat", "circular"])
-                .build();
-            fork_btn.set_action_name(Some("win.fork-session"));
-            fork_btn.set_action_target_value(Some(&message_seq.to_variant()));
-            actions_box.append(&fork_btn);
-            let message_id = message_seq.to_string();
-            let existing = feedback_for(&message_id);
-            let up = gtk4::Button::builder()
-                .icon_name("thumbs-up-symbolic")
-                .tooltip_text("Good response")
-                .css_classes(["flat", "circular"])
-                .build();
-            if existing.as_ref().map(|item| item.rating.as_str()) == Some("positive") {
-                up.add_css_class("accent");
-            }
-            let down = gtk4::Button::builder()
-                .icon_name("thumbs-down-symbolic")
-                .tooltip_text("Bad response")
-                .css_classes(["flat", "circular"])
-                .build();
-            if existing.as_ref().map(|item| item.rating.as_str()) == Some("negative") {
-                down.add_css_class("accent");
-            }
-            let up_id = message_id.clone();
-            let up_version = existing.as_ref().map(|item| item.version.clone());
-            let up_existing = existing.clone();
-            up.connect_clicked(move |_| {
-                with_controller(|ctrl| {
-                    if up_existing.as_ref().map(|item| item.rating.as_str()) == Some("positive") {
-                        if let Some(item) = &up_existing {
-                            ctrl.delete_feedback(&up_id, &item.version);
-                        }
-                    } else {
-                        ctrl.put_feedback(&up_id, "positive", up_version.clone(), None, None);
-                    }
-                });
-            });
-            let down_id = message_id.clone();
-            let down_version = existing.as_ref().map(|item| item.version.clone());
-            let down_existing = existing;
-            down.connect_clicked(move |_| {
-                with_controller(|ctrl| {
-                    if down_existing.as_ref().map(|item| item.rating.as_str())
-                        == Some("negative")
-                    {
-                        if let Some(item) = &down_existing {
-                            ctrl.delete_feedback(&down_id, &item.version);
-                        }
-                    } else {
-                        ctrl.put_feedback(&down_id, "negative", down_version.clone(), None, None);
-                    }
-                });
-            });
-            actions_box.append(&up);
-            actions_box.append(&down);
-            let note = gtk4::Button::builder()
-                .label("Feedback")
-                .css_classes(["flat"])
-                .build();
-            let note_parent = actions_box.clone();
-            note.connect_clicked(move |_| {
-                let dialog = libadwaita::Dialog::builder()
-                    .title("Session Feedback")
-                    .content_width(420)
-                    .build();
-                let content = gtk4::Box::builder()
-                    .orientation(gtk4::Orientation::Vertical)
-                    .spacing(10)
-                    .margin_start(16)
-                    .margin_end(16)
-                    .margin_top(16)
-                    .margin_bottom(16)
-                    .build();
-                let entry = libadwaita::EntryRow::builder()
-                    .title("What went wrong or right?")
-                    .build();
-                let entry_list = gtk4::ListBox::builder()
-                    .css_classes(["boxed-list"])
-                    .selection_mode(gtk4::SelectionMode::None)
-                    .build();
-                entry_list.append(&entry);
-                content.append(&entry_list);
-                let send = gtk4::Button::builder()
-                    .label("Record")
-                    .css_classes(["suggested-action"])
-                    .build();
-                let dialog_for_send = dialog.clone();
-                let entry_for_send = entry.clone();
-                send.connect_clicked(move |_| {
-                    let text = entry_for_send.text().to_string();
-                    if !text.trim().is_empty() {
-                        with_controller(|ctrl| ctrl.record_session_feedback(&text));
-                    }
-                    dialog_for_send.close();
-                });
-                content.append(&send);
-                dialog.set_child(Some(&content));
-                dialog.present(Some(&note_parent));
-            });
-            actions_box.append(&note);
+            let (actions_box, fork) = build_assistant_actions(text, message_seq, time);
             bubble.append(&actions_box);
+            fork_button = Some(fork);
         }
     }
 
     row.append(&bubble);
 
+    let expander_for_notify = reasoning_expander.clone();
     let live_widgets = LiveAssistantWidgets {
         container: row.clone(),
+        bubble,
         content_box,
+        stable_box,
+        tail_box,
         spinner,
         reasoning_box,
         reasoning_label,
         reasoning_expander,
+        policy,
+        stable_end: std::cell::Cell::new(stable_end),
+        text: RefCell::new(text.to_string()),
+        reasoning_text: RefCell::new(reasoning_text.to_string()),
+        running: std::cell::Cell::new(is_live),
+        fork_button: RefCell::new(fork_button),
     };
 
     let handle = AssistantLiveHandle {
         inner: Rc::new(RefCell::new(live_widgets)),
     };
+    let handle_for_notify = handle.clone();
+    expander_for_notify.connect_expanded_notify(move |_| {
+        handle_for_notify.refresh_reasoning_header();
+    });
 
     (row, handle)
+}
+
+fn build_assistant_actions(
+    text: &str,
+    message_seq: i64,
+    time: u64,
+) -> (gtk4::Box, gtk4::Button) {
+    let actions_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing(6)
+        .halign(gtk4::Align::End)
+        .margin_end(10)
+        .margin_bottom(8)
+        .build();
+    let copy_btn = gtk4::Button::builder()
+        .icon_name("edit-copy-symbolic")
+        .tooltip_text("Copy full message")
+        .css_classes(["flat", "circular"])
+        .build();
+    let copy_text = text.to_string();
+    copy_btn.connect_clicked(move |_| {
+        if let Some(display) = gtk4::gdk::Display::default() {
+            display.clipboard().set_text(&copy_text);
+        }
+    });
+    actions_box.append(&copy_btn);
+    if time > 0 {
+        let stamp = gtk4::glib::DateTime::from_unix_local((time / 1000) as i64)
+            .ok()
+            .and_then(|date| date.format("%H:%M").ok())
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        if !stamp.is_empty() {
+            let time_label = gtk4::Label::builder()
+                .label(&stamp)
+                .css_classes(["dim-label", "caption"])
+                .build();
+            actions_box.append(&time_label);
+        }
+    }
+    let fork_btn = gtk4::Button::builder()
+        .icon_name("view-more-symbolic")
+        .tooltip_text("Fork from here")
+        .css_classes(["flat", "circular"])
+        .visible(false)
+        .build();
+    fork_btn.set_action_name(Some("win.fork-session"));
+    fork_btn.set_action_target_value(Some(&message_seq.to_variant()));
+    actions_box.append(&fork_btn);
+    let message_id = message_seq.to_string();
+    let existing = feedback_for(&message_id);
+    let up = gtk4::Button::builder()
+        .icon_name("thumbs-up-symbolic")
+        .tooltip_text("Good response")
+        .css_classes(["flat", "circular"])
+        .build();
+    if existing.as_ref().map(|item| item.rating.as_str()) == Some("positive") {
+        up.add_css_class("accent");
+    }
+    let down = gtk4::Button::builder()
+        .icon_name("thumbs-down-symbolic")
+        .tooltip_text("Bad response")
+        .css_classes(["flat", "circular"])
+        .build();
+    if existing.as_ref().map(|item| item.rating.as_str()) == Some("negative") {
+        down.add_css_class("accent");
+    }
+    let up_id = message_id.clone();
+    let up_version = existing.as_ref().map(|item| item.version.clone());
+    let up_existing = existing.clone();
+    up.connect_clicked(move |_| {
+        with_controller(|ctrl| {
+            if up_existing.as_ref().map(|item| item.rating.as_str()) == Some("positive") {
+                if let Some(item) = &up_existing {
+                    ctrl.delete_feedback(&up_id, &item.version);
+                }
+            } else {
+                ctrl.put_feedback(&up_id, "positive", up_version.clone(), None, None);
+            }
+        });
+    });
+    let down_id = message_id.clone();
+    let down_version = existing.as_ref().map(|item| item.version.clone());
+    let down_existing = existing;
+    down.connect_clicked(move |_| {
+        with_controller(|ctrl| {
+            if down_existing.as_ref().map(|item| item.rating.as_str()) == Some("negative") {
+                if let Some(item) = &down_existing {
+                    ctrl.delete_feedback(&down_id, &item.version);
+                }
+            } else {
+                ctrl.put_feedback(&down_id, "negative", down_version.clone(), None, None);
+            }
+        });
+    });
+    actions_box.append(&up);
+    actions_box.append(&down);
+    let note = gtk4::Button::builder()
+        .label("Feedback")
+        .css_classes(["flat"])
+        .build();
+    let note_parent = actions_box.clone();
+    note.connect_clicked(move |_| {
+        let dialog = libadwaita::Dialog::builder()
+            .title("Session Feedback")
+            .content_width(420)
+            .build();
+        let content = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Vertical)
+            .spacing(10)
+            .margin_start(16)
+            .margin_end(16)
+            .margin_top(16)
+            .margin_bottom(16)
+            .build();
+        let entry = libadwaita::EntryRow::builder()
+            .title("What went wrong or right?")
+            .build();
+        let entry_list = gtk4::ListBox::builder()
+            .css_classes(["boxed-list"])
+            .selection_mode(gtk4::SelectionMode::None)
+            .build();
+        entry_list.append(&entry);
+        content.append(&entry_list);
+        let send = gtk4::Button::builder()
+            .label("Record")
+            .css_classes(["suggested-action"])
+            .build();
+        let dialog_for_send = dialog.clone();
+        let entry_for_send = entry.clone();
+        send.connect_clicked(move |_| {
+            let text = entry_for_send.text().to_string();
+            if !text.trim().is_empty() {
+                with_controller(|ctrl| ctrl.record_session_feedback(&text));
+            }
+            dialog_for_send.close();
+        });
+        content.append(&send);
+        dialog.set_child(Some(&content));
+        dialog.present(Some(&note_parent));
+    });
+    actions_box.append(&note);
+    (actions_box, fork_btn)
 }
 
 pub fn build_tool_result(call_id: &str, name: &str, result: &str, is_error: bool, _seq: i64) -> gtk4::Box {
@@ -1446,7 +1550,10 @@ pub fn build_generic_event(event_type: &str, summary: &str, _seq: i64) -> gtk4::
     row
 }
 
-pub fn render_block(block: &RenderBlock) -> (gtk4::Box, Option<AssistantLiveHandle>) {
+pub fn render_block(
+    block: &RenderBlock,
+    policy: PresentationPolicy,
+) -> (gtk4::Box, Option<AssistantLiveHandle>) {
     match block {
         RenderBlock::UserMessage {
             text,
@@ -1478,6 +1585,7 @@ pub fn render_block(block: &RenderBlock) -> (gtk4::Box, Option<AssistantLiveHand
                 *is_live,
                 *seq,
                 *time,
+                policy,
             );
             (widget, Some(handle))
         }
@@ -1511,7 +1619,41 @@ pub fn render_block(block: &RenderBlock) -> (gtk4::Box, Option<AssistantLiveHand
         }
         RenderBlock::MaxTokensHint { .. } => (build_max_tokens_hint(), None),
         RenderBlock::RetryHint { message, .. } => (build_retry_hint(message), None),
+        RenderBlock::ForkBoundary { .. } => (build_fork_boundary(), None),
     }
+}
+
+fn build_fork_boundary() -> gtk4::Box {
+    let zh = crate::ui::copy::system_locale().starts_with("zh");
+    let row = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing(8)
+        .margin_top(8)
+        .margin_bottom(8)
+        .css_classes(["dsh-fork-boundary"])
+        .build();
+    let start = gtk4::Separator::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .hexpand(true)
+        .valign(gtk4::Align::Center)
+        .build();
+    let label = gtk4::Label::builder()
+        .label(if zh {
+            "从原会话分叉 · 以上为继承历史"
+        } else {
+            "Forked from parent session · history above is inherited"
+        })
+        .css_classes(["dim-label", "caption"])
+        .build();
+    let end = gtk4::Separator::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .hexpand(true)
+        .valign(gtk4::Align::Center)
+        .build();
+    row.append(&start);
+    row.append(&label);
+    row.append(&end);
+    row
 }
 
 fn build_compaction_card(summary: &str) -> gtk4::Box {

@@ -78,6 +78,9 @@ pub enum RenderBlock {
         message: String,
         seq: i64,
     },
+    ForkBoundary {
+        seq: i64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -778,6 +781,10 @@ impl ConversationTranscript {
                     message,
                     seq: event.seq,
                 });
+                Ok(TranscriptUpdate::Appended(self.blocks.len() - 1))
+            }
+            "session/end-seed" => {
+                self.blocks.push(RenderBlock::ForkBoundary { seq: event.seq });
                 Ok(TranscriptUpdate::Appended(self.blocks.len() - 1))
             }
             _ => {
