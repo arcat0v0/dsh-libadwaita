@@ -17,6 +17,14 @@ fn test_draft_store_set_get_remove() {
 }
 
 #[test]
+fn test_draft_store_composer_text_is_session_scoped() {
+    let mut store = DraftStore::default();
+    store.set("s1", "hello");
+    assert_eq!(store.text_for("s1"), "hello");
+    assert_eq!(store.text_for("s2"), "");
+}
+
+#[test]
 fn test_draft_store_blank_text_is_removed() {
     let mut store = DraftStore::default();
     store.set("s1", "text");

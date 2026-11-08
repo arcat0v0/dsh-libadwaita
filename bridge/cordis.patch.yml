@@ -11,6 +11,9 @@
         maxNoteBytes: 8192
     - id: schedule
       name: '@deepseek-ai/dsh-schedule'
+    - id: plugin-market
+      name: '@deepseek-ai/dsh-plugin-market'
+      disabled: !!js "!ctx.get('profileContext')"
     - id: terminal
       name: '@deepseek-ai/dsh-terminal'
     - id: terminal-bash

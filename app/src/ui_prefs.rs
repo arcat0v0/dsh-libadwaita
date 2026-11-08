@@ -66,6 +66,8 @@ pub struct UiPrefs {
     pub dock_tabs: HashMap<String, usize>,
     #[serde(default)]
     pub dock_visible: HashMap<String, bool>,
+    #[serde(default)]
+    pub session_views: HashMap<String, String>,
 }
 
 fn default_true() -> bool {
@@ -86,6 +88,7 @@ impl Default for UiPrefs {
             plugin_registry: None,
             dock_tabs: HashMap::new(),
             dock_visible: HashMap::new(),
+            session_views: HashMap::new(),
         }
     }
 }
@@ -140,6 +143,15 @@ impl UiPrefs {
 
     pub fn set_dock_visible(&mut self, session_id: &str, visible: bool) {
         self.dock_visible.insert(session_id.to_string(), visible);
+    }
+
+    pub fn session_view(&self, session_id: &str) -> Option<&str> {
+        self.session_views.get(session_id).map(String::as_str)
+    }
+
+    pub fn set_session_view(&mut self, session_id: &str, view: &str) {
+        self.session_views
+            .insert(session_id.to_string(), view.to_string());
     }
 }
 

@@ -1,5 +1,8 @@
 use dsh_libadwaita::connection::IncomingNotification;
 use dsh_libadwaita::protocol::*;
+use dsh_libadwaita::schedule_model::{
+    ScheduleDailyInput, ScheduleSessionCreateSpec, ScheduleTargetRequest, ScheduleTiming,
+};
 
 #[test]
 fn test_jsonrpc_request_roundtrip() {
@@ -7,15 +10,18 @@ fn test_jsonrpc_request_roundtrip() {
         jsonrpc: JSONRPC_VERSION.to_string(),
         id: RequestId::from("req-1"),
         method: METHOD_INITIALIZE.to_string(),
-        params: Some(serde_json::to_value(InitializeParams {
-            client_version: "0.1.0".to_string(),
-            protocol_version: PROTOCOL_VERSION,
-            capabilities: Some(ClientCapabilities {
-                user_questions: true,
-                approval_requests: true,
-                streaming: true,
-            }),
-        }).unwrap()),
+        params: Some(
+            serde_json::to_value(InitializeParams {
+                client_version: "0.1.0".to_string(),
+                protocol_version: PROTOCOL_VERSION,
+                capabilities: Some(ClientCapabilities {
+                    user_questions: true,
+                    approval_requests: true,
+                    streaming: true,
+                }),
+            })
+            .unwrap(),
+        ),
     };
 
     let serialized = serde_json::to_string(&req).unwrap();
@@ -150,7 +156,9 @@ fn test_assistant_stream_frame_variants() {
     let start_json = r#"{"type":"start","attemptId":"att-0","revision":1,"turn":1,"step":0}"#;
     let start_frame: AssistantStreamFrame = serde_json::from_str(start_json).unwrap();
     match start_frame {
-        AssistantStreamFrame::Start { attempt_id, turn, .. } => {
+        AssistantStreamFrame::Start {
+            attempt_id, turn, ..
+        } => {
             assert_eq!(attempt_id, "att-0");
             assert_eq!(turn, 1);
         }
@@ -193,7 +201,8 @@ fn test_assistant_stream_frame_variants() {
 
 #[test]
 fn test_approval_request_and_result() {
-    let req_json = r#"{"sessionId":"sess-1","toolName":"bash","callId":"call-123","reason":"run git status"}"#;
+    let req_json =
+        r#"{"sessionId":"sess-1","toolName":"bash","callId":"call-123","reason":"run git status"}"#;
     let req: ApprovalRequestParams = serde_json::from_str(req_json).unwrap();
     assert_eq!(req.session_id, "sess-1");
     assert_eq!(req.tool_name, "bash");
@@ -262,11 +271,26 @@ fn test_user_question_with_plan_review_intent() {
 
 #[test]
 fn test_error_code_mapping() {
-    assert_eq!(BridgeErrorCode::from_code(-32700), BridgeErrorCode::ParseError);
-    assert_eq!(BridgeErrorCode::from_code(-32001), BridgeErrorCode::ProtocolVersionMismatch);
-    assert_eq!(BridgeErrorCode::from_code(-32006), BridgeErrorCode::ApprovalFailClosed);
-    assert_eq!(BridgeErrorCode::from_code(-32010), BridgeErrorCode::RestartRequired);
-    assert_eq!(BridgeErrorCode::from_code(-99999), BridgeErrorCode::Unknown(-99999));
+    assert_eq!(
+        BridgeErrorCode::from_code(-32700),
+        BridgeErrorCode::ParseError
+    );
+    assert_eq!(
+        BridgeErrorCode::from_code(-32001),
+        BridgeErrorCode::ProtocolVersionMismatch
+    );
+    assert_eq!(
+        BridgeErrorCode::from_code(-32006),
+        BridgeErrorCode::ApprovalFailClosed
+    );
+    assert_eq!(
+        BridgeErrorCode::from_code(-32010),
+        BridgeErrorCode::RestartRequired
+    );
+    assert_eq!(
+        BridgeErrorCode::from_code(-99999),
+        BridgeErrorCode::Unknown(-99999)
+    );
     assert_eq!(BridgeErrorCode::ApprovalFailClosed.to_code(), -32006);
 }
 
@@ -302,8 +326,21 @@ fn test_batch_b_protocol_roundtrips() {
     };
     assert_eq!(
         dsh_libadwaita::ui::controller::permission_display_label(&permission),
-        "Auto"
+        "自动审查"
     );
+
+    let decoded_permission: PermissionGetResult = serde_json::from_value(serde_json::json!({
+        "currentValue": "workspace-write",
+        "catalog": {
+            "options": [{"value": "workspace-write", "name": "Workspace Write"}],
+            "defaultOptions": [{"value": "read-only", "name": "Read Only"}],
+            "defaultPreset": "workspace-write"
+        }
+    }))
+    .unwrap();
+    assert_eq!(decoded_permission.current_value, "workspace-write");
+    assert_eq!(decoded_permission.catalog.default_preset, "workspace-write");
+    assert_eq!(decoded_permission.catalog.default_options.len(), 1);
 
     let file_text = FilesReadResult {
         kind: "text".to_string(),
@@ -323,8 +360,13 @@ fn test_batch_b_protocol_roundtrips() {
         size: 128,
         truncated: None,
     };
-    assert_eq!(dsh_libadwaita::ui::files_panel::read_text_result(&binary_text), None);
-    assert!(dsh_libadwaita::ui::files_panel::is_image_path("diagram.svg"));
+    assert_eq!(
+        dsh_libadwaita::ui::files_panel::read_text_result(&binary_text),
+        None
+    );
+    assert!(dsh_libadwaita::ui::files_panel::is_image_path(
+        "diagram.svg"
+    ));
     assert!(!dsh_libadwaita::ui::files_panel::is_image_path("notes.rs"));
 
     let goal_notif = GoalUpdatedNotificationParams {
@@ -386,10 +428,7 @@ fn test_batch_d_notifications_and_types() {
         "next": 5,
         "lossy": false
     });
-    match dsh_libadwaita::connection::IncomingNotification::from_raw(
-        NOTIFICATION_JOB_OUTPUT,
-        job,
-    ) {
+    match dsh_libadwaita::connection::IncomingNotification::from_raw(NOTIFICATION_JOB_OUTPUT, job) {
         dsh_libadwaita::connection::IncomingNotification::JobOutput(output) => {
             assert_eq!(output.chunks[0].text, "hello\n");
             assert_eq!(output.next, 5);
@@ -411,10 +450,9 @@ fn test_batch_d_notifications_and_types() {
 
 #[test]
 fn test_terminal_and_schedule_protocol_shapes() {
-    let created: TerminalCreateResult = serde_json::from_str(
-        r#"{"terminalId":"t1","sessionId":"s1","pid":42,"cwd":"/tmp"}"#,
-    )
-    .unwrap();
+    let created: TerminalCreateResult =
+        serde_json::from_str(r#"{"terminalId":"t1","sessionId":"s1","pid":42,"cwd":"/tmp"}"#)
+            .unwrap();
     assert_eq!(created.terminal_id, "t1");
 
     let output: TerminalOutputResult = serde_json::from_str(
@@ -423,13 +461,643 @@ fn test_terminal_and_schedule_protocol_shapes() {
     .unwrap();
     assert_eq!(output.text, "hi\n");
 
-    let catalog: ScheduleCatalogResult =
-        serde_json::from_str(r#"{"result":[{"id":"sch1","title":"Nightly"}]}"#).unwrap();
-    assert_eq!(schedule_field(&catalog.result[0], "title"), Some("Nightly"));
+    let catalog: ScheduleCatalogResult = serde_json::from_value(serde_json::json!({
+        "result": [{
+            "id": "sch1",
+            "kind": "rrule",
+            "title": "Nightly",
+            "prompt": "run nightly",
+            "scheduledAt": "2026-09-19T15:51:00Z",
+            "rrule": "DTSTART;TZID=UTC:20260919T155100\nRRULE:FREQ=DAILY;COUNT=1",
+            "target": {"kind": "session", "sessionId": "s1"},
+            "involvedSessionIds": ["s1"],
+            "status": "active"
+        }]
+    }))
+    .unwrap();
+    assert_eq!(catalog.result[0].title, "Nightly");
+    assert_eq!(
+        catalog.result[0].status,
+        dsh_libadwaita::schedule_model::ScheduleStatus::Active
+    );
 
     let changed = serde_json::json!({"changed": true});
     match IncomingNotification::from_raw(NOTIFICATION_SCHEDULE_CHANGED, changed) {
         IncomingNotification::ScheduleChanged(p) => assert!(p.changed),
         other => panic!("unexpected notification: {:?}", other),
     }
+}
+
+#[test]
+fn test_plugin_change_result_parsing() {
+    let raw = r#"{
+        "changed": true,
+        "application": "restart-required",
+        "restartReason": "no-hmr",
+        "stage": "enable",
+        "target": "@deepseek-ai/dsh-experimental-auto-review",
+        "enabled": true
+    }"#;
+    let result: PluginChangeResult = serde_json::from_str(raw).unwrap();
+    assert_eq!(result.application, "restart-required");
+    assert_eq!(result.restart_reason.as_deref(), Some("no-hmr"));
+    assert_eq!(result.stage, "enable");
+    assert_eq!(result.target, "@deepseek-ai/dsh-experimental-auto-review");
+    assert_eq!(result.enabled, Some(true));
+    assert!(result.error.is_none());
+
+    let failed: PluginChangeResult = serde_json::from_str(
+        r#"{
+            "changed": false,
+            "application": "failed",
+            "stage": "install",
+            "target": "@community/whale-pet",
+            "error": {
+                "code": "operation-error",
+                "diagnostic": "pnpm exited with 1",
+                "incompatible": [
+                    {"name": "@community/whale-pet", "version": "9.0.0", "runtimeVersion": "0.4.0", "requirements": {"dsh": "^0.4"}}
+                ]
+            },
+            "packageResult": {"exitCode": 1, "output": "ERR", "truncated": false, "logPath": "/tmp/pnpm.log", "kind": "network"},
+            "failedAt": "registry",
+            "registries": [null, "https://registry.npmmirror.com/"]
+        }"#,
+    )
+    .unwrap();
+    let error = failed.error.as_ref().unwrap();
+    assert_eq!(error.code, "operation-error");
+    assert_eq!(error.diagnostic.as_deref(), Some("pnpm exited with 1"));
+    let incompatible = error.incompatible.as_ref().unwrap();
+    assert_eq!(incompatible[0].runtime_version, "0.4.0");
+    assert_eq!(incompatible[0].requirements["dsh"], "^0.4");
+    let package = failed.package_result.as_ref().unwrap();
+    assert_eq!(package.exit_code, 1);
+    assert_eq!(package.kind.as_deref(), Some("network"));
+    assert_eq!(failed.failed_at.as_deref(), Some("registry"));
+    assert_eq!(
+        failed.registries.as_ref().unwrap()[1].as_deref(),
+        Some("https://registry.npmmirror.com/")
+    );
+}
+
+#[test]
+fn test_plugin_bundle_toggle_params_serialize() {
+    let params = PluginBundleToggleParams {
+        name: "@deepseek-ai/dsh-experimental-auto-review".to_string(),
+    };
+    let json = serde_json::to_value(&params).unwrap();
+    assert_eq!(json["name"], "@deepseek-ai/dsh-experimental-auto-review");
+}
+
+#[test]
+fn test_plugin_detail_result_parsing() {
+    let found: PluginBundleDetail = serde_json::from_str(
+        r##"{"status": "found", "origin": "locale", "markdown": "# Demo\n\nBody", "path": "/tmp/x"}"##,
+    )
+    .unwrap();
+    assert_eq!(found.status, "found");
+    assert_eq!(found.origin.as_deref(), Some("locale"));
+    assert_eq!(found.markdown.as_deref(), Some("# Demo\n\nBody"));
+
+    let none: PluginBundleDetail = serde_json::from_str(r#"{"status": "none"}"#).unwrap();
+    assert_eq!(none.status, "none");
+    assert!(none.markdown.is_none());
+}
+
+#[test]
+fn test_plugin_registries_and_probe_shapes() {
+    let registries: PluginRegistriesResult = serde_json::from_str(
+        r#"{"result": {"registry": null, "fallbackRegistries": ["https://registry.npmmirror.com/"], "resolved": "https://registry.npmjs.org/"}}"#,
+    )
+    .unwrap();
+    assert!(registries.result.registry.is_none());
+    assert_eq!(registries.result.fallback_registries.len(), 1);
+    assert_eq!(
+        registries.result.resolved.as_deref(),
+        Some("https://registry.npmjs.org/")
+    );
+
+    let probe: PluginRegistryProbeResult =
+        serde_json::from_str(r#"{"result": "https://registry.npmmirror.com/"}"#).unwrap();
+    assert_eq!(
+        probe.result.as_deref(),
+        Some("https://registry.npmmirror.com/")
+    );
+    let probe_null: PluginRegistryProbeResult =
+        serde_json::from_str(r#"{"result": null}"#).unwrap();
+    assert!(probe_null.result.is_none());
+}
+
+#[test]
+fn test_plugin_lifecycle_notifications_parse() {
+    let changed = serde_json::json!({"reason": "bundle"});
+    match IncomingNotification::from_raw(NOTIFICATION_PLUGIN_CHANGED, changed) {
+        IncomingNotification::PluginChanged(p) => assert_eq!(p.reason, "bundle"),
+        other => panic!("unexpected notification: {:?}", other),
+    }
+    let update = serde_json::json!({"requestId": "req-9", "step": "removing"});
+    match IncomingNotification::from_raw(NOTIFICATION_PLUGIN_UPDATE_STATE, update) {
+        IncomingNotification::PluginUpdateState(p) => {
+            assert_eq!(p.request_id, "req-9");
+            assert_eq!(p.step, "removing");
+        }
+        other => panic!("unexpected notification: {:?}", other),
+    }
+    let market = serde_json::json!({"changed": true});
+    match IncomingNotification::from_raw(NOTIFICATION_PLUGIN_MARKET_CHANGED, market) {
+        IncomingNotification::PluginMarketChanged(p) => assert!(p.changed),
+        other => panic!("unexpected notification: {:?}", other),
+    }
+}
+
+#[test]
+fn test_plugin_market_indexes_parse() {
+    let indexes: PluginMarketListIndexesResult = serde_json::from_str(
+        r#"{"result": [{"url": "https://market.example/index.json", "title": "Example"}]}"#,
+    )
+    .unwrap();
+    assert_eq!(indexes.result.len(), 1);
+    assert_eq!(
+        indexes.result[0].url,
+        "https://market.example/index.json"
+    );
+}
+
+#[test]
+fn test_plugin_spec_inspection_parse() {
+    let accepted: PluginSpecInspection = serde_json::from_str(
+        r#"{"status": "accepted", "kind": "registry", "name": "dsh-plugin-whale-pet", "version": "1.0.0", "description": "Whale pet", "bundle": true, "registry": "https://registry.npmjs.org/"}"#,
+    )
+    .unwrap();
+    match accepted {
+        PluginSpecInspection::Accepted {
+            kind,
+            name,
+            version,
+            bundle,
+            ..
+        } => {
+            assert_eq!(kind, "registry");
+            assert_eq!(name.as_deref(), Some("dsh-plugin-whale-pet"));
+            assert_eq!(version.as_deref(), Some("1.0.0"));
+            assert_eq!(bundle, Some(true));
+        }
+        PluginSpecInspection::Refused { .. } => panic!("expected accepted"),
+    }
+
+    let refused: PluginSpecInspection = serde_json::from_str(
+        r#"{"status": "refused", "problem": "network", "reason": "fetch failed", "registries": ["https://registry.npmjs.org/", "https://registry.npmmirror.com/"]}"#,
+    )
+    .unwrap();
+    match refused {
+        PluginSpecInspection::Refused {
+            problem,
+            reason,
+            registries,
+        } => {
+            assert_eq!(problem, "network");
+            assert_eq!(reason, "fetch failed");
+            assert_eq!(registries.unwrap().len(), 2);
+        }
+        PluginSpecInspection::Accepted { .. } => panic!("expected refused"),
+    }
+}
+
+#[test]
+fn test_plugin_versions_and_update_result_parse() {
+    let listed: PluginVersionList = serde_json::from_str(
+        r#"{
+            "status": "listed",
+            "installed": "1.0.0",
+            "registry": "https://registry.npmjs.org/",
+            "attempts": [{"registry": "https://registry.npmjs.org/"}],
+            "versions": [
+                {
+                    "version": "1.1.0",
+                    "publishedAt": "2026-05-01T00:00:00.000Z",
+                    "tags": ["latest"],
+                    "prerelease": false,
+                    "bundle": true
+                },
+                {
+                    "version": "2.0.0-beta.1",
+                    "tags": ["next"],
+                    "prerelease": true,
+                    "bundle": true
+                }
+            ],
+            "omitted": 0
+        }"#,
+    )
+    .unwrap();
+    match listed {
+        PluginVersionList::Listed {
+            installed,
+            versions,
+            ..
+        } => {
+            assert_eq!(installed, "1.0.0");
+            assert_eq!(versions.len(), 2);
+            assert_eq!(versions[0].version, "1.1.0");
+            assert!(!versions[0].prerelease);
+            assert!(versions[1].prerelease);
+        }
+        PluginVersionList::Refused { .. } => panic!("expected listed"),
+    }
+
+    let update_res: PluginUpdateResult = serde_json::from_str(
+        r#"{
+            "from": "1.0.0",
+            "to": "1.1.0",
+            "step": "install",
+            "result": {
+                "changed": true,
+                "application": "applied",
+                "stage": "install",
+                "target": "dsh-plugin-whale-pet"
+            }
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(update_res.from, "1.0.0");
+    assert_eq!(update_res.to, "1.1.0");
+    assert_eq!(update_res.step, "install");
+    assert_eq!(update_res.result.application, "applied");
+    assert!(update_res.restore.is_none());
+
+    let cancel: PluginCancellationResult =
+        serde_json::from_str(r#"{"status": "cancelled"}"#).unwrap();
+    assert_eq!(cancel.status, "cancelled");
+}
+
+#[test]
+fn test_plugin_market_rpc_param_shapes() {
+    let params = PluginMarketSetIndexesParams {
+        urls: vec!["https://market.example/index.json".to_string()],
+    };
+    let json = serde_json::to_value(&params).unwrap();
+    assert_eq!(json["urls"][0], "https://market.example/index.json");
+
+    let search = PluginMarketSearchParams {
+        url: "https://market.example/index.json".to_string(),
+        query: MarketQuery {
+            text: Some("whale".to_string()),
+            category: Some("tools".to_string()),
+            labels: Some(vec!["official".to_string()]),
+            sort: MarketSort::Key {
+                id: "stars".to_string(),
+                direction: MarketSortDirection::Desc,
+            },
+            offset: 50,
+            limit: 50,
+            refresh: Some(true),
+            fetched_at: Some(1234),
+        },
+    };
+    let json = serde_json::to_value(&search).unwrap();
+    assert_eq!(json["url"], "https://market.example/index.json");
+    assert_eq!(json["query"]["text"], "whale");
+    assert_eq!(json["query"]["category"], "tools");
+    assert_eq!(json["query"]["labels"][0], "official");
+    assert_eq!(
+        json["query"]["sort"],
+        serde_json::json!({"kind": "key", "id": "stars", "direction": "desc"})
+    );
+    assert_eq!(json["query"]["offset"], 50);
+    assert_eq!(json["query"]["limit"], 50);
+    assert_eq!(json["query"]["refresh"], true);
+    assert_eq!(json["query"]["fetchedAt"], 1234);
+
+    let detail = PluginMarketReadEntryDetailParams {
+        url: "https://market.example/index.json".to_string(),
+        name: "@community/whale-pet".to_string(),
+        version: "1.1.0".to_string(),
+        language: Some("zh".to_string()),
+        refresh: Some(true),
+        npm_file_sources: Some(vec!["jsdelivr".to_string(), "npmmirror".to_string()]),
+    };
+    let json = serde_json::to_value(&detail).unwrap();
+    assert_eq!(json["url"], "https://market.example/index.json");
+    assert_eq!(json["name"], "@community/whale-pet");
+    assert_eq!(json["version"], "1.1.0");
+    assert_eq!(json["language"], "zh");
+    assert_eq!(json["refresh"], true);
+    assert_eq!(json["npmFileSources"][1], "npmmirror");
+
+    let bare = PluginMarketReadEntryDetailParams {
+        url: "u".to_string(),
+        name: "n".to_string(),
+        version: "v".to_string(),
+        language: None,
+        refresh: None,
+        npm_file_sources: None,
+    };
+    let json = serde_json::to_value(&bare).unwrap();
+    assert!(json.get("language").is_none());
+    assert!(json.get("refresh").is_none());
+    assert!(json.get("npmFileSources").is_none());
+}
+
+#[test]
+fn test_plugin_market_list_indexes_result() {
+    let result: PluginMarketListIndexesResult = serde_json::from_value(serde_json::json!({
+        "result": [
+            {
+                "url": "https://market.example/index.json",
+                "title": {"en": "Example", "zh": "示例市场"},
+                "description": {"zh": "社区插件索引"}
+            },
+            {
+                "url": "https://other.example/index.json",
+                "error": "Could not fetch https://other.example/index.json: net down"
+            }
+        ]
+    }))
+    .unwrap();
+    assert_eq!(result.result.len(), 2);
+    assert_eq!(result.result[0].url, "https://market.example/index.json");
+    assert_eq!(result.result[0].title.as_ref().unwrap()["zh"], "示例市场");
+    assert!(result.result[1].title.is_none());
+    assert!(result.result[1].error.as_deref().unwrap().contains("Could not fetch"));
+}
+
+#[test]
+fn test_plugin_market_search_result() {
+    let result: PluginMarketSearchResult = serde_json::from_value(serde_json::json!({
+        "result": {
+            "url": "https://market.example/index.json",
+            "title": {"zh": "示例市场"},
+            "description": {"zh": "社区插件索引"},
+            "metadata": {
+                "categories": {"tools": {"title": {"zh": "工具"}}},
+                "labels": {"official": {"title": {"zh": "官方"}}},
+                "sortKeys": {"stars": {"title": {"zh": "星标"}, "order": "desc"}}
+            },
+            "fetchedAt": 1762419200123_u64,
+            "entries": [{
+                "name": "@community/whale-pet",
+                "title": {"zh": "鲸鱼宠物"},
+                "description": {"zh": "一只鲸鱼宠物。"},
+                "icon": "data:image/png;base64,AA==",
+                "author": "arcat",
+                "homepage": "https://example.com/pet",
+                "repository": {"url": "https://github.com/community/whale-pet", "directory": "packages/pet"},
+                "metadata": {"category": "tools", "keywords": ["pet"], "labels": ["official"], "sortKeys": {"stars": 5}},
+                "versions": [
+                    {
+                        "version": "1.1.0",
+                        "publishTimestamp": 1762419200,
+                        "source": {"type": "npm", "registry": "https://registry.npmmirror.com/"},
+                        "engines": {"dsh": "^0.4"},
+                        "install": {"spec": "@community/whale-pet@1.1.0"},
+                        "compatibility": {"compatible": true}
+                    },
+                    {
+                        "version": "1.0.0-beta.1",
+                        "publishTimestamp": 1700000000,
+                        "source": {"type": "git", "url": "https://github.com/community/whale-pet", "commit": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", "path": "packages/pet"},
+                        "engines": {},
+                        "install": {"spec": "git+https://github.com/community/whale-pet#a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"},
+                        "compatibility": {"compatible": false, "runtimeVersion": "0.4.0", "requirements": {"dsh": "^0.4"}, "exempted": true}
+                    }
+                ],
+                "defaultVersion": "1.1.0",
+                "installation": {"status": "update-available", "installedVersion": "1.0.0"}
+            }],
+            "total": 51,
+            "nextOffset": 50
+        }
+    }))
+    .unwrap();
+    let page = result.result;
+    assert_eq!(page.url, "https://market.example/index.json");
+    assert_eq!(page.fetched_at, 1762419200123);
+    assert_eq!(page.total, 51);
+    assert_eq!(page.next_offset, Some(50));
+    assert_eq!(page.metadata.sort_keys["stars"].order, MarketSortDirection::Desc);
+    let entry = &page.entries[0];
+    assert_eq!(entry.name, "@community/whale-pet");
+    assert_eq!(entry.installation.status, "update-available");
+    assert_eq!(entry.installation.installed_version.as_deref(), Some("1.0.0"));
+    assert_eq!(entry.default_version.as_deref(), Some("1.1.0"));
+    assert_eq!(entry.metadata.category.as_deref(), Some("tools"));
+    assert_eq!(entry.metadata.labels, vec!["official".to_string()]);
+    assert_eq!(entry.repository.as_ref().unwrap().directory.as_deref(), Some("packages/pet"));
+    match &entry.versions[0].source {
+        MarketSource::Npm { registry } => {
+            assert_eq!(registry.as_deref(), Some("https://registry.npmmirror.com/"));
+        }
+        other => panic!("expected npm source: {other:?}"),
+    }
+    assert!(entry.versions[0].compatibility.compatible);
+    assert!(entry.versions[0].compatibility.requirements.is_empty());
+    match &entry.versions[1].source {
+        MarketSource::Git { url, commit, path } => {
+            assert_eq!(url, "https://github.com/community/whale-pet");
+            assert_eq!(commit, "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2");
+            assert_eq!(path.as_deref(), Some("packages/pet"));
+        }
+        other => panic!("expected git source: {other:?}"),
+    }
+    let compatibility = &entry.versions[1].compatibility;
+    assert!(!compatibility.compatible);
+    assert!(compatibility.exempted);
+    assert_eq!(compatibility.runtime_version.as_deref(), Some("0.4.0"));
+    assert_eq!(compatibility.requirements["dsh"], "^0.4");
+    assert_eq!(entry.versions[1].install.spec, "git+https://github.com/community/whale-pet#a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2");
+}
+
+#[test]
+fn test_plugin_market_read_entry_detail_result() {
+    let found: PluginMarketReadEntryDetailResult = serde_json::from_value(serde_json::json!({
+        "result": {
+            "status": "found",
+            "origin": "readme",
+            "markdown": "# Whale Pet\n\nA pet.",
+            "document": "doc-1"
+        }
+    }))
+    .unwrap();
+    assert_eq!(found.result.status, "found");
+    assert_eq!(found.result.origin.as_deref(), Some("readme"));
+    assert_eq!(found.result.markdown.as_deref(), Some("# Whale Pet\n\nA pet."));
+    assert_eq!(found.result.document.as_deref(), Some("doc-1"));
+
+    let none: PluginMarketReadEntryDetailResult =
+        serde_json::from_value(serde_json::json!({"result": {"status": "none"}})).unwrap();
+    assert_eq!(none.result.status, "none");
+    assert!(none.result.markdown.is_none());
+    assert!(none.result.origin.is_none());
+    assert!(none.result.document.is_none());
+}
+
+#[test]
+fn test_plugin_market_changed_notification() {
+    let raw = serde_json::json!({"changed": true});
+    match IncomingNotification::from_raw(NOTIFICATION_PLUGIN_MARKET_CHANGED, raw) {
+        IncomingNotification::PluginMarketChanged(params) => assert!(params.changed),
+        other => panic!("unexpected notification: {other:?}"),
+    }
+}
+
+#[test]
+fn test_settings_descriptor_parses_camel_case() {
+    let raw = serde_json::json!({
+        "ns": "agent-loop",
+        "autoGenerate": true,
+        "schema": {"type": "object"},
+        "value": {"maxParallelToolCalls": 4},
+        "revision": 3
+    });
+    let descriptor: SettingsDescriptor = serde_json::from_value(raw).expect("descriptor parses");
+    assert_eq!(descriptor.ns, "agent-loop");
+    assert!(descriptor.auto_generate);
+    assert_eq!(descriptor.revision, 3);
+}
+
+#[test]
+fn test_settings_mutate_params_serialize_camel_case_revision() {
+    let params = SettingsMutateParams {
+        namespace: Some("agent-loop".into()),
+        patch: serde_json::json!({"maxParallelToolCalls": 2}),
+        expected_revision: Some(7),
+    };
+    let value = serde_json::to_value(&params).expect("params serialize");
+    assert_eq!(value["expectedRevision"], 7);
+    assert_eq!(value["namespace"], "agent-loop");
+}
+
+#[test]
+fn test_schedule_params_wire_shapes_camel_case() {
+    let delete = ScheduleDeleteParams {
+        id: "task-1".to_string(),
+        expected_updated_at: Some("2026-09-19T15:51:00Z".to_string()),
+    };
+    let value = serde_json::to_value(&delete).unwrap();
+    assert_eq!(value["expectedUpdatedAt"], "2026-09-19T15:51:00Z");
+    assert!(value.get("expected_updated_at").is_none());
+
+    let edit = ScheduleEditParams {
+        id: "task-1".to_string(),
+        action: "delete".to_string(),
+        patch: None,
+        expected_updated_at: Some("2026-09-19T15:51:00Z".to_string()),
+    };
+    let value = serde_json::to_value(&edit).unwrap();
+    assert_eq!(value["expectedUpdatedAt"], "2026-09-19T15:51:00Z");
+
+    let run: serde_json::Value = serde_json::to_value(ScheduleRunParams {
+        id: "task-1".to_string(),
+    })
+    .unwrap();
+    assert_eq!(run["id"], "task-1");
+
+    let history: serde_json::Value = serde_json::to_value(ScheduleHistoryParams {
+        id: "task-1".to_string(),
+        limit: Some(20),
+        before: Some("msg-9".to_string()),
+    })
+    .unwrap();
+    assert_eq!(history["id"], "task-1");
+    assert_eq!(history["limit"], 20);
+    assert_eq!(history["before"], "msg-9");
+
+    let spec: serde_json::Value = serde_json::to_value(ScheduleSessionCreateSpec {
+        cwd: Some("/tmp/project".to_string()),
+        agent_preset: Some("cordis".to_string()),
+    })
+    .unwrap();
+    assert_eq!(spec["agentPreset"], "cordis");
+    assert_eq!(spec["cwd"], "/tmp/project");
+    assert!(spec.get("agent_preset").is_none());
+
+    let target: serde_json::Value = serde_json::to_value(ScheduleTargetRequest::Session {
+        session_id: "sess-1".to_string(),
+    })
+    .unwrap();
+    assert_eq!(target["sessionId"], "sess-1");
+    assert_eq!(target["kind"], "session");
+}
+
+#[test]
+fn test_schedule_timing_input_keeps_host_snake_case_fields() {
+    let after: serde_json::Value = serde_json::to_value(ScheduleTiming::After {
+        after_seconds: 3600,
+    })
+    .unwrap();
+    assert_eq!(after["after_seconds"], 3600);
+
+    let daily: serde_json::Value = serde_json::to_value(ScheduleTiming::Daily {
+        daily: ScheduleDailyInput {
+            time: "08:30:00".to_string(),
+            time_zone: "Asia/Shanghai".to_string(),
+        },
+    })
+    .unwrap();
+    assert_eq!(daily["daily"]["time_zone"], "Asia/Shanghai");
+}
+
+#[test]
+fn test_schedule_history_outcome_parses_host_shapes() {
+    let page: ScheduleHistoryResult = serde_json::from_value(serde_json::json!({
+        "result": {
+            "id": "task-1",
+            "records": [{
+                "scheduledAt": "2026-09-19T15:51:00Z",
+                "deliveredAt": "2026-09-19T15:51:01Z",
+                "messageId": "msg-1",
+                "targetSessionId": "sess-1"
+            }],
+            "earlierRecordsUnavailable": false,
+            "earlierRecordsPruned": false,
+            "retention": {"days": 30, "records": 200},
+            "nextBefore": "msg-1"
+        }
+    }))
+    .unwrap();
+    match page.result {
+        ScheduleHistoryOutcome::Page(p) => {
+            assert_eq!(p.records.len(), 1);
+            assert_eq!(p.retention.days, 30);
+        }
+        other => panic!("expected page, got {other:?}"),
+    }
+
+    let miss: ScheduleHistoryResult = serde_json::from_value(serde_json::json!({
+        "result": {"id": "task-1", "code": "delivery_cursor_not_found"}
+    }))
+    .unwrap();
+    match miss.result {
+        ScheduleHistoryOutcome::Miss { code } => assert_eq!(code, "delivery_cursor_not_found"),
+        other => panic!("expected miss, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_plugin_request_id_params_serialize_camel_case() {
+    let update = PluginUpdateParams {
+        name: "@deepseek-ai/dsh-base".to_string(),
+        version: "0.0.2".to_string(),
+        request_id: Some("req-1".to_string()),
+        registry: None,
+    };
+    let value = serde_json::to_value(&update).unwrap();
+    assert_eq!(value["requestId"], "req-1");
+    assert!(value.get("request_id").is_none());
+
+    let state: PluginInstallStateNotificationParams = serde_json::from_value(serde_json::json!({
+        "requestId": "req-2",
+        "phase": "applying"
+    }))
+    .unwrap();
+    assert_eq!(state.request_id, "req-2");
+    assert_eq!(state.phase, "applying");
+
+    let update_state: PluginUpdateStateNotificationParams = serde_json::from_value(
+        serde_json::json!({"requestId": "req-3", "step": "checking"}),
+    )
+    .unwrap();
+    assert_eq!(update_state.request_id, "req-3");
+    assert_eq!(update_state.step, "checking");
 }

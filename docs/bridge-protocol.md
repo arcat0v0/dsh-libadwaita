@@ -250,14 +250,23 @@ GUI 连接 Socket 后的第一个请求必须为 `libadwaita/initialize`。在�
 | `libadwaita/schedule/run` | 立即运行任务 | `ctx.schedule.run` |
 | `libadwaita/schedule/history` | 读取投递历史 | `ctx.schedule.history` |
 | `libadwaita/schedule/delete` | 删除任务 | `ctx.schedule.edit({action:'delete'})` |
+| `libadwaita/schedule/delete-inactive` | 删除全部已结束任务 | `ctx.schedule.deleteInactive` |
+| `libadwaita/schedule/delivery-limits` | 读取新会话投递最小间隔 | `ctx.schedule.deliveryLimits` |
 | `libadwaita/terminal/create` | 创建会话 PTY | `ctx.terminals.spawn` |
 | `libadwaita/terminal/list` | 列出会话 PTY | `ctx.terminals.list` |
 | `libadwaita/terminal/input` | 写入 PTY 并等待就绪 | `ctx.terminals.startSend` |
 | `libadwaita/terminal/output` | 读取 PTY 回滚缓冲 | `ctx.terminals.read` |
 | `libadwaita/terminal/close` | 关闭 PTY | `ctx.terminals.kill` |
 | `libadwaita/plugin/list` | 查询已安装与已启用的插件 | `ctx.pluginManager.list` |
-| `libadwaita/plugin/enable` | 启用插件（返回 restart-required） | `ctx.pluginManager.setPluginEnabled` |
-| `libadwaita/plugin/disable` | 禁用插件（返回 restart-required） | `ctx.pluginManager.setPluginEnabled` |
+| `libadwaita/plugin/enable` | 启用插件行（返回上游 ChangeResult） | `ctx.pluginManager.setPluginEnabled` |
+| `libadwaita/plugin/disable` | 禁用插件行（返回上游 ChangeResult） | `ctx.pluginManager.setPluginEnabled` |
+| `libadwaita/plugin/bundle/enable` | 启用 Bundle（返回上游 ChangeResult） | `ctx.pluginManager.setBundleEnabled` |
+| `libadwaita/plugin/bundle/disable` | 禁用 Bundle（返回上游 ChangeResult） | `ctx.pluginManager.setBundleEnabled` |
+| `libadwaita/plugin/registry-probe` | 探测最快 npm registry | bridge 本地 HTTPS ping（npmjs/npmmirror 竞速） |
+| `libadwaita/plugin-market/list-indexes` | 列出插件市场索引源 | `ctx.pluginMarket.listIndexes` |
+| `libadwaita/plugin-market/set-indexes` | 设置插件市场索引源 | `ctx.pluginMarket.setIndexes` |
+| `libadwaita/plugin-market/search` | 搜索插件市场索引 | `ctx.pluginMarket.search` |
+| `libadwaita/plugin-market/read-entry-detail` | 读取市场条目详情文档 | `ctx.pluginMarket.readEntryDetail` |
 | `libadwaita/credentials/status` | 查询脱敏凭据状态（无明文） | `ctx.credentials.describe` |
 | `libadwaita/credentials/inject` | 向内存 Provider 注入新凭据 | 自定义内存 Provider（Spike 已验证） |
 | `libadwaita/credentials/rotate` | 轮换内存中现有凭据 | 自定义内存 Provider（Spike 已验证） |
@@ -301,12 +310,12 @@ GUI 连接 Socket 后的第一个请求必须为 `libadwaita/initialize`。在�
 ### 6.1 会话创建与管理
 
 #### `libadwaita/session/create`
-- **说明**：新建一个会话并初始化 Agent。
-- **重要实现细节**：根据阶段 1 Spike 结论，调用 `ctx.agents.create({ sessionId, cwd })` 内部会自动创建底层 session；**严禁**先调用 `ctx.sessions.create`，否则报 `session already exists`。
+- **说明**：新建一个会话并初始化 Agent；`sessionId` 命名已存在会话时复用该会话（返回其现有 header/agent，必要时 resume），仅对不存在的 id 调用 `ctx.agents.create`。
+- **重要实现细节**：根据阶段 1 Spike 结论，调用 `ctx.agents.create({ sessionId, cwd })` 内部会自动创建底层 session；session 存储对重复 id 报 `session already exists`，因此命名已存在的 id 时必须走复用路径，不得重复 create（与上游 Host 复用命名 blank 会话的行为一致）。
 - **请求参数**：
   | 字段 | 类型 | 必选 | 说明 |
   |---|---|---|---|
-  | `sessionId` | `string` | 否 | 客户端指定的 UUID。若缺省由 bridge 自动生成并返回 |
+  | `sessionId` | `string` | 否 | 客户端指定的 UUID。缺省由 bridge 自动生成并返回；命名已存在会话时复用该会话并返回同一 ID |
   | `cwd` | `string` | 是 | 关联的项目根绝对目录路径 |
   | `provider` | `string` | 否 | 指定 LLM provider（缺省使用系统默认配置） |
   | `model` | `string` | 否 | 指定模型名称（缺省使用系统默认配置） |
@@ -563,8 +572,8 @@ Bridge 直接投影上游 `agent.inbox`：`nextTurn` 为等待独立 turn 的排
 
 ### 6.6 插件管理（HMR 禁用场景与 `restart-required`）
 
-- **重要前置约束**：在我们的 profile 中，配置明确禁用了 HMR（`- id: hmr, disabled: true`）。因此，所有动态启用或禁用插件/Bundle 的操作，**均无法在当前进程中热重载生效**。配置变更将持久化保存到 profile 配置中，状态报告为 `restart-required`。
-- **GUI 交互要求**：GUI 收到 `restartRequired: true` 后，必须在界面弹出 AdwBanner 或通知：“插件配置已更改，需要重启 dsh 才能生效”，并提供“立即重启”动作。
+- **重要前置约束**：在我们的 profile 中，配置明确禁用了 HMR（`- id: hmr, disabled: true`）。因此，所有动态启用或禁用插件/Bundle 的操作，**均无法在当前进程中热重载生效**。配置变更将持久化保存到 profile 配置中，上游 `ChangeResult.application` 报告为 `restart-required`（并带 `restartReason`）。
+- **GUI 交互要求**：GUI 收到 `application: "restart-required"` 后，必须在界面弹出 AdwBanner 或通知：“插件配置已更改，需要重启 dsh 才能生效”，并提供“立即重启”动作；`application: "failed"` 时展示 `error.code` / `error.diagnostic`，不得伪造成成功。
 
 #### `libadwaita/plugin/list`
 - **请求参数**：无参数。
@@ -582,29 +591,39 @@ Bridge 直接投影上游 `agent.inbox`：`nextTurn` 为等待独立 turn 的排
 | `restartRequired` | `boolean` | 是 | 是否处于等待重启生效状态 |
 | `description` | `string` | 否 | 插件描述文案 |
 
-#### `libadwaita/plugin/enable`
-- **请求参数**：`{ "id": string }`
-- **响应结果**：
+#### `libadwaita/plugin/enable` / `libadwaita/plugin/disable`
+- **请求参数**：`{ "id": string }`（插件行 ID，`plugin/inventory` 的 `entryId`）
+- **响应结果（`ChangeResult`，原样透传 `ctx.pluginManager.setPluginEnabled`）**：
+  | 字段 | 类型 | 必选 | 说明 |
+  |---|---|---|---|
+  | `changed` | `boolean` | 是 | profile 文件是否实际发生写入变化 |
+  | `application` | `"applied" \| "restart-required" \| "overridden" \| "cancelled" \| "failed"` | 是 | 应用结果；HMR 禁用时通常为 `restart-required` |
+  | `restartReason` | `string` | 否 | `restart-required` 的原因（`no-hmr` / `package-moved` / `host-module` / `unmanaged-plugin` / `module-comparison`） |
+  | `stage` | `"install" \| "enable" \| "remove"` | 是 | 最后尝试的步骤 |
+  | `target` | `string` | 是 | 插件行 ID |
+  | `enabled` | `boolean` | 否 | 请求的目标启用状态 |
+  | `error` | `{ code, diagnostic?, incompatible? }` | 否 | `application: "failed"` 时的上游 `ManagementError` |
+
+  未知插件行等失败由上游返回 `application: "failed"` 的结果（不再吞掉）；服务不可用或调用直接抛错时返回 `-32038`。
   ```json
   {
-    "id": "tool-plugin-manager",
-    "enabled": true,
-    "status": "restart-required",
-    "restartRequired": true
+    "changed": true,
+    "application": "restart-required",
+    "restartReason": "no-hmr",
+    "stage": "enable",
+    "target": "session-title-llm",
+    "enabled": true
   }
   ```
 
-#### `libadwaita/plugin/disable`
-- **请求参数**：`{ "id": string }`
-- **响应结果**：
-  ```json
-  {
-    "id": "session-title-llm",
-    "enabled": false,
-    "status": "restart-required",
-    "restartRequired": true
-  }
-  ```
+#### `libadwaita/plugin/bundle/enable` / `libadwaita/plugin/bundle/disable`
+- **请求参数**：`{ "name": string }`（Bundle 包名，`plugin/inventory` 的 `bundles[].name`）
+- **响应结果**：与行级开关相同的上游 `ChangeResult`（`target` 为 Bundle 包名），原样透传 `ctx.pluginManager.setBundleEnabled`。
+
+#### `libadwaita/plugin/registry-probe`
+- **请求参数**：无参数。
+- **响应结果**：`{ "result": "https://registry.npmmirror.com/" | "https://registry.npmjs.org/" | null }`
+- **语义**：bridge 本地并发 GET `https://registry.npmjs.org/-/ping` 与 `https://registry.npmmirror.com/-/ping`（各 1.5s 超时），取最先成功响应者；两者均失败返回 `null`。结果缓存 5 分钟，并发调用共享同一次探测。用于安装对话框与 README 详情读取时的镜像推荐。
 
 ### 6.7 凭据注入与安全轮换（下游自有 Seam 规范）
 
@@ -981,7 +1000,16 @@ Bridge 直接投影上游 `agent.inbox`：`nextTurn` 为等待独立 turn 的排
 
 #### 插件生命周期
 
-`plugin/detail` 参数 `{name, language?}`，`plugin/inspect` 参数 `{spec, registry?}`，`plugin/install` 参数 `{spec, enabled?, saveExact?, requestId?, approvedBuilds?, registry?}`，`plugin/cancel-install` / `wait-install` 参数 `{requestId}`，`plugin/remove` 参数 `{name}`，`plugin/versions` 参数 `{name, registry?}`，`plugin/update` 参数 `{name, version, registry?}`，`plugin/registries` 无参数。以上均返回 `{result: unknown}`，原样承载上游 plugin-manager 结果；`plugin/inventory` 返回 `{plugins, bundles}`，`plugin/retry` 为同一清单重读。安装过程通过 `plugin.install-state` / `plugin.install-log` 通知推送。网络安装需要用户环境可达 registry；本地路径/git/压缩包规格由上游 inspect/install 处理。
+`plugin/detail` 参数 `{name, language?, npmFileSources?}`，`plugin/inspect` 参数 `{spec, registry?}`，`plugin/install` 参数 `{spec, enabled?, saveExact?, requestId?, approvedBuilds?, registry?}`，`plugin/cancel-install` / `wait-install` 参数 `{requestId}`，`plugin/remove` 参数 `{name}`，`plugin/versions` 参数 `{name, registry?}`，`plugin/update` 参数 `{name, version, requestId?, registry?}`，`plugin/registries` 无参数。以上均返回 `{result: unknown}`，原样承载上游 plugin-manager 结果；`plugin/inventory` 返回 `{plugins, bundles}`，`plugin/retry` 为同一清单重读。`npmFileSources` 为 npm 文件 CDN 优先序列（如 `["jsdelivr","npmmirror"]`），在 Bundle 文件不可用时供上游从 CDN 读取 README；`update` 的 `requestId` 用于关联 `plugin.update-state` 通知与安装日志/取消。安装过程通过 `plugin.install-state` / `plugin.install-log` 通知推送。网络安装需要用户环境可达 registry；本地路径/git/压缩包规格由上游 inspect/install 处理。**限制**：README 详情文档中的内联图片依赖 Host 路由 `api/plugin-manager/detail-file`，本客户端未实现图片代理，GUI 只渲染 Markdown 文本并忽略图片（不在本次协议范围）。
+
+#### 插件市场（Discover）
+
+Bridge bundle patch 挂载 `@deepseek-ai/dsh-plugin-market`（行 `plugin-market`，无 profile 时 disabled）；服务名 `ctx.pluginMarket`，依赖 `ctx.pluginManager`，无索引源时所有读取返回空/拒绝，不访问网络。
+
+- `plugin-market/list-indexes` 无参数 → `{result: MarketIndexSummary[]}`，`MarketIndexSummary = {url, title?, description?, error?}`（`title`/`description` 为本地化文本对象；`error` 为上次读取失败信息）。永不联网。
+- `plugin-market/set-indexes` 参数 `{urls: string[]}` → `{result: null}`；经 Settings 持久化，非法/重复 URL 返回 `-32038`（`data` 保留上游原因），提交后推送 `plugin.market-changed`。
+- `plugin-market/search` 参数 `{url, query}` → `{result: MarketSearchResult}`；`query` 为上游 `MarketQuery`：`{text?, category?, labels?, sort: {kind:'index'}|{kind:'relevance'}|{kind:'published',direction}|{kind:'key',id,direction}, offset, limit, refresh?, fetchedAt?}`。`url` 必须是已配置索引源。
+- `plugin-market/read-entry-detail` 参数 `{url, name, version, language?, refresh?, npmFileSources?}` → `{result: PluginDetail}`；`PluginDetail = {status:'found', origin: 'locale'|'readme'|'repository', markdown, document} | {status:'none'}`。**限制**：市场详情文档中的内联图片需要 Host HTTP 路由 `api/plugin-market/detail-file` 解析，本客户端不实现该图片代理，GUI 应忽略或占位显示图片（不在本次协议范围）。
 
 #### 模型发现
 
@@ -1011,13 +1039,17 @@ Bridge 直接投影上游 `agent.inbox`：`nextTurn` 为等待独立 turn 的排
 
 #### 计划任务
 
-Bridge bundle patch 挂载 `@deepseek-ai/dsh-schedule`；服务名 `ctx.schedule`，真实 dsh 集成测试已验证创建/列表/历史/删除。
+Bridge bundle patch 挂载 `@deepseek-ai/dsh-schedule`；服务名 `ctx.schedule`，真实 dsh 集成测试已验证创建（含 `new_once` 目标）/运行/历史/删除/清理。
 
 - `schedule/catalog` 无参数 → `{result: ScheduleCatalogEntry[]}`。
-- `schedule/create` `{title, prompt, timing, target?}` → `{result: ScheduleCatalogEntry}`。`timing` 为上游 `ScheduleTiming`（`after`/`at`/`every`/`daily`/`weekly`/`cron`/`rrule`），`target` 为 `{kind:'session',sessionId}`、`{kind:'new_once'}` 或 `{kind:'new'}`。
+- `schedule/create` `{title, prompt, timing, target?}` → `{result: ScheduleCatalogEntry}`。`timing` 为上游 `ScheduleTiming`（`after`/`at`/`every`/`daily`/`weekly`/`cron`/`rrule`，字段为 camelCase：`afterSeconds` 等），`target` 为 `{kind:'session',sessionId}`、`{kind:'new_once', create?}` 或 `{kind:'new', create?}`；`create` 为 `{cwd?, agentPreset?}`。
 - `schedule/edit` `{id, action:'update'|'delete', patch?, expectedUpdatedAt?}` → `{result}`。
-- `schedule/run` `{id}` → `{result}`；`schedule/history` `{id, limit?, before?}` → `{result: {records,...}}`。
+- `schedule/run` `{id}` → `{result}`；成功投递时 `result.lastDelivery` 为 `{scheduledAt, deliveredAt, messageId, targetSessionId}`；`{id, code:'schedule_execution_pending'}` 表示该任务已有执行在排队/运行或处于投递下限内。`schedule/history` `{id, limit?, before?}` → `{result: {records, retention, earlierRecordsPruned, earlierRecordsUnavailable, nextBefore?}}`。
 - `schedule/delete` `{id, expectedUpdatedAt?}` → `{result:{deleted:true}}`（等价 edit delete）。
+- `schedule/delete-inactive` 无参数 → `{result:{deleted:number}}`，删除全部 `status:'ended'` 任务（active/paused 保留）。
+- `schedule/delivery-limits` 无参数 → `{result:{newSessionIntervalSeconds:number}}`，即 `target.kind:'new'` 任务两次投递的最小间隔。
+- **Session 激活 Seam**：bridge 提供 `sessionController` 服务（`create({sessionId?, cwd?, agentPreset?})` 复用 `session/create` 的 agents.create + 默认模型选择；`resolveAgent(sessionId)` 返回 `{agent}` 或 `{error}`，内部对未创建会话抛出 `SessionPersistenceNotFoundError`），并注册 `schedule/resolve-agent` waterfall 监听（先尝试 `agents.get`，再 `agents.resume`，失败时交回 `next()`）。这使得 `new_once`/`new` 目标可创建会话、`schedule/run` 与定时投递可激活/恢复目标会话。
+- **错误码保留**：上游 `ScheduleInputError`（`code` 如 `invalid_rule`、`not_future`、`subagent_session`）与 `RemoteError`（如 `schedule/target-archived`）经 `-32045 SCHEDULE_OPERATION_FAILED` 返回，`data.code` 为上游字符串码、`data.details` 为上游结构化载荷；服务未挂载仍为 `-32034`。
 - 任务变更发出 `schedule.changed`（§7.14）。
 
 #### 交互终端
@@ -1358,6 +1390,17 @@ Bridge patch 挂载 `@deepseek-ai/dsh-terminal` 与 `@deepseek-ai/dsh-terminal-b
 {"jsonrpc":"2.0","method":"schedule.changed","params":{"changed":true}}
 ```
 
+### 7.15 `plugin.changed` / `plugin.update-state` / `plugin.market-changed`：插件生命周期通知
+
+- `plugin.changed`：上游 `plugin-manager/changed` 事件转发，载荷 `{reason}`，`reason` 为 `"plugin" | "bundle" | "install" | "remove"`。GUI 收到后重新调用 `plugin/inventory`（并刷新当前详情页/市场安装状态）。
+- `plugin.update-state`：上游 `plugin-manager/update-state` 事件转发，载荷 `{requestId, step}`，`step` 为 `"checking" | "removing" | "installing" | "restoring"`；仅当 `plugin/update` 携带 `requestId` 时产生。
+- `plugin.market-changed`：上游 `plugin-market/changed` 事件转发，载荷 `{changed:true}`；GUI 收到后重新调用 `plugin-market/list-indexes`。
+```json
+{"jsonrpc":"2.0","method":"plugin.changed","params":{"reason":"plugin"}}
+{"jsonrpc":"2.0","method":"plugin.update-state","params":{"requestId":"req-update-1","step":"checking"}}
+{"jsonrpc":"2.0","method":"plugin.market-changed","params":{"changed":true}}
+```
+
 
 ## 8. 双向交互请求（Server-to-Client Requests）与 Fail-Closed 语义
 
@@ -1543,6 +1586,7 @@ Bridge patch 挂载 `@deepseek-ai/dsh-terminal` 与 `@deepseek-ai/dsh-terminal-b
 | `-32042` | `TERMINAL_NOT_FOUND` | 终端 id 不存在或跨会话不可见 |
 | `-32043` | `ACCOUNT_UNAVAILABLE` | 账号服务不可用 |
 | `-32044` | `MODEL_DISCOVERY_FAILED` | 模型发现未注册、协议不支持列表或请求失败 |
+| `-32045` | `SCHEDULE_OPERATION_FAILED` | 计划任务操作失败；`data.code` 保留上游 `ScheduleInputError` / `RemoteError` 字符串码，`data.details` 保留结构化载荷 |
 
 ---
 

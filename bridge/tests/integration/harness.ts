@@ -129,6 +129,7 @@ export type HarnessRequestListener = (
 ) => Promise<unknown>;
 
 export interface DshTestHarness {
+  rootDir: string;
   homeDir: string;
   runtimeDir: string;
   workspaceDir: string;
@@ -146,13 +147,15 @@ export interface DshTestHarness {
 
 export interface DshHarnessOptions {
   prepareHome?: (homeDir: string, workspaceDir: string) => void;
+  rootDir?: string;
+  preserveRoot?: boolean;
 }
 
 export async function createDshHarness(
   customResponder?: MockSseResponder,
   options: DshHarnessOptions = {},
 ): Promise<DshTestHarness> {
-  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-it-'));
+  const tmpRoot = options.rootDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-it-'));
   const homeDir = path.join(tmpRoot, 'dsh-home');
   const runtimeDir = path.join(tmpRoot, 'runtime');
   const workspaceDir = path.join(tmpRoot, 'workspace');
@@ -172,7 +175,8 @@ export async function createDshHarness(
   const profileDir = path.join(homeDir, 'profiles/libadwaita');
   const nmScopeDir = path.join(profileDir, 'node_modules/@dsh-libadwaita');
   fs.mkdirSync(nmScopeDir, { recursive: true });
-  fs.symlinkSync(bridgeRoot, path.join(nmScopeDir, 'bridge'));
+  const bridgeLink = path.join(nmScopeDir, 'bridge');
+  if (!fs.existsSync(bridgeLink)) fs.symlinkSync(bridgeRoot, bridgeLink);
 
   const profilePackageJson = {
     name: 'libadwaita-profile',
@@ -303,12 +307,15 @@ export async function createDshHarness(
       clearTimeout(timer);
     }
     await mockServer.close();
-    try {
-      fs.rmSync(tmpRoot, { recursive: true, force: true });
-    } catch {}
+    if (options.preserveRoot !== true) {
+      try {
+        fs.rmSync(tmpRoot, { recursive: true, force: true });
+      } catch {}
+    }
   };
 
   return {
+    rootDir: tmpRoot,
     homeDir,
     runtimeDir,
     workspaceDir,

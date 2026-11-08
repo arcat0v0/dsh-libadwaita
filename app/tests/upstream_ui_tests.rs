@@ -1,5 +1,11 @@
-use dsh_libadwaita::protocol::SessionEvent;
+use dsh_libadwaita::protocol::{
+    PermissionCatalogResult, PermissionGetResult, PresetOptionItem, SessionEvent,
+};
 use dsh_libadwaita::ui::brand::*;
+use dsh_libadwaita::ui::controller::permission_display_label;
+use dsh_libadwaita::ui::conversation::{
+    compact_token_count, context_breakdown_rows, context_occupancy, token_usage_total,
+};
 use dsh_libadwaita::ui::copy::*;
 use dsh_libadwaita::ui::layout::*;
 use dsh_libadwaita::ui::theme::*;
@@ -8,40 +14,81 @@ use dsh_libadwaita::ui_prefs::*;
 use serde_json::json;
 
 #[test]
-fn test_upstream_dark_shell_tokens_are_preserved() {
-    let dark = shell_css(true);
-    assert!(dark.contains("--dsh-bg-base: #151517"));
-    assert!(dark.contains("--dsh-sidebar-fill: #1b1b1c"));
-    assert!(dark.contains("--dsh-composer-fill: #2c2c2e"));
-    assert!(dark.contains("--dsh-label-primary: #f9fafb"));
-    assert!(dark.contains("--dsh-accent-blue: #7aaaff"));
-    assert!(dark.contains("--dsh-sidebar-width: 280px"));
-    assert!(dark.contains("--dsh-composer-max-width: 952px"));
+fn test_shell_css_uses_libadwaita_theme_variables() {
+    let css = shell_css();
+    for token in [
+        "--window-bg-color",
+        "--window-fg-color",
+        "--view-bg-color",
+        "--view-fg-color",
+        "--card-bg-color",
+        "--popover-bg-color",
+        "--headerbar-bg-color",
+        "--headerbar-fg-color",
+        "--sidebar-bg-color",
+        "--sidebar-fg-color",
+        "--accent-bg-color",
+        "--accent-fg-color",
+        "--destructive-bg-color",
+        "--shade-color",
+        "--border-color",
+    ] {
+        assert!(css.contains(token), "missing libadwaita token {token}");
+    }
 }
 
 #[test]
-fn test_light_theme_uses_upstream_light_palette() {
-    let light = shell_css(false);
-    assert!(light.contains("--dsh-bg-base: #ffffff"));
-    assert!(light.contains("--dsh-sidebar-fill: #f5f6f7"));
-    assert!(light.contains("--dsh-composer-fill: #ffffff"));
-    assert!(light.contains("--dsh-label-primary: #0f1115"));
-    assert!(light.contains("--dsh-accent-blue: #4176e6"));
+fn test_shell_css_has_no_hardcoded_palette_or_global_chrome_overrides() {
+    let css = shell_css();
+    assert!(!css.contains('#'));
+    assert!(!css.contains("rgba("));
+    assert!(!css.contains("--dsh-bg-base"));
+    assert!(!css.contains("--dsh-sidebar-fill"));
+    assert!(!css.contains("--dsh-composer-fill"));
+    assert!(!css.contains("font-family:"));
+    assert!(!css.contains("popover > contents"));
+    assert!(!css.contains("popover > arrow"));
+    assert!(!css.contains("headerbar,"));
+}
+
+#[test]
+fn test_shell_css_uses_color_mix_hover_and_active_fills() {
+    let css = shell_css();
+    assert!(css.contains("color-mix(in srgb, currentColor 10%, transparent)"));
+    assert!(css.contains("color-mix(in srgb, currentColor 14%, transparent)"));
 }
 
 #[test]
 fn test_upstream_shell_geometry_rules_are_present() {
-    let css = shell_css(true);
+    let css = shell_css();
+    assert!(css.contains("--dsh-sidebar-width: 280px"));
+    assert!(css.contains("--dsh-composer-max-width: 952px"));
     assert!(css.contains(".dsh-sidebar {"));
-    assert!(css.contains("min-width: 264px"));
+    assert!(!css.contains("min-width: 264px"));
     assert_eq!(SIDEBAR_MAX, 420.0);
     assert!(css.contains(".dsh-sidebar-rail"));
     assert!(css.contains("min-width: 56px"));
+    assert!(css.contains(".dsh-new-session"));
+    assert!(css.contains("min-height: 38px"));
+    assert!(css.contains("margin: 0 4px 10px"));
+    assert!(css.contains(".dsh-panel-row {"));
+    assert!(css.contains(".dsh-panel-row.dsh-panel-row-active"));
+    assert!(css.contains("min-height: 36px"));
+    assert!(css.contains("padding: 7px 9px"));
+    assert!(css.contains("border-radius: 12px"));
+    assert!(css.contains("border-left: 3px solid transparent"));
+    assert!(css.contains("border-right: 3px solid transparent"));
+    assert!(css.contains("background-clip: padding-box"));
+    assert!(css.contains(".dsh-window-chrome"));
+    assert!(css.contains("windowcontrols > button"));
+    assert!(css.contains(".dsh-chrome-opener"));
     assert!(css.contains(".dsh-composer-card"));
     assert!(css.contains("border-radius: 28px"));
+    assert!(css.contains("var(--shade-color)"));
     assert!(css.contains(".dsh-send-button"));
     assert!(css.contains("border-radius: 999px"));
-    assert!(css.contains("background: var(--dsh-accent-blue)"));
+    assert!(css.contains("background: var(--accent-bg-color)"));
+    assert!(css.contains("color: var(--accent-fg-color)"));
     assert!(css.contains(".dsh-hero-title"));
     assert!(css.contains("font-size: 26px"));
     assert!(css.contains(".dsh-preview-badge"));
@@ -49,17 +96,11 @@ fn test_upstream_shell_geometry_rules_are_present() {
 
 #[test]
 fn test_menu_button_hover_targets_inner_button_not_outer_widget() {
-    let css = shell_css(true);
+    let css = shell_css();
     assert!(css.contains(".dsh-hero-chip > button {"));
     assert!(css.contains(".dsh-hero-chip > button:hover"));
     assert!(!css.contains(".dsh-hero-chip:hover"));
-}
-
-#[test]
-fn test_popover_contents_and_arrow_share_menu_fill() {
-    let css = shell_css(true);
-    assert!(css.contains("popover > contents"));
-    assert!(css.contains("popover > arrow"));
+    assert!(css.contains("menubutton.dsh-icon-button > button {"));
 }
 
 #[test]
@@ -80,6 +121,10 @@ fn test_empty_home_uses_upstream_chinese_copy() {
     assert_eq!(zh.search_sessions, "搜索会话");
     assert_eq!(zh.settings, "设置");
     assert_eq!(zh.account, "账号");
+    assert_eq!(zh.pin_sidebar, "固定到左侧栏");
+    assert_eq!(zh.unpin_sidebar, "从左侧栏取消固定");
+    assert_eq!(zh.ungrouped, "未分组");
+    assert_eq!(zh.workspace_required, "请先创建一个工作区");
 }
 
 #[test]
@@ -107,6 +152,9 @@ fn test_brand_artwork_is_embedded_upstream_mit_svg() {
     assert!(BRAND_WORDMARK_SVG.contains("fill=\"currentColor\""));
     assert!(BRAND_NOTICE.contains("MIT"));
     assert!(BRAND_NOTICE.contains("DeepSeek"));
+    assert_eq!(brand_colors(true), (BRAND_MARK_DARK_FG, BRAND_MARK_DARK_CUTOUT));
+    assert_eq!(brand_colors(false), (BRAND_MARK_LIGHT_FG, BRAND_MARK_LIGHT_CUTOUT));
+    assert_eq!(BRAND_MARK_COLORS.len(), 4);
 }
 
 #[test]
@@ -173,4 +221,106 @@ fn test_trajectory_filter_matches_all_events_and_text() {
     assert_eq!(filter_event_indices(&events, "assistant"), vec![1]);
     assert_eq!(filter_event_indices(&events, "SHELL"), vec![2]);
     assert_eq!(filter_event_indices(&events, "seq"), Vec::<usize>::new());
+}
+
+#[test]
+fn test_plugins_page_css_uses_theme_tokens_only() {
+    let css = shell_css();
+    for class in [
+        ".dsh-plugins-tag",
+        ".dsh-plugins-tag-accent",
+        ".dsh-plugins-tag-error",
+        ".dsh-plugins-dot",
+        ".dsh-plugins-dot-success",
+        ".dsh-plugins-dot-ongoing",
+        ".dsh-plugins-dot-error",
+        ".dsh-plugins-skeleton-bar",
+        ".dsh-plugins-skeleton-icon",
+        "@keyframes dsh-plugins-pulse",
+    ] {
+        assert!(css.contains(class), "missing plugins css {class}");
+    }
+    assert!(css.contains("--success-bg-color"));
+    assert!(css.contains("--warning-bg-color"));
+    assert!(css.contains("--error-bg-color"));
+}
+
+#[test]
+fn test_permission_display_label_prefers_product_names() {
+    let catalog = PermissionCatalogResult {
+        options: vec![PresetOptionItem {
+            value: "workspace-write".to_string(),
+            name: "Workspace Write".to_string(),
+            description: Some("Write inside the workspace".to_string()),
+        }],
+        default_options: Vec::new(),
+        default_preset: "workspace-write".to_string(),
+    };
+    let state = PermissionGetResult {
+        current_value: "workspace-write".to_string(),
+        catalog,
+    };
+    assert_eq!(permission_display_label(&state), "工作区内修改");
+
+    let full_access = PermissionGetResult {
+        current_value: "danger-full-access".to_string(),
+        catalog: PermissionCatalogResult {
+            options: Vec::new(),
+            default_options: Vec::new(),
+            default_preset: "workspace-write".to_string(),
+        },
+    };
+    assert_eq!(permission_display_label(&full_access), "完全权限");
+}
+
+#[test]
+fn test_token_usage_total_reads_bucket_fields() {
+    let usage = json!({
+        "uncachedInputTokens": 1200,
+        "outputTokens": 345,
+        "cacheReadTokens": 2000,
+        "cacheWriteTokens": 55
+    });
+    assert_eq!(token_usage_total(&usage), Some(3600));
+    assert_eq!(token_usage_total(&json!({})), None);
+}
+
+#[test]
+fn test_compact_token_count_formats_magnitudes() {
+    assert_eq!(compact_token_count(999), "999");
+    assert_eq!(compact_token_count(1500), "1.5K");
+    assert_eq!(compact_token_count(1_250_000), "1.2M");
+}
+
+#[test]
+fn test_context_occupancy_prefers_projection_and_caps_percent() {
+    let pressure = json!({
+        "pressureTokens": 40000,
+        "projectedTokens": 45000,
+        "contextWindow": 100000
+    });
+    assert_eq!(context_occupancy(&pressure), Some((45000, 100000, 45)));
+
+    let over = json!({"projectedTokens": 250000, "contextWindow": 100000});
+    assert_eq!(context_occupancy(&over), Some((250000, 100000, 100)));
+
+    let pressure_only = json!({"pressureTokens": 12000, "contextWindow": 64000});
+    assert_eq!(context_occupancy(&pressure_only), Some((12000, 64000, 19)));
+
+    assert_eq!(context_occupancy(&json!({"pressureTokens": 12000})), None);
+    assert_eq!(context_occupancy(&json!({"contextWindow": 64000})), None);
+}
+
+#[test]
+fn test_context_breakdown_rows() {
+    let breakdown = json!({
+        "systemTokens": 100,
+        "toolsTokens": 50,
+        "messageTokens": 25
+    });
+    assert_eq!(
+        context_breakdown_rows(&breakdown),
+        vec![("系统", 100), ("工具", 50), ("消息", 25)]
+    );
+    assert!(context_breakdown_rows(&json!({})).is_empty());
 }

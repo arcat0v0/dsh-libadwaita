@@ -30,6 +30,10 @@ pub struct Copybook {
     pub creator_mode: &'static str,
     pub browse_plugins: &'static str,
     pub create_plugin: &'static str,
+    pub pin_sidebar: &'static str,
+    pub unpin_sidebar: &'static str,
+    pub ungrouped: &'static str,
+    pub workspace_required: &'static str,
 }
 
 impl Copybook {
@@ -63,6 +67,10 @@ impl Copybook {
             creator_mode: "创造模式",
             browse_plugins: "浏览更多插件",
             create_plugin: "创建你的插件",
+            pin_sidebar: "固定到左侧栏",
+            unpin_sidebar: "从左侧栏取消固定",
+            ungrouped: "未分组",
+            workspace_required: "请先创建一个工作区",
         }
     }
 
@@ -96,6 +104,10 @@ impl Copybook {
             creator_mode: "Creator mode",
             browse_plugins: "Browse other plugins",
             create_plugin: "Create your plugin",
+            pin_sidebar: "Pin to sidebar",
+            unpin_sidebar: "Unpin from sidebar",
+            ungrouped: "Ungrouped",
+            workspace_required: "Create a workspace first",
         }
     }
 
@@ -111,7 +123,7 @@ impl Copybook {
     }
 }
 
-fn system_locale() -> String {
+pub fn system_locale() -> String {
     for key in ["LC_MESSAGES", "LC_ALL", "LANG"] {
         if let Ok(value) = std::env::var(key) {
             if !value.trim().is_empty() {

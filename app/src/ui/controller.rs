@@ -2,25 +2,36 @@ use crate::connection::{
     ApprovalResponder, BridgeConnection, ConnectionError, IncomingNotification,
     UserQuestionResponder,
 };
-use crate::credentials::{should_show_onboarding, CredentialStore, DEFAULT_PROVIDER};
+use crate::credentials::{CredentialStore, DEFAULT_PROVIDER, should_show_onboarding};
+use crate::drafts::{DraftStore, default_drafts_path};
 use crate::protocol::*;
+use crate::schedule_model::{
+    ScheduleDeliveryHistoryPage, SchedulePatch, ScheduleTargetRequest, ScheduleTiming,
+};
 use crate::session::{SessionModel, SessionStatus};
-use crate::session_state::{default_state_path, SessionState};
-use crate::ui_prefs::{default_ui_prefs_path, ArchiveFilter, UiPrefs};
-use crate::supervisor::{resolve_bridge_bundle_path, HarnessSupervisor, SupervisorConfig};
+use crate::session_state::{SessionState, default_state_path};
+use crate::supervisor::{HarnessSupervisor, SupervisorConfig, resolve_bridge_bundle_path};
 use crate::ui::approval_dialog::{show_approval_dialog, show_user_question_dialog};
 use crate::ui::conversation::ConversationView;
+use crate::ui::copy::Copybook;
 use crate::ui::desktop::{
     send_turn_completed_notification, should_notify_turn_completion, truncate_snippet,
     withdraw_notification,
 };
 use crate::ui::onboarding::show_onboarding_dialog;
 use crate::ui::right_dock::RightDock;
+use crate::ui::schedules::model::{
+    HISTORY_PAGE_LIMIT, ScheduleFailure, ScheduleHistoryMiss, ScheduleMutationOp,
+    clear_ended_toast, copy as schedule_copy, create_prompt, delete_toast, failure_from_error,
+    failure_from_result, failure_text, history_miss, run_failure,
+};
+use crate::ui::schedules::ui_locale;
 use crate::ui::session_dialogs::{show_fork_dialog, show_rename_dialog};
-use crate::ui::settings::{show_settings_dialog, SettingsDialogHandle};
-use crate::ui::sidebar::Sidebar;
-use crate::ui::trigger_popup::{show_trigger_popup, TriggerOption};
+use crate::ui::settings::{SettingsDialogHandle, show_settings_dialog};
+use crate::ui::sidebar::{PanelState, Sidebar};
+use crate::ui::trigger_popup::{TriggerOption, show_trigger_popup};
 use crate::ui::window::MainWindow;
+use crate::ui_prefs::{ArchiveFilter, UiPrefs, default_ui_prefs_path};
 use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
@@ -32,8 +43,8 @@ use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::{RwLock, oneshot};
 
 static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
@@ -44,6 +55,89 @@ static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 
 pub fn tokio_runtime() -> &'static tokio::runtime::Runtime {
     &RUNTIME
+}
+
+pub fn resolve_new_session_target<'a>(
+    workspace_id: Option<&str>,
+    active_session: Option<&str>,
+    workspaces: &'a [WorkspaceView],
+    sessions: &'a [SessionListItem],
+) -> Option<&'a WorkspaceView> {
+    if let Some(id) = workspace_id {
+        return workspaces.iter().find(|workspace| workspace.id == id);
+    }
+    if let Some(session_id) = active_session {
+        if let Some(host) = workspaces.iter().find(|workspace| {
+            workspace
+                .session_ids
+                .iter()
+                .any(|member| member == session_id)
+        }) {
+            return Some(host);
+        }
+    }
+    most_recent_workspace(workspaces, sessions)
+}
+
+fn most_recent_workspace<'a>(
+    workspaces: &'a [WorkspaceView],
+    sessions: &'a [SessionListItem],
+) -> Option<&'a WorkspaceView> {
+    let mut best: Option<(&WorkspaceView, u64)> = None;
+    for workspace in workspaces {
+        let latest = workspace
+            .session_ids
+            .iter()
+            .filter_map(|id| sessions.iter().find(|item| &item.id == id))
+            .map(|item| item.updated_at)
+            .max()
+            .unwrap_or(0);
+        if best.map_or(true, |(_, top)| latest > top) {
+            best = Some((workspace, latest));
+        }
+    }
+    best.map(|(workspace, _)| workspace)
+}
+
+pub fn find_reusable_blank<'a>(
+    workspace: &WorkspaceView,
+    sessions: &'a [SessionListItem],
+    preset_compatible: impl Fn(&SessionListItem) -> bool,
+) -> Option<&'a SessionListItem> {
+    sessions.iter().find(|item| {
+        item.turn_count == 0
+            && !item.is_archived
+            && item.cwd == workspace.path
+            && workspace.session_ids.iter().any(|id| id == &item.id)
+            && preset_compatible(item)
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingDraft {
+    pub prompt: String,
+    pub cwd: Option<String>,
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DraftDisposition {
+    Consume,
+    Clear,
+}
+
+pub fn resolve_pending_draft(
+    draft: &PendingDraft,
+    followed_id: &str,
+    followed_cwd: Option<&str>,
+) -> DraftDisposition {
+    if draft.session_id.as_deref() == Some(followed_id) {
+        return DraftDisposition::Consume;
+    }
+    if draft.session_id.is_none() && draft.cwd.as_deref() == followed_cwd {
+        return DraftDisposition::Consume;
+    }
+    DraftDisposition::Clear
 }
 
 pub enum UiMessage {
@@ -63,7 +157,29 @@ pub enum UiMessage {
     Notification(IncomingNotification),
     Toast(String),
     ShowOnboarding,
-    PluginRestartRequired,
+    PluginsInventoryLoaded(Result<PluginInventoryResult, String>),
+    PluginsToggleDone {
+        key: String,
+        result: Result<PluginChangeResult, String>,
+    },
+    PluginsRemoveDone {
+        name: String,
+        result: Result<PluginChangeResult, String>,
+    },
+    PluginInspectDone(Result<PluginSpecInspection, String>),
+    PluginInstallDone {
+        request_id: Option<String>,
+        result: Result<PluginChangeResult, String>,
+    },
+    PluginCancelInstallDone(Result<PluginCancellationResult, String>),
+    PluginWaitInstallDone(Result<Option<PluginChangeResult>, String>),
+    PluginRegistriesLoaded(Result<PluginRegistries, String>),
+    PluginRegistryProbeDone(Result<Option<String>, String>),
+    PluginVersionsLoaded {
+        name: String,
+        result: Result<PluginVersionList, String>,
+    },
+    PluginUpdateDone(Result<PluginUpdateResult, String>),
     SupervisorRestarted(BridgeConnection),
     SupervisorStarted {
         supervisor: Arc<HarnessSupervisor>,
@@ -101,40 +217,40 @@ pub enum UiMessage {
     },
     FilePreviewUnavailable(String),
     PermissionLoaded(PermissionGetResult),
+    PermissionCatalogLoaded(Result<PermissionCatalogResult, String>),
     PermissionValueUpdated {
         session_id: String,
         current_value: String,
     },
-    EchoAck,
+    EchoAck {
+        session_id: String,
+    },
     EchoFailed {
+        session_id: String,
         text: String,
         error: String,
     },
     TerminalListed(Vec<TerminalInfo>),
     TerminalCreated(TerminalCreateResult),
     TerminalOutput(TerminalOutputResult),
-    ScheduleCatalogLoaded(Vec<serde_json::Value>),
-    ScheduleHistoryLoaded(serde_json::Value),
-    ScheduleOperationDone {
-        label: String,
-        value: serde_json::Value,
+    ScheduleCatalogLoaded(Vec<crate::schedule_model::ScheduleCatalogEntry>),
+    ScheduleCatalogFailed,
+    ScheduleHistoryLoaded {
+        id: String,
+        page: Result<ScheduleDeliveryHistoryPage, ScheduleHistoryMiss>,
     },
+    ScheduleMutationDone {
+        message: String,
+        created: Option<crate::schedule_model::ScheduleCatalogEntry>,
+    },
+    ScheduleMutationFailed {
+        op: ScheduleMutationOp,
+        failure: ScheduleFailure,
+    },
+    ScheduleLimitsLoaded(Option<i64>),
     HistoryPageLoaded {
         events: Vec<SessionEvent>,
         has_more: bool,
-    },
-    PluginInventoryLoaded(PluginInventoryResult),
-    PluginOperationDone {
-        label: String,
-        value: serde_json::Value,
-    },
-    PluginInstallState {
-        request_id: String,
-        phase: String,
-    },
-    PluginInstallLog {
-        request_id: Option<String>,
-        text: String,
     },
     SubagentsLoaded(Vec<serde_json::Value>),
     JobsLoaded(Vec<JobWireView>),
@@ -163,7 +279,11 @@ pub enum UiMessage {
     GoalLoaded(Option<GoalView>),
     SessionListRefresh,
     RefreshModelCatalog,
-    TrajectorySnapshotLoaded(Vec<SessionEvent>),
+    SessionWindowLoaded {
+        session_id: String,
+        events: Vec<SessionEvent>,
+    },
+    PendingDraftExpired,
 }
 
 #[derive(Clone)]
@@ -200,7 +320,8 @@ impl UserQuestionResponder for QuestionHandler {
         let (tx, rx) = oneshot::channel();
         let _ = self.ui_sender.send(UiMessage::UserQuestion { req, tx });
         Box::pin(async move {
-            rx.await.unwrap_or_else(|_| SdkUserQuestionResult::cancelled())
+            rx.await
+                .unwrap_or_else(|_| SdkUserQuestionResult::cancelled())
         })
     }
 }
@@ -216,17 +337,26 @@ pub struct SessionController {
     sidebar: Rc<Sidebar>,
     conversation_view: Rc<ConversationView>,
     right_dock: Rc<RightDock>,
+    dock_button: gtk4::Button,
+    panel_state: Rc<PanelState>,
+    pending_draft: Rc<RefCell<Option<PendingDraft>>>,
+    drafts: Rc<RefCell<DraftStore>>,
+    drafts_path: PathBuf,
     workspaces: Rc<RefCell<Vec<WorkspaceView>>>,
     sessions_cache: Rc<RefCell<Vec<SessionListItem>>>,
     settings_dialog: Rc<RefCell<Option<SettingsDialogHandle>>>,
     permission_state: Rc<RefCell<Option<PermissionGetResult>>>,
+    permission_catalog: Rc<RefCell<Option<PermissionCatalogResult>>>,
+    permission_catalog_error: Rc<RefCell<Option<String>>>,
+    permission_catalog_loading: Rc<Cell<bool>>,
+    permission_popover: Rc<RefCell<Option<gtk4::Popover>>>,
+    permission_anchor: Rc<RefCell<Option<gtk4::Widget>>>,
     history_loading: Rc<Cell<bool>>,
     pending_images: Rc<RefCell<Vec<PendingImage>>>,
     prefs: Rc<RefCell<UiPrefs>>,
     prefs_path: PathBuf,
     unread_sessions: Rc<RefCell<HashSet<String>>>,
     search_generation: Rc<Cell<u64>>,
-    window_title: adw::WindowTitle,
     toast_overlay: adw::ToastOverlay,
     ui_sender: UnboundedSender<UiMessage>,
     credential_store: CredentialStore,
@@ -272,10 +402,23 @@ impl SessionController {
             sidebar,
             conversation_view,
             right_dock: right_dock.clone(),
+            dock_button: main_window.dock_button().clone(),
+            panel_state: main_window.panel_state().clone(),
+            pending_draft: Rc::new(RefCell::new(None)),
+            drafts: {
+                let path = default_drafts_path();
+                Rc::new(RefCell::new(DraftStore::load(&path)))
+            },
+            drafts_path: default_drafts_path(),
             workspaces: Rc::new(RefCell::new(Vec::new())),
             sessions_cache: Rc::new(RefCell::new(Vec::new())),
             settings_dialog: Rc::new(RefCell::new(None)),
             permission_state: Rc::new(RefCell::new(None)),
+            permission_catalog: Rc::new(RefCell::new(None)),
+            permission_catalog_error: Rc::new(RefCell::new(None)),
+            permission_catalog_loading: Rc::new(Cell::new(false)),
+            permission_popover: Rc::new(RefCell::new(None)),
+            permission_anchor: Rc::new(RefCell::new(None)),
             history_loading: Rc::new(Cell::new(false)),
             pending_images: Rc::new(RefCell::new(Vec::new())),
             prefs: {
@@ -285,7 +428,6 @@ impl SessionController {
             prefs_path: default_ui_prefs_path(),
             unread_sessions: Rc::new(RefCell::new(HashSet::new())),
             search_generation: Rc::new(Cell::new(0)),
-            window_title: main_window.window_title().clone(),
             toast_overlay: main_window
                 .window()
                 .content()
@@ -315,6 +457,10 @@ impl SessionController {
             .conversation_view
             .schedules_page()
             .set_controller(controller.clone());
+        controller
+            .conversation_view
+            .plugins_page()
+            .set_controller(controller.clone());
         controller.setup_ui_receiver(ui_receiver, Rc::downgrade(&controller));
         controller.setup_composer();
         controller.setup_double_esc();
@@ -329,31 +475,34 @@ impl SessionController {
             });
 
         let weak_edit = Rc::downgrade(&controller);
-        controller.conversation_view.queue_dock().set_on_edit(
-            move |item_id, text| {
+        controller
+            .conversation_view
+            .queue_dock()
+            .set_on_edit(move |item_id, text| {
                 if let Some(ctrl) = weak_edit.upgrade() {
                     ctrl.queue_edit(&item_id, &text);
                 }
-            },
-        );
+            });
 
         let weak_remove = Rc::downgrade(&controller);
-        controller.conversation_view.queue_dock().set_on_remove(
-            move |item_id| {
+        controller
+            .conversation_view
+            .queue_dock()
+            .set_on_remove(move |item_id| {
                 if let Some(ctrl) = weak_remove.upgrade() {
                     ctrl.queue_remove(&item_id);
                 }
-            },
-        );
+            });
 
         let weak_steer = Rc::downgrade(&controller);
-        controller.conversation_view.queue_dock().set_on_steer_item(
-            move |item_id| {
+        controller
+            .conversation_view
+            .queue_dock()
+            .set_on_steer_item(move |item_id| {
                 if let Some(ctrl) = weak_steer.upgrade() {
                     ctrl.queue_steer_item(&item_id);
                 }
-            },
-        );
+            });
 
         let weak_steer_all = Rc::downgrade(&controller);
         controller
@@ -375,29 +524,32 @@ impl SessionController {
 
         let search_weak = Rc::downgrade(&controller);
         let search_generation = controller.search_generation.clone();
-        controller.sidebar.search_entry().connect_search_changed(move |entry| {
-            let text = entry.text().to_string();
-            let generation = search_generation.get().wrapping_add(1);
-            search_generation.set(generation);
-            let weak = search_weak.clone();
-            let generation_slot = search_generation.clone();
-            gtk4::glib::timeout_add_local_once(
-                std::time::Duration::from_millis(250),
-                move || {
-                    if generation_slot.get() != generation {
-                        return;
-                    }
-                    let Some(ctrl) = weak.upgrade() else {
-                        return;
-                    };
-                    if text.trim().is_empty() {
-                        ctrl.load_session_list();
-                    } else {
-                        ctrl.search_sessions(text.trim());
-                    }
-                },
-            );
-        });
+        controller
+            .sidebar
+            .search_entry()
+            .connect_search_changed(move |entry| {
+                let text = entry.text().to_string();
+                let generation = search_generation.get().wrapping_add(1);
+                search_generation.set(generation);
+                let weak = search_weak.clone();
+                let generation_slot = search_generation.clone();
+                gtk4::glib::timeout_add_local_once(
+                    std::time::Duration::from_millis(250),
+                    move || {
+                        if generation_slot.get() != generation {
+                            return;
+                        }
+                        let Some(ctrl) = weak.upgrade() else {
+                            return;
+                        };
+                        if text.trim().is_empty() {
+                            ctrl.load_session_list();
+                        } else {
+                            ctrl.search_sessions(text.trim());
+                        }
+                    },
+                );
+            });
 
         crate::ui::message_renderer::set_controller(&controller);
         controller
@@ -407,11 +559,17 @@ impl SessionController {
             .conversation_view
             .set_view_mode(controller.prefs.borrow().transcript_view);
         let weak_view = Rc::downgrade(&controller);
+        controller.conversation_view.set_on_view_mode(move |mode| {
+            if let Some(ctrl) = weak_view.upgrade() {
+                ctrl.set_transcript_view(mode);
+            }
+        });
+        let weak_session_view = Rc::downgrade(&controller);
         controller
             .conversation_view
-            .set_on_view_mode(move |mode| {
-                if let Some(ctrl) = weak_view.upgrade() {
-                    ctrl.set_transcript_view(mode);
+            .set_on_view_selected(move |name| {
+                if let Some(ctrl) = weak_session_view.upgrade() {
+                    ctrl.remember_session_view(name);
                 }
             });
         if let Some(theme) = controller.prefs.borrow().theme.clone() {
@@ -464,10 +622,8 @@ impl SessionController {
                 existing
             } else {
                 let mut config = SupervisorConfig::default();
-                config.dsh_bin =
-                    std::env::var("DSH_BIN").unwrap_or_else(|_| "dsh".to_string());
-                config.profile_config.bridge_bundle_path_or_url =
-                    resolve_bridge_bundle_path();
+                config.dsh_bin = std::env::var("DSH_BIN").unwrap_or_else(|_| "dsh".to_string());
+                config.profile_config.bridge_bundle_path_or_url = resolve_bridge_bundle_path();
                 Arc::new(HarnessSupervisor::new(config))
             };
 
@@ -537,6 +693,22 @@ impl SessionController {
         self.session_titles
             .borrow_mut()
             .insert(session_id.to_string(), title.to_string());
+    }
+
+    fn update_session_title(&self, session_id: &str, title: &str) {
+        let updated = {
+            let mut sessions = self.sessions_cache.borrow_mut();
+            match sessions.iter_mut().find(|item| item.id == session_id) {
+                Some(item) => {
+                    item.title = title.to_string();
+                    true
+                }
+                None => false,
+            }
+        };
+        if updated {
+            self.refresh_sidebar_sessions();
+        }
     }
 
     fn session_title_for(&self, session_id: &str) -> String {
@@ -625,8 +797,7 @@ impl SessionController {
                         });
                     }
                     Err(err) => {
-                        let _ = ui_sender
-                            .send(UiMessage::Toast(format!("Rename failed: {}", err)));
+                        let _ = ui_sender.send(UiMessage::Toast(format!("Rename failed: {}", err)));
                     }
                 }
             }
@@ -635,11 +806,12 @@ impl SessionController {
 
     fn apply_rename(&self, session_id: &str, title: &str) {
         self.cache_session_title(session_id, title);
+        self.update_session_title(session_id, title);
         let mut active = self.active_session.borrow_mut();
         if let Some(session) = active.as_mut() {
             if session.id == session_id {
                 session.title = title.to_string();
-                self.window_title.set_subtitle(title);
+                self.window.set_title(Some(title));
                 self.conversation_view.set_title(title);
             }
         }
@@ -684,8 +856,7 @@ impl SessionController {
                         let _ = ui_sender.send(UiMessage::SessionForked(result.session_id));
                     }
                     Err(err) => {
-                        let _ = ui_sender
-                            .send(UiMessage::Toast(format!("Fork failed: {}", err)));
+                        let _ = ui_sender.send(UiMessage::Toast(format!("Fork failed: {}", err)));
                     }
                 }
             }
@@ -743,8 +914,7 @@ impl SessionController {
                     )
                     .await
                 {
-                    let _ = ui_sender
-                        .send(UiMessage::Toast(format!("Queue edit failed: {}", err)));
+                    let _ = ui_sender.send(UiMessage::Toast(format!("Queue edit failed: {}", err)));
                 }
             }
         });
@@ -771,8 +941,8 @@ impl SessionController {
                     )
                     .await
                 {
-                    let _ = ui_sender
-                        .send(UiMessage::Toast(format!("Queue remove failed: {}", err)));
+                    let _ =
+                        ui_sender.send(UiMessage::Toast(format!("Queue remove failed: {}", err)));
                 }
             }
         });
@@ -807,8 +977,7 @@ impl SessionController {
                         )
                         .await
                     {
-                        let _ = ui_sender
-                            .send(UiMessage::Toast(format!("Steer failed: {}", err)));
+                        let _ = ui_sender.send(UiMessage::Toast(format!("Steer failed: {}", err)));
                         break;
                     }
                 }
@@ -819,7 +988,6 @@ impl SessionController {
     pub fn send_prompt(&self, text: &str) {
         self.send_prompt_with_mode(text, "prompt");
     }
-
 
     pub fn update_continue_state(&self) {
         let composer_empty = {
@@ -838,11 +1006,8 @@ impl SessionController {
             .borrow()
             .as_ref()
             .and_then(|session| session.last_error_code.clone());
-        let eligible = crate::drafts::continuation_eligibility(
-            last_error.as_deref(),
-            composer_empty,
-            running,
-        );
+        let eligible =
+            crate::drafts::continuation_eligibility(last_error.as_deref(), composer_empty, running);
         self.conversation_view
             .composer()
             .set_continue_visible(eligible == crate::drafts::ContinuationEligibility::Eligible);
@@ -869,7 +1034,9 @@ impl SessionController {
                 Err(err) => UiMessage::Toast(format!("Continue failed: {}", err)),
             },
         );
-        self.conversation_view.composer().set_continue_visible(false);
+        self.conversation_view
+            .composer()
+            .set_continue_visible(false);
     }
 
     pub fn load_older_history(&self) {
@@ -940,9 +1107,7 @@ impl SessionController {
     }
 
     pub fn pick_attachments(&self) {
-        let dialog = gtk4::FileDialog::builder()
-            .title("Attach Files")
-            .build();
+        let dialog = gtk4::FileDialog::builder().title("Attach Files").build();
         let weak = self.weak_self();
         dialog.open_multiple(
             Some(&self.window),
@@ -1000,9 +1165,9 @@ impl SessionController {
 
     fn upload_attachment(&self, name: String, mime_type: String, bytes: Vec<u8>, image: bool) {
         let Some(session_id) = self.active_session_id() else {
-            let _ = self
-                .ui_sender
-                .send(UiMessage::Toast("Open a session before attaching".to_string()));
+            let _ = self.ui_sender.send(UiMessage::Toast(
+                "Open a session before attaching".to_string(),
+            ));
             return;
         };
         let data = crate::attachments::encode_base64(&bytes);
@@ -1070,7 +1235,8 @@ impl SessionController {
                 session
                     .transcript
                     .push_pending_user_with_images(pending_text, &pending_images);
-                self.conversation_view.update_transcript(&session.transcript);
+                self.conversation_view
+                    .update_transcript(&session.transcript);
             }
         }
         let mut content_blocks = Vec::new();
@@ -1087,13 +1253,14 @@ impl SessionController {
             });
         }
         let params = SessionPromptParams {
-            session_id,
+            session_id: session_id.clone(),
             content_blocks,
             mode: Some(mode.to_string()),
         };
         let conn_arc = self.connection.clone();
         let ui_sender = self.ui_sender.clone();
         let echoed = text.to_string();
+        let echo_session_id = session_id.clone();
         tokio_runtime().spawn(async move {
             let conn_opt = conn_arc.read().await.clone();
             let Some(conn) = conn_opt else {
@@ -1108,10 +1275,13 @@ impl SessionController {
                 .await
             {
                 Ok(_) => {
-                    let _ = ui_sender.send(UiMessage::EchoAck);
+                    let _ = ui_sender.send(UiMessage::EchoAck {
+                        session_id: echo_session_id,
+                    });
                 }
                 Err(err) => {
                     let _ = ui_sender.send(UiMessage::EchoFailed {
+                        session_id: echo_session_id,
                         text: echoed,
                         error: err.to_string(),
                     });
@@ -1245,8 +1415,8 @@ impl SessionController {
                         }
                     }
                     Err(err) => {
-                        let _ = ui_sender
-                            .send(UiMessage::Toast(format!("Command failed: {}", err)));
+                        let _ =
+                            ui_sender.send(UiMessage::Toast(format!("Command failed: {}", err)));
                     }
                 }
             }
@@ -1258,6 +1428,35 @@ impl SessionController {
         buffer.set_text(text);
         buffer.place_cursor(&buffer.end_iter());
         self.conversation_view.composer().text_view().grab_focus();
+    }
+
+    pub fn remember_composer_draft(&self) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        let buffer = self.conversation_view.composer().text_view().buffer();
+        let (start, end) = buffer.bounds();
+        let text = buffer.text(&start, &end, false).to_string();
+        let mut drafts = self.drafts.borrow_mut();
+        drafts.set(&session_id, &text);
+        let _ = drafts.save(&self.drafts_path);
+    }
+
+    fn restore_composer_draft(&self, session_id: &str) {
+        let text = self.drafts.borrow().text_for(session_id);
+        self.set_composer_text(&text);
+    }
+
+    fn clear_composer_draft(&self, session_id: &str) {
+        let mut drafts = self.drafts.borrow_mut();
+        drafts.remove(session_id);
+        let _ = drafts.save(&self.drafts_path);
+    }
+
+    fn store_composer_draft(&self, session_id: &str, text: &str) {
+        let mut drafts = self.drafts.borrow_mut();
+        drafts.set(session_id, text);
+        let _ = drafts.save(&self.drafts_path);
     }
 
     pub fn insert_composer_text(&self, text: &str) {
@@ -1294,20 +1493,32 @@ impl SessionController {
                         let _ = ui_sender.send(UiMessage::SessionReleased);
                     }
                     Err(err) => {
-                        let _ = ui_sender
-                            .send(UiMessage::Toast(format!("Close failed: {}", err)));
+                        let _ = ui_sender.send(UiMessage::Toast(format!("Close failed: {}", err)));
                     }
                 }
             }
         });
     }
 
-    fn clear_active_session_ui(&self) {
+    fn show_blank_session_view(&self) {
+        self.remember_composer_draft();
         *self.active_session.borrow_mut() = None;
         self.conversation_view.clear_session();
         self.right_dock.widget().set_visible(false);
-        self.window_title.set_subtitle("新会话");
+        self.window.set_title(Some("dsh"));
+        self.sidebar.set_active_session(None);
+        self.update_dock_button();
+    }
+
+    fn clear_active_session_ui(&self) {
+        self.show_blank_session_view();
         self.clear_persisted_session();
+    }
+
+    fn update_dock_button(&self) {
+        self.dock_button.set_visible(
+            self.active_session_id().is_some() && self.panel_state.active_panel().is_none(),
+        );
     }
 
     pub fn running_session_info(&self) -> Option<(String, String)> {
@@ -1333,11 +1544,7 @@ impl SessionController {
         !self.running_sessions.borrow().is_empty()
     }
 
-    pub fn set_background_hold(
-        &self,
-        hold: gtk4::gio::ApplicationHoldGuard,
-        session_id: &str,
-    ) {
+    pub fn set_background_hold(&self, hold: gtk4::gio::ApplicationHoldGuard, session_id: &str) {
         *self.background_hold.borrow_mut() = Some(hold);
         *self.background_session.borrow_mut() = Some(session_id.to_string());
     }
@@ -1413,10 +1620,7 @@ impl SessionController {
             if let Some(app) = app_opt.as_ref() {
                 let background_id = self.background_session.borrow().clone();
                 if let Some(background_id) = background_id {
-                    withdraw_notification(
-                        app,
-                        &format!("{}-background", background_id),
-                    );
+                    withdraw_notification(app, &format!("{}-background", background_id));
                 }
             }
 
@@ -1429,11 +1633,14 @@ impl SessionController {
         if let Some(sess) = self.active_session.borrow_mut().as_mut() {
             if sess.id == session_id {
                 sess.handle_status(status);
-                self.conversation_view
-                    .set_status(if status == "running" { "Running" } else { "Idle" });
+                self.conversation_view.set_status(if status == "running" {
+                    "Running"
+                } else {
+                    "Idle"
+                });
             }
         }
-            self.refresh_sidebar_sessions();
+        self.refresh_sidebar_sessions();
     }
 
     pub fn set_supervisor(&self, sup: Arc<HarnessSupervisor>) {
@@ -1445,14 +1652,10 @@ impl SessionController {
 
     pub fn set_connection(&self, conn: BridgeConnection) {
         let sender1 = self.ui_sender.clone();
-        conn.set_approval_responder(ApprovalHandler {
-            ui_sender: sender1,
-        });
+        conn.set_approval_responder(ApprovalHandler { ui_sender: sender1 });
 
         let sender2 = self.ui_sender.clone();
-        conn.set_user_question_responder(QuestionHandler {
-            ui_sender: sender2,
-        });
+        conn.set_user_question_responder(QuestionHandler { ui_sender: sender2 });
 
         let conn_clone = conn.clone();
         let conn_store = self.connection.clone();
@@ -1517,11 +1720,12 @@ impl SessionController {
     pub fn load_session_list(&self) {
         let conn_arc = self.connection.clone();
         let ui_sender = self.ui_sender.clone();
+        let include_archived = self.prefs.borrow().archive_filter != ArchiveFilter::Active;
 
         tokio_runtime().spawn(async move {
             let conn_opt = conn_arc.read().await.clone();
             if let Some(conn) = conn_opt {
-                let params = serde_json::json!({"archived": false, "limit": 50});
+                let params = serde_json::json!({"archived": include_archived, "limit": 200});
                 if let Ok(res) = conn
                     .call::<serde_json::Value, SessionListResult>(
                         METHOD_SESSION_LIST,
@@ -1628,10 +1832,11 @@ impl SessionController {
         );
     }
 
-    pub fn load_trajectory_snapshot(&self, session_id: &str, latest_seq: i64) {
+    pub fn load_session_window(&self, session_id: &str, latest_seq: i64) {
         if latest_seq < 0 {
             return;
         }
+        let request_session = session_id.to_string();
         self.dispatch_call(
             METHOD_SESSION_PAGE,
             SessionPageParams {
@@ -1641,9 +1846,12 @@ impl SessionController {
                 limit: Some(200),
             },
             Duration::from_secs(10),
-            |result: Result<SessionPageResult, ConnectionError>| match result {
-                Ok(page) => UiMessage::TrajectorySnapshotLoaded(page.events),
-                Err(_) => UiMessage::Toast("Trajectory snapshot unavailable".to_string()),
+            move |result: Result<SessionPageResult, ConnectionError>| match result {
+                Ok(page) => UiMessage::SessionWindowLoaded {
+                    session_id: request_session.clone(),
+                    events: page.events,
+                },
+                Err(_) => UiMessage::Toast("Session history unavailable".to_string()),
             },
         );
     }
@@ -1728,7 +1936,9 @@ impl SessionController {
         let index = self.right_dock.selected_index();
         self.prefs.borrow_mut().set_dock_tab(session_id, index);
         let visible = self.right_dock.widget().is_visible();
-        self.prefs.borrow_mut().set_dock_visible(session_id, visible);
+        self.prefs
+            .borrow_mut()
+            .set_dock_visible(session_id, visible);
         self.save_prefs();
     }
 
@@ -1750,6 +1960,33 @@ impl SessionController {
         self.prefs.borrow_mut().developer_tools = enabled;
         self.save_prefs();
         self.conversation_view.set_trajectory_visible(enabled);
+        if !enabled {
+            self.conversation_view.set_active_view("chat");
+        }
+    }
+
+    fn remember_session_view(&self, name: &str) {
+        let Some(session_id) = self.active_session_id() else {
+            return;
+        };
+        {
+            let mut prefs = self.prefs.borrow_mut();
+            if prefs.session_view(&session_id) == Some(name) {
+                return;
+            }
+            prefs.set_session_view(&session_id, name);
+        }
+        self.save_prefs();
+    }
+
+    fn apply_session_view(&self, session_id: &str) {
+        let name = self
+            .prefs
+            .borrow()
+            .session_view(session_id)
+            .unwrap_or("chat")
+            .to_string();
+        self.conversation_view.set_active_view(&name);
     }
 
     pub fn set_notifications_enabled(&self, enabled: bool) {
@@ -1786,6 +2023,7 @@ impl SessionController {
         self.prefs.borrow_mut().archive_filter = filter;
         self.save_prefs();
         self.refresh_sidebar_sessions();
+        self.load_session_list();
     }
 
     pub fn unarchive_session(&self, session_id: &str) {
@@ -1814,10 +2052,7 @@ impl SessionController {
                     let _ = ui_sender.send(UiMessage::SessionListRefresh);
                 }
                 Err(err) => {
-                    let _ = ui_sender.send(UiMessage::Toast(format!(
-                        "Unarchive failed: {}",
-                        err
-                    )));
+                    let _ = ui_sender.send(UiMessage::Toast(format!("Unarchive failed: {}", err)));
                 }
             }
         });
@@ -1896,32 +2131,35 @@ impl SessionController {
                 .await
             {
                 Ok(_) => {
+                    if let Ok(list) = conn
+                        .call::<serde_json::Value, WorkspaceListResult>(
+                            METHOD_WORKSPACE_LIST,
+                            serde_json::json!({}),
+                            Duration::from_secs(5),
+                        )
+                        .await
+                    {
+                        let _ = ui_sender.send(UiMessage::WorkspacesLoaded(list.workspaces));
+                    }
                     let _ = ui_sender.send(UiMessage::WorkspaceCreated(path));
                 }
                 Err(err) => {
-                    let _ = ui_sender.send(UiMessage::Toast(format!("Create workspace failed: {}", err)));
+                    let _ = ui_sender.send(UiMessage::Toast(format!(
+                        "Create workspace failed: {}",
+                        err
+                    )));
                 }
             }
         });
     }
 
-    pub fn switch_workspace(&self, id: &str) {
-        let workspace = self.workspaces.borrow().iter().find(|ws| ws.id == id).cloned();
-        let Some(workspace) = workspace else {
-            return;
-        };
-        self.switch_to_workspace_path(&workspace.path);
-    }
-
-    fn switch_to_workspace_path(&self, path: &str) {
-        if let Some(active) = self.active_session_id() {
-            self.close_session(&active);
-        }
-        self.create_session(path);
-    }
-
     pub fn rename_workspace(&self, id: &str) {
-        let Some(workspace) = self.workspaces.borrow().iter().find(|ws| ws.id == id).cloned()
+        let Some(workspace) = self
+            .workspaces
+            .borrow()
+            .iter()
+            .find(|ws| ws.id == id)
+            .cloned()
         else {
             return;
         };
@@ -1942,7 +2180,10 @@ impl SessionController {
                 match conn
                     .call::<WorkspaceRenameParams, WorkspaceRenameResult>(
                         METHOD_WORKSPACE_RENAME,
-                        WorkspaceRenameParams { workspace_id: id, title },
+                        WorkspaceRenameParams {
+                            workspace_id: id,
+                            title,
+                        },
                         Duration::from_secs(5),
                     )
                     .await
@@ -1959,7 +2200,12 @@ impl SessionController {
     }
 
     pub fn remove_workspace(&self, id: &str) {
-        let Some(workspace) = self.workspaces.borrow().iter().find(|ws| ws.id == id).cloned()
+        let Some(workspace) = self
+            .workspaces
+            .borrow()
+            .iter()
+            .find(|ws| ws.id == id)
+            .cloned()
         else {
             return;
         };
@@ -2007,7 +2253,8 @@ impl SessionController {
                             let _ = ui_sender.send(UiMessage::WorkspaceChanged);
                         }
                         Err(err) => {
-                            let _ = ui_sender.send(UiMessage::Toast(format!("Remove failed: {}", err)));
+                            let _ =
+                                ui_sender.send(UiMessage::Toast(format!("Remove failed: {}", err)));
                         }
                     }
                 });
@@ -2092,8 +2339,10 @@ impl SessionController {
                     let _ = ui_sender.send(UiMessage::FileStat(stat));
                 }
                 Err(err) => {
-                    let _ = ui_sender
-                        .send(UiMessage::FilePreviewUnavailable(format!("Stat failed: {}", err)));
+                    let _ = ui_sender.send(UiMessage::FilePreviewUnavailable(format!(
+                        "Stat failed: {}",
+                        err
+                    )));
                     return;
                 }
             }
@@ -2115,8 +2364,9 @@ impl SessionController {
                             let _ = ui_sender.send(UiMessage::FilePreviewImage { path, bytes });
                         }
                         None => {
-                            let _ = ui_sender
-                                .send(UiMessage::FilePreviewUnavailable("Invalid image data".into()));
+                            let _ = ui_sender.send(UiMessage::FilePreviewUnavailable(
+                                "Invalid image data".into(),
+                            ));
                         }
                     },
                     Err(err) => {
@@ -2243,10 +2493,7 @@ impl SessionController {
             move |result: Result<FilesReadBytesResult, ConnectionError>| match result {
                 Ok(read) => match crate::attachments::decode_base64(&read.data) {
                     Some(bytes) => match std::fs::write(&destination, bytes) {
-                        Ok(_) => UiMessage::Toast(format!(
-                            "Saved {}",
-                            destination.display()
-                        )),
+                        Ok(_) => UiMessage::Toast(format!("Saved {}", destination.display())),
                         Err(err) => UiMessage::Toast(format!("Save failed: {}", err)),
                     },
                     None => UiMessage::Toast("Invalid file data".to_string()),
@@ -2255,27 +2502,6 @@ impl SessionController {
             },
         );
         let _ = ui_sender;
-    }
-
-    pub fn prompt_new_session_portal(&self) {
-        let dialog = gtk4::FileDialog::builder()
-            .title("Select Project Directory")
-            .build();
-
-        let controller_weak = self.weak_self();
-        dialog.select_folder(
-            Some(&self.window),
-            None::<&gtk4::gio::Cancellable>,
-            move |res| {
-                if let Ok(folder) = res {
-                    if let Some(path) = folder.path() {
-                        if let Some(c) = controller_weak.upgrade() {
-                            c.create_session(&path.display().to_string());
-                        }
-                    }
-                }
-            },
-        );
     }
 
     pub fn select_agent_preset(&self, preset: &str) {
@@ -2291,29 +2517,126 @@ impl SessionController {
     }
 
     pub fn start_new_session(&self) {
-        let default_path = self
-            .workspaces
-            .borrow()
-            .iter()
-            .find(|ws| ws.title.trim().is_empty())
-            .map(|ws| ws.path.clone());
-        match default_path {
-            Some(path) => self.create_session(&path),
-            None => self.prompt_new_session_portal(),
-        }
+        self.start_session_in(None, None, None);
+    }
+
+    pub fn start_plugin_creator_session(&self) {
+        self.start_session_in(
+            None,
+            Some("cordis"),
+            Some("创建一个带左侧栏入口的 DSH 插件。"),
+        );
     }
 
     pub fn start_session_in_workspace(&self, workspace_id: &str) {
-        let Some(workspace) = self
-            .workspaces
-            .borrow()
-            .iter()
-            .find(|ws| ws.id == workspace_id)
+        self.start_session_in(Some(workspace_id), None, None);
+    }
+
+    fn start_session_in(
+        &self,
+        workspace_id: Option<&str>,
+        preset: Option<&str>,
+        draft: Option<&str>,
+    ) {
+        let target = {
+            let workspaces = self.workspaces.borrow();
+            let sessions = self.sessions_cache.borrow();
+            resolve_new_session_target(
+                workspace_id,
+                self.active_session_id().as_deref(),
+                &workspaces,
+                &sessions,
+            )
             .cloned()
-        else {
+        };
+        let Some(workspace) = target else {
+            if preset.is_some() || draft.is_some() {
+                let _ = self.ui_sender.send(UiMessage::Toast(
+                    Copybook::for_code("system").workspace_required.to_string(),
+                ));
+            } else {
+                self.panel_state.set_active_panel(None);
+                self.show_blank_session_view();
+            }
             return;
         };
-        self.switch_to_workspace_path(&workspace.path);
+        let blank = {
+            let sessions = self.sessions_cache.borrow();
+            find_reusable_blank(&workspace, &sessions, |_| true).map(|item| item.id.clone())
+        };
+        if let Some(prompt) = draft {
+            *self.pending_draft.borrow_mut() = Some(PendingDraft {
+                prompt: prompt.to_string(),
+                cwd: Some(workspace.path.clone()),
+                session_id: blank.clone(),
+            });
+        }
+        self.create_and_follow_session(&workspace.path, blank, preset);
+    }
+
+    fn create_and_follow_session(
+        &self,
+        cwd: &str,
+        session_id: Option<String>,
+        preset: Option<&str>,
+    ) {
+        self.remember_composer_draft();
+        let cwd_string = cwd.to_string();
+        let conn_arc = self.connection.clone();
+        let model = self.active_model.borrow().clone();
+        let provider = self.active_provider.borrow().clone();
+        let preset = preset
+            .map(str::to_string)
+            .unwrap_or_else(|| self.active_preset.borrow().clone());
+        let ui_sender = self.ui_sender.clone();
+
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            if let Some(conn) = conn_opt {
+                let create_params = SessionCreateParams {
+                    session_id,
+                    cwd: cwd_string,
+                    provider: Some(provider),
+                    model: Some(model),
+                    agent_preset: Some(preset),
+                };
+
+                if let Ok(create_res) = conn
+                    .call::<SessionCreateParams, SessionCreateResult>(
+                        METHOD_SESSION_CREATE,
+                        create_params,
+                        Duration::from_secs(10),
+                    )
+                    .await
+                {
+                    let sess_id = create_res.session_id;
+                    match conn
+                        .call::<SessionFollowParams, SessionFollowResult>(
+                            METHOD_SESSION_FOLLOW,
+                            SessionFollowParams {
+                                session_id: sess_id,
+                                from_seq: None,
+                            },
+                            Duration::from_secs(10),
+                        )
+                        .await
+                    {
+                        Ok(follow_res) => {
+                            let _ = ui_sender.send(UiMessage::SessionFollowed(follow_res));
+                        }
+                        Err(_) => {
+                            let _ = ui_sender.send(UiMessage::PendingDraftExpired);
+                        }
+                    }
+                    let _ = ui_sender.send(UiMessage::SessionListRefresh);
+                } else {
+                    let _ = ui_sender.send(UiMessage::PendingDraftExpired);
+                }
+            } else {
+                let _ = ui_sender.send(UiMessage::PendingDraftExpired);
+            }
+        });
+        self.load_workspaces();
     }
 
     pub fn reveal_workspace(&self, workspace_id: &str) {
@@ -2338,53 +2661,10 @@ impl SessionController {
             },
         );
     }
-    pub fn create_session(&self, cwd: &str) {
-        let cwd_string = cwd.to_string();
-        let conn_arc = self.connection.clone();
-        let model = self.active_model.borrow().clone();
-        let provider = self.active_provider.borrow().clone();
-        let preset = self.active_preset.borrow().clone();
-        let ui_sender = self.ui_sender.clone();
-
-        tokio_runtime().spawn(async move {
-            let conn_opt = conn_arc.read().await.clone();
-            if let Some(conn) = conn_opt {
-                let create_params = SessionCreateParams {
-                    session_id: None,
-                    cwd: cwd_string,
-                    provider: Some(provider),
-                    model: Some(model),
-                    agent_preset: Some(preset.clone()),
-                };
-
-                if let Ok(create_res) = conn
-                    .call::<SessionCreateParams, SessionCreateResult>(
-                        METHOD_SESSION_CREATE,
-                        create_params,
-                        Duration::from_secs(10),
-                    )
-                    .await
-                {
-                    let sess_id = create_res.session_id;
-                    if let Ok(follow_res) = conn
-                        .call::<SessionFollowParams, SessionFollowResult>(
-                            METHOD_SESSION_FOLLOW,
-                            SessionFollowParams {
-                                session_id: sess_id,
-                                from_seq: None,
-                            },
-                            Duration::from_secs(10),
-                        )
-                        .await
-                    {
-                        let _ = ui_sender.send(UiMessage::SessionFollowed(follow_res));
-                    }
-                }
-            }
-        });
-    }
-
     pub fn follow_session(&self, session_id: &str) {
+        if self.active_session_id().as_deref() != Some(session_id) {
+            self.remember_composer_draft();
+        }
         self.conversation_view.set_breadcrumb("");
         let sess_id = session_id.to_string();
         let conn_arc = self.connection.clone();
@@ -2441,13 +2721,8 @@ impl SessionController {
         self.load_session_list();
     }
 
-
     pub fn cancel_current_turn(&self) {
-        let sess_id_opt = self
-            .active_session
-            .borrow()
-            .as_ref()
-            .map(|s| s.id.clone());
+        let sess_id_opt = self.active_session.borrow().as_ref().map(|s| s.id.clone());
 
         if let Some(sess_id) = sess_id_opt {
             let conn_arc = self.connection.clone();
@@ -2474,9 +2749,7 @@ impl SessionController {
         let previous_model = self.active_model.borrow().clone();
         *self.active_model.borrow_mut() = model.to_string();
         *self.active_provider.borrow_mut() = provider.to_string();
-        self.conversation_view
-            .composer()
-            .set_model_label(model);
+        self.conversation_view.composer().set_model_label(model);
 
         let Some(sess_id) = self.active_session_id() else {
             return;
@@ -2680,55 +2953,307 @@ impl SessionController {
         });
     }
 
-    pub fn open_permission_picker(&self, anchor: &impl IsA<gtk4::Widget>) {
-        let popover = gtk4::Popover::builder().build();
+    pub fn refresh_permission_catalog(&self) {
+        if self.permission_catalog_loading.get() {
+            return;
+        }
+        self.permission_catalog_loading.set(true);
+        let conn_arc = self.connection.clone();
+        let ui_sender = self.ui_sender.clone();
+        tokio_runtime().spawn(async move {
+            let conn_opt = conn_arc.read().await.clone();
+            let Some(conn) = conn_opt else {
+                let _ = ui_sender.send(UiMessage::PermissionCatalogLoaded(Err(
+                    "未连接".to_string(),
+                )));
+                return;
+            };
+            let result = conn
+                .call::<serde_json::Value, PermissionCatalogResult>(
+                    METHOD_PERMISSION_CATALOG,
+                    serde_json::json!({}),
+                    Duration::from_secs(5),
+                )
+                .await
+                .map_err(|err| err.to_string());
+            let _ = ui_sender.send(UiMessage::PermissionCatalogLoaded(result));
+        });
+    }
+
+    pub fn handle_permission_catalog(
+        &self,
+        result: Result<PermissionCatalogResult, String>,
+    ) {
+        self.permission_catalog_loading.set(false);
+        match result {
+            Ok(catalog) => {
+                *self.permission_catalog.borrow_mut() = Some(catalog);
+                *self.permission_catalog_error.borrow_mut() = None;
+            }
+            Err(err) => {
+                *self.permission_catalog_error.borrow_mut() = Some(err);
+            }
+        }
+        let reopen = self
+            .permission_popover
+            .borrow()
+            .as_ref()
+            .map(|popover| popover.is_visible())
+            .unwrap_or(false);
+        if !reopen {
+            return;
+        }
+        let anchor = self.permission_anchor.borrow().clone();
+        if let Some(popover) = self.permission_popover.borrow_mut().take() {
+            popover.popdown();
+        }
+        if let Some(anchor) = anchor {
+            let weak = self.weak_self();
+            gtk4::glib::idle_add_local_once(move || {
+                if let Some(ctrl) = weak.upgrade() {
+                    ctrl.open_permission_picker(&anchor);
+                }
+            });
+        }
+    }
+
+    fn permission_catalog_options(&self) -> Vec<PresetOptionItem> {
+        if let Some(catalog) = self.permission_catalog.borrow().as_ref() {
+            if !catalog.options.is_empty() {
+                return catalog.options.clone();
+            }
+            return catalog.default_options.clone();
+        }
+        if let Some(state) = self.permission_state.borrow().as_ref() {
+            if !state.catalog.options.is_empty() {
+                return state.catalog.options.clone();
+            }
+            return state.catalog.default_options.clone();
+        }
+        Vec::new()
+    }
+
+    fn fill_permission_popover(&self, popover: &gtk4::Popover) {
         let box_widget = gtk4::Box::builder()
             .orientation(gtk4::Orientation::Vertical)
-            .spacing(4)
-            .margin_start(6)
-            .margin_end(6)
-            .margin_top(6)
-            .margin_bottom(6)
+            .spacing(2)
+            .width_request(300)
+            .margin_start(4)
+            .margin_end(4)
+            .margin_top(4)
+            .margin_bottom(4)
             .build();
-        let options = self
+        let options = self.permission_catalog_options();
+        if options.is_empty() {
+            let error = self.permission_catalog_error.borrow().clone();
+            match error {
+                Some(message) => {
+                    let label = gtk4::Label::builder()
+                        .label(format!("无法读取权限预设：{message}"))
+                        .wrap(true)
+                        .xalign(0.0)
+                        .css_classes(["dim-label", "caption"])
+                        .margin_start(8)
+                        .margin_end(8)
+                        .margin_top(6)
+                        .margin_bottom(6)
+                        .build();
+                    box_widget.append(&label);
+                    let retry = gtk4::Button::builder()
+                        .label("重试")
+                        .css_classes(["flat"])
+                        .halign(gtk4::Align::Start)
+                        .build();
+                    let weak = self.weak_self();
+                    let popover_clone = popover.clone();
+                    retry.connect_clicked(move |_| {
+                        if let Some(ctrl) = weak.upgrade() {
+                            *ctrl.permission_catalog_error.borrow_mut() = None;
+                            ctrl.fill_permission_popover(&popover_clone);
+                        }
+                    });
+                    box_widget.append(&retry);
+                }
+                None => {
+                    let row = gtk4::Box::builder()
+                        .orientation(gtk4::Orientation::Horizontal)
+                        .spacing(8)
+                        .margin_start(8)
+                        .margin_end(8)
+                        .margin_top(8)
+                        .margin_bottom(8)
+                        .build();
+                    row.append(&gtk4::Spinner::builder().spinning(true).build());
+                    row.append(&gtk4::Label::new(Some("正在载入权限设置…")));
+                    box_widget.append(&row);
+                    self.refresh_permission_catalog();
+                }
+            }
+            popover.set_child(Some(&box_widget));
+            return;
+        }
+
+        let has_session = self.active_session_id().is_some();
+        let current = self
             .permission_state
             .borrow()
             .as_ref()
-            .map(|state| {
-                if !state.catalog.options.is_empty() {
-                    state.catalog.options.clone()
-                } else {
-                    state.catalog.default_options.clone()
-                }
-            })
-            .unwrap_or_default();
+            .map(|state| state.current_value.clone());
+        if !has_session {
+            box_widget.append(
+                &gtk4::Label::builder()
+                    .label("打开一个会话后可以切换当前权限")
+                    .wrap(true)
+                    .xalign(0.0)
+                    .css_classes(["dim-label", "caption"])
+                    .margin_start(8)
+                    .margin_end(8)
+                    .margin_top(6)
+                    .margin_bottom(6)
+                    .build(),
+            );
+        }
         let weak = self.weak_self();
         for option in options {
-            let label = match &option.description {
-                Some(description) if !description.is_empty() => {
-                    format!("{} — {}", option.name, description)
-                }
-                _ => option.name.clone(),
-            };
-            let btn = gtk4::Button::builder()
-                .label(&label)
-                .css_classes(["flat"])
+            let is_current = current.as_deref() == Some(option.value.as_str());
+            let button = gtk4::Button::builder()
+                .css_classes(["flat", "dsh-permission-option"])
                 .halign(gtk4::Align::Fill)
+                .sensitive(has_session)
                 .build();
+            let content = gtk4::Box::builder()
+                .orientation(gtk4::Orientation::Horizontal)
+                .spacing(10)
+                .margin_start(4)
+                .margin_end(4)
+                .margin_top(4)
+                .margin_bottom(4)
+                .build();
+            content.append(&gtk4::Image::from_icon_name(permission_preset_icon(
+                &option.value,
+            )));
+            let text = gtk4::Box::builder()
+                .orientation(gtk4::Orientation::Vertical)
+                .spacing(1)
+                .hexpand(true)
+                .build();
+            let title_row = gtk4::Box::builder()
+                .orientation(gtk4::Orientation::Horizontal)
+                .spacing(6)
+                .build();
+            title_row.append(
+                &gtk4::Label::builder()
+                    .label(permission_preset_label(&option))
+                    .halign(gtk4::Align::Start)
+                    .build(),
+            );
+            if option.value == "auto" {
+                title_row.append(
+                    &gtk4::Label::builder()
+                        .label("EXP")
+                        .css_classes(["dsh-plugins-tag", "dsh-plugins-tag-accent"])
+                        .build(),
+                );
+            }
+            text.append(&title_row);
+            if let Some(description) = option
+                .description
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
+                text.append(
+                    &gtk4::Label::builder()
+                        .label(description)
+                        .wrap(true)
+                        .xalign(0.0)
+                        .css_classes(["dim-label", "caption"])
+                        .build(),
+                );
+            }
+            content.append(&text);
+            if is_current {
+                content.append(
+                    &gtk4::Image::from_icon_name("object-select-symbolic"),
+                );
+            }
+            button.set_child(Some(&content));
             let pop_clone = popover.clone();
             let weak_clone = weak.clone();
             let value = option.value.clone();
-            btn.connect_clicked(move |_| {
-                if let Some(ctrl) = weak_clone.upgrade() {
-                    ctrl.switch_permission_preset(&value);
-                }
+            button.connect_clicked(move |_| {
                 pop_clone.popdown();
+                if let Some(ctrl) = weak_clone.upgrade() {
+                    if permission_preset_requires_confirmation(&value) {
+                        ctrl.confirm_permission_preset(&value);
+                    } else {
+                        ctrl.switch_permission_preset(&value);
+                    }
+                }
             });
-            box_widget.append(&btn);
+            box_widget.append(&button);
         }
         popover.set_child(Some(&box_widget));
+    }
+
+    pub fn open_permission_picker(&self, anchor: &impl IsA<gtk4::Widget>) {
+        let anchor_widget = anchor.clone().upcast::<gtk4::Widget>();
+        *self.permission_anchor.borrow_mut() = Some(anchor_widget);
+        let popover = gtk4::Popover::builder()
+            .css_classes(["dsh-permission-popover"])
+            .build();
+        self.fill_permission_popover(&popover);
+        *self.permission_popover.borrow_mut() = Some(popover.clone());
         popover.set_parent(anchor);
         popover.popup();
+    }
+
+    fn confirm_permission_preset(&self, preset: &str) {
+        if self.active_session_id().is_none() {
+            let _ = self
+                .ui_sender
+                .send(UiMessage::Toast("请先打开一个会话".to_string()));
+            return;
+        }
+        let auto = preset == "auto";
+        let title = if auto {
+            "启用自动审查（实验性）？"
+        } else {
+            "启用完全权限？"
+        };
+        let body = if auto {
+            "自动审查会在每次工具调用前由同一模型判断是否放行，不进入沙箱。它可能误判放行或拦截，并消耗额外 token。"
+        } else {
+            "完全权限会减少确认步骤，允许 Agent 直接执行更多操作，包括敏感写入、文件修改和外部命令。仅在信任当前任务时使用。"
+        };
+        let enable_label = if auto { "启用自动审查" } else { "启用完全权限" };
+        let dialog = adw::AlertDialog::builder()
+            .heading(title)
+            .body(body)
+            .build();
+        dialog.add_response("cancel", "取消");
+        dialog.add_response("enable", enable_label);
+        dialog.set_response_appearance("enable", adw::ResponseAppearance::Destructive);
+        dialog.set_response_enabled("enable", false);
+        dialog.set_close_response("cancel");
+        let check = gtk4::CheckButton::with_label("我了解风险，仍要继续");
+        dialog.set_extra_child(Some(&check));
+        let dialog_for_check = dialog.clone();
+        check.connect_toggled(move |check| {
+            dialog_for_check.set_response_enabled("enable", check.is_active());
+        });
+        let weak = self.weak_self();
+        let preset = preset.to_string();
+        dialog.choose(
+            Some(&self.window),
+            None::<&gtk4::gio::Cancellable>,
+            move |response| {
+                if response == "enable" {
+                    if let Some(ctrl) = weak.upgrade() {
+                        ctrl.switch_permission_preset(&preset);
+                    }
+                }
+            },
+        );
     }
 
     pub fn apply_permission_state(&self, state: PermissionGetResult) {
@@ -2751,9 +3276,12 @@ impl SessionController {
                 .composer()
                 .set_permission_label(&label);
         } else {
+            let label = permission_preset_builtin_label(current_value)
+                .map(str::to_string)
+                .unwrap_or_else(|| current_value.to_string());
             self.conversation_view
                 .composer()
-                .set_permission_label(current_value);
+                .set_permission_label(&label);
         }
     }
 
@@ -2812,34 +3340,262 @@ impl SessionController {
         });
     }
 
-    pub fn toggle_plugin(&self, plugin_id: &str, enable: bool) {
-        let p_id = plugin_id.to_string();
-        let conn_arc = self.connection.clone();
-        let ui_sender = self.ui_sender.clone();
+    pub fn load_plugin_inventory(&self) {
+        self.dispatch_call(
+            METHOD_PLUGIN_INVENTORY,
+            serde_json::json!({}),
+            Duration::from_secs(15),
+            |result: Result<PluginInventoryResult, ConnectionError>| {
+                UiMessage::PluginsInventoryLoaded(result.map_err(|err| err.to_string()))
+            },
+        );
+    }
 
-        tokio_runtime().spawn(async move {
-            let conn_opt = conn_arc.read().await.clone();
-            if let Some(conn) = conn_opt {
-                let method = if enable {
-                    METHOD_PLUGIN_ENABLE
-                } else {
-                    METHOD_PLUGIN_DISABLE
-                };
-                let params = PluginToggleParams { id: p_id };
-                if let Ok(res) = conn
-                    .call::<PluginToggleParams, PluginToggleResult>(
-                        method,
-                        params,
-                        Duration::from_secs(5),
-                    )
-                    .await
-                {
-                    if res.restart_required {
-                        let _ = ui_sender.send(UiMessage::PluginRestartRequired);
-                    }
+    pub fn toggle_plugin_bundle(&self, name: &str, enable: bool) {
+        let method = if enable {
+            METHOD_PLUGIN_BUNDLE_ENABLE
+        } else {
+            METHOD_PLUGIN_BUNDLE_DISABLE
+        };
+        let params = PluginBundleToggleParams {
+            name: name.to_string(),
+        };
+        let key = name.to_string();
+        self.dispatch_call(
+            method,
+            params,
+            Duration::from_secs(30),
+            move |result: Result<PluginChangeResult, ConnectionError>| {
+                UiMessage::PluginsToggleDone {
+                    key,
+                    result: result.map_err(|err| err.to_string()),
                 }
-            }
-        });
+            },
+        );
+    }
+
+    pub fn toggle_plugin_row(&self, entry_id: &str, enable: bool) {
+        let method = if enable {
+            METHOD_PLUGIN_ENABLE
+        } else {
+            METHOD_PLUGIN_DISABLE
+        };
+        let params = PluginToggleParams {
+            id: entry_id.to_string(),
+        };
+        let key = format!("row:{entry_id}");
+        self.dispatch_call(
+            method,
+            params,
+            Duration::from_secs(30),
+            move |result: Result<PluginChangeResult, ConnectionError>| {
+                UiMessage::PluginsToggleDone {
+                    key,
+                    result: result.map_err(|err| err.to_string()),
+                }
+            },
+        );
+    }
+
+    pub fn remove_plugin(&self, name: &str) {
+        let params = PluginRemoveParams {
+            name: name.to_string(),
+        };
+        let name = name.to_string();
+        self.dispatch_call(
+            METHOD_PLUGIN_REMOVE,
+            params,
+            Duration::from_secs(120),
+            move |result: Result<PluginChangeResult, ConnectionError>| {
+                UiMessage::PluginsRemoveDone {
+                    name,
+                    result: result.map_err(|err| err.to_string()),
+                }
+            },
+        );
+    }
+
+    pub fn plugin_inspect(&self, spec: &str, registry: Option<String>) {
+        let params = PluginInspectParams {
+            spec: spec.to_string(),
+            registry,
+        };
+        self.dispatch_call(
+            METHOD_PLUGIN_INSPECT,
+            params,
+            Duration::from_secs(30),
+            |result: Result<PluginOperationResult, ConnectionError>| {
+                let parsed = result
+                    .map_err(|err| err.to_string())
+                    .and_then(|op| {
+                        serde_json::from_value::<PluginSpecInspection>(op.result)
+                            .map_err(|e| e.to_string())
+                    });
+                UiMessage::PluginInspectDone(parsed)
+            },
+        );
+    }
+
+    pub fn plugin_install(
+        &self,
+        spec: &str,
+        enabled: Option<bool>,
+        save_exact: Option<bool>,
+        request_id: Option<String>,
+        approved_builds: Option<Vec<String>>,
+        registry: Option<String>,
+    ) {
+        let req_id_clone = request_id.clone();
+        let params = PluginInstallParams {
+            spec: spec.to_string(),
+            enabled,
+            save_exact,
+            request_id,
+            approved_builds,
+            registry,
+        };
+        self.dispatch_call(
+            METHOD_PLUGIN_INSTALL,
+            params,
+            Duration::from_secs(600),
+            move |result: Result<PluginOperationResult, ConnectionError>| {
+                let parsed = result
+                    .map_err(|err| err.to_string())
+                    .and_then(|op| {
+                        serde_json::from_value::<PluginChangeResult>(op.result)
+                            .map_err(|e| e.to_string())
+                    });
+                UiMessage::PluginInstallDone {
+                    request_id: req_id_clone,
+                    result: parsed,
+                }
+            },
+        );
+    }
+
+    pub fn plugin_cancel_install(&self, request_id: &str) {
+        let params = PluginRequestParams {
+            request_id: request_id.to_string(),
+        };
+        self.dispatch_call(
+            METHOD_PLUGIN_CANCEL_INSTALL,
+            params,
+            Duration::from_secs(30),
+            |result: Result<PluginOperationResult, ConnectionError>| {
+                let parsed = result
+                    .map_err(|err| err.to_string())
+                    .and_then(|op| {
+                        serde_json::from_value::<PluginCancellationResult>(op.result)
+                            .map_err(|e| e.to_string())
+                    });
+                UiMessage::PluginCancelInstallDone(parsed)
+            },
+        );
+    }
+
+    pub fn plugin_wait_install(&self, request_id: &str) {
+        let params = PluginRequestParams {
+            request_id: request_id.to_string(),
+        };
+        self.dispatch_call(
+            METHOD_PLUGIN_WAIT_INSTALL,
+            params,
+            Duration::from_secs(120),
+            |result: Result<PluginOperationResult, ConnectionError>| {
+                let parsed = result
+                    .map_err(|err| err.to_string())
+                    .and_then(|op| {
+                        if op.result.is_null() {
+                            Ok(None)
+                        } else {
+                            serde_json::from_value::<PluginChangeResult>(op.result)
+                                .map(Some)
+                                .map_err(|e| e.to_string())
+                        }
+                    });
+                UiMessage::PluginWaitInstallDone(parsed)
+            },
+        );
+    }
+
+    pub fn plugin_registries(&self) {
+        self.dispatch_call(
+            METHOD_PLUGIN_REGISTRIES,
+            serde_json::json!({}),
+            Duration::from_secs(15),
+            |result: Result<PluginRegistriesResult, ConnectionError>| {
+                UiMessage::PluginRegistriesLoaded(
+                    result.map(|res| res.result).map_err(|err| err.to_string()),
+                )
+            },
+        );
+    }
+
+    pub fn plugin_registry_probe(&self) {
+        self.dispatch_call(
+            METHOD_PLUGIN_REGISTRY_PROBE,
+            serde_json::json!({}),
+            Duration::from_secs(15),
+            |result: Result<PluginRegistryProbeResult, ConnectionError>| {
+                UiMessage::PluginRegistryProbeDone(
+                    result.map(|res| res.result).map_err(|err| err.to_string()),
+                )
+            },
+        );
+    }
+
+    pub fn plugin_versions(&self, name: &str, registry: Option<String>) {
+        let params = PluginVersionsParams {
+            name: name.to_string(),
+            registry,
+        };
+        let pkg_name = name.to_string();
+        self.dispatch_call(
+            METHOD_PLUGIN_VERSIONS,
+            params,
+            Duration::from_secs(30),
+            move |result: Result<PluginOperationResult, ConnectionError>| {
+                let parsed = result
+                    .map_err(|err| err.to_string())
+                    .and_then(|op| {
+                        serde_json::from_value::<PluginVersionList>(op.result)
+                            .map_err(|e| e.to_string())
+                    });
+                UiMessage::PluginVersionsLoaded {
+                    name: pkg_name,
+                    result: parsed,
+                }
+            },
+        );
+    }
+
+    pub fn plugin_update(
+        &self,
+        name: &str,
+        version: &str,
+        request_id: Option<String>,
+        registry: Option<String>,
+    ) {
+        let params = PluginUpdateParams {
+            name: name.to_string(),
+            version: version.to_string(),
+            request_id,
+            registry,
+        };
+        self.dispatch_call(
+            METHOD_PLUGIN_UPDATE,
+            params,
+            Duration::from_secs(600),
+            |result: Result<PluginOperationResult, ConnectionError>| {
+                let parsed = result
+                    .map_err(|err| err.to_string())
+                    .and_then(|op| {
+                        serde_json::from_value::<PluginUpdateResult>(op.result)
+                            .map_err(|e| e.to_string())
+                    });
+                UiMessage::PluginUpdateDone(parsed)
+            },
+        );
     }
 
     pub fn restart_supervisor(&self) {
@@ -2867,7 +3623,7 @@ impl SessionController {
         let win = self.window.clone();
         let sidebar = self.sidebar.clone();
         let conv_view = self.conversation_view.clone();
-        let window_title = self.window_title.clone();
+        let window = self.window.clone();
         let toast_overlay = self.toast_overlay.clone();
         let active_sess = self.active_session.clone();
         let store = self.credential_store.clone();
@@ -2893,6 +3649,11 @@ impl SessionController {
                             ctrl.load_session_list();
                         }
                     }
+                    UiMessage::PendingDraftExpired => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.pending_draft.borrow_mut().take();
+                        }
+                    }
                     UiMessage::SessionListLoaded(sessions) => {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
                             ctrl.handle_session_list_loaded(&sessions);
@@ -2900,21 +3661,27 @@ impl SessionController {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
                             *ctrl.sessions_cache.borrow_mut() = sessions.clone();
                             ctrl.refresh_sidebar_sessions();
-                            let workspaces = ctrl.workspaces.borrow().clone();
-                            sidebar.load_workspaces(&workspaces, &sessions);
+                            sidebar.load_workspaces(&ctrl.workspaces.borrow());
                         }
                     }
                     UiMessage::WorkspacesLoaded(workspaces) => {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
                             *ctrl.workspaces.borrow_mut() = workspaces.clone();
-                            let sessions = ctrl.sessions_cache.borrow().clone();
-                            sidebar.load_workspaces(&workspaces, &sessions);
+                            sidebar.load_workspaces(&workspaces);
                         }
                     }
                     UiMessage::WorkspaceCreated(path) => {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
-                            ctrl.switch_to_workspace_path(&path);
-                            ctrl.load_workspaces();
+                            let workspace = ctrl
+                                .workspaces
+                                .borrow()
+                                .iter()
+                                .find(|ws| ws.path == path)
+                                .map(|ws| ws.id.clone());
+                            match workspace {
+                                Some(id) => ctrl.start_session_in_workspace(&id),
+                                None => ctrl.load_workspaces(),
+                            }
                         }
                     }
                     UiMessage::WorkspaceChanged => {
@@ -2933,10 +3700,9 @@ impl SessionController {
                         let session_id = follow.header.id.clone();
                         let latest_seq = follow.latest_seq;
 
-                        window_title.set_subtitle(&title);
+                        window.set_title(Some(&title));
                         conv_view.set_title(&title);
                         conv_view.set_cwd(&cwd);
-                        conv_view.select_panel("conversation");
                         conv_view.set_status(if status == "running" {
                             "Running"
                         } else {
@@ -2944,6 +3710,7 @@ impl SessionController {
                         });
 
                         if let Some(ctrl) = ctrl_weak.upgrade() {
+                            let previous_id = ctrl.active_session_id();
                             ctrl.unread_sessions.borrow_mut().remove(&session_id);
                             if let Some(previous) = ctrl.active_session_id() {
                                 ctrl.remember_dock_for_session(&previous);
@@ -2951,8 +3718,20 @@ impl SessionController {
                             ctrl.handle_follow_status(&session_id, &status);
                             ctrl.persist_session(&session_id, &cwd);
                             ctrl.refresh_queue(&session_id);
+                            ctrl.sidebar.set_active_session(Some(&session_id));
+                            ctrl.panel_state.set_active_panel(None);
+                            if let Some(pending) = ctrl.pending_draft.borrow_mut().take() {
+                                if resolve_pending_draft(&pending, &session_id, Some(&cwd))
+                                    == DraftDisposition::Consume
+                                {
+                                    ctrl.set_composer_text(&pending.prompt);
+                                }
+                            } else if previous_id.as_deref() != Some(session_id.as_str()) {
+                                ctrl.restore_composer_draft(&session_id);
+                            }
                         }
 
+                        conv_view.reset_meters();
                         let sess_model = SessionModel::from_follow(follow);
                         conv_view.update_transcript(&sess_model.transcript);
                         *active_sess.borrow_mut() = Some(sess_model);
@@ -2963,13 +3742,15 @@ impl SessionController {
                                 .set_events(&sess.raw_events().iter().cloned().collect::<Vec<_>>());
                         }
                         if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.update_dock_button();
                             ctrl.right_dock.preview_panel().clear();
                             ctrl.refresh_files(".");
                             ctrl.refresh_permission(&session_id);
+                            ctrl.apply_session_view(&session_id);
                             ctrl.update_continue_state();
                             ctrl.right_dock.on_session_followed(&session_id, &cwd);
                             ctrl.restore_dock_for_session(&session_id);
-                            ctrl.load_trajectory_snapshot(&session_id, latest_seq);
+                            ctrl.load_session_window(&session_id, latest_seq);
                             ctrl.load_projections(&session_id);
                             ctrl.refresh_session_model();
                             ctrl.load_goal(&session_id);
@@ -2978,135 +3759,156 @@ impl SessionController {
                             ctrl.load_feedback();
                         }
                     }
-                    UiMessage::Notification(notif) => {
-                        match notif {
-                            IncomingNotification::SessionEvent(p) => {
-                                let mut sess_guard = active_sess.borrow_mut();
-                                if let Some(sess) = sess_guard.as_mut() {
-                                    if p.session_id == sess.id {
-                                        let raw_event = p.event.clone();
-                                        let _ = sess.handle_event(p.event);
-                                        conv_view.update_transcript(&sess.transcript);
-                                        conv_view.composer().set_plan_mode(sess.plan_mode);
-                                        conv_view.trajectory_view().append_event(raw_event);
-                                    }
+                    UiMessage::Notification(notif) => match notif {
+                        IncomingNotification::SessionEvent(p) => {
+                            let mut sess_guard = active_sess.borrow_mut();
+                            if let Some(sess) = sess_guard.as_mut() {
+                                if p.session_id == sess.id {
+                                    let raw_event = p.event.clone();
+                                    let _ = sess.handle_event(p.event);
+                                    conv_view.update_transcript(&sess.transcript);
+                                    conv_view.composer().set_plan_mode(sess.plan_mode);
+                                    conv_view.trajectory_view().append_event(raw_event);
                                 }
                             }
-                            IncomingNotification::AgentStream(p) => {
-                                let mut sess_guard = active_sess.borrow_mut();
-                                if let Some(sess) = sess_guard.as_mut() {
-                                    if p.session_id == sess.id {
-                                        if let crate::protocol::AssistantStreamFrame::Chunk {
-                                            chunk: crate::protocol::StreamChunk::Usage { usage },
-                                            ..
-                                        } = &p.frame
-                                        {
-                                            conv_view.set_usage(usage);
-                                        }
-                                        sess.handle_stream_frame(p.frame);
-                                        conv_view.update_transcript(&sess.transcript);
-                                    }
-                                }
-                            }
-                            IncomingNotification::SessionStatus(p) => {
-                                if let Some(ctrl) = ctrl_weak.upgrade() {
-                                    ctrl.handle_status_notification(&p.session_id, &p.status);
-                                }
-                            }
-                            IncomingNotification::SessionTitle(p) => {
-                                if let Some(ctrl) = ctrl_weak.upgrade() {
-                                    ctrl.cache_session_title(&p.session_id, &p.title);
-                                }
-                                let mut sess_guard = active_sess.borrow_mut();
-                                if let Some(sess) = sess_guard.as_mut() {
-                                    if p.session_id == sess.id {
-                                        sess.handle_title(&p.title);
-                                        window_title.set_subtitle(&p.title);
-                                        conv_view.set_title(&p.title);
-                                    }
-                                }
-                            }
-                            IncomingNotification::SessionInbox(p) => {
-                                let matches_active = active_sess
-                                    .borrow()
-                                    .as_ref()
-                                    .map(|sess| sess.id == p.session_id)
-                                    .unwrap_or(false);
-                                if matches_active {
-                                    conv_view.update_queue(&p.items);
-                                }
-                            }
-                            IncomingNotification::SessionProjection(p) => {
-                                if matches_active_session(&active_sess, &p.session_id) {
-                                    match p.kind.as_str() {
-                                        "contextPressure" => {
-                                            conv_view.set_context(Some(&p.value), None);
-                                        }
-                                        "contextBreakdown" => {
-                                            conv_view.set_context(None, Some(&p.value));
-                                        }
-                                        "tokenUsage" => conv_view.set_usage(&p.value),
-                                        _ => {}
-                                    }
-                                }
-                            }
-                            IncomingNotification::JobOutput(p) => {
-                                let matches_active = active_sess
-                                    .borrow()
-                                    .as_ref()
-                                    .map(|sess| sess.id == p.session_id)
-                                    .unwrap_or(false);
-                                if matches_active {
-                                    conv_view.job_output_append(&p.chunks);
-                                }
-                            }
-                            IncomingNotification::ScheduleChanged(_) => {
-                                if let Some(ctrl) = ctrl_weak.upgrade() {
-                                    ctrl.load_schedules();
-                                }
-                            }
-                            IncomingNotification::PluginInstallState(p) => {
-                                if let Some(ctrl) = ctrl_weak.upgrade() {
-                                    if let Some(handle) = ctrl.settings_dialog.borrow().as_ref() {
-                                        handle.plugin_install_state(&p.request_id, &p.phase);
-                                    }
-                                }
-                            }
-                            IncomingNotification::PluginInstallLog(p) => {
-                                if let Some(ctrl) = ctrl_weak.upgrade() {
-                                    if let Some(handle) = ctrl.settings_dialog.borrow().as_ref() {
-                                        handle.plugin_install_log(
-                                            p.request_id.as_deref(),
-                                            &p.text,
-                                        );
-                                    }
-                                }
-                            }
-                            IncomingNotification::SettingsUpdated(_) => {
-                                if let Some(ctrl) = ctrl_weak.upgrade() {
-                                    if let Some(handle) = ctrl.settings_dialog.borrow().as_ref() {
-                                        handle.refresh();
-                                    }
-                                }
-                            }
-                            IncomingNotification::GoalUpdated(p) => {
-                                if matches_active_session(&active_sess, &p.session_id) {
-                                    conv_view.goal_bar().set_goal(p.goal);
-                                }
-                                if let Some(ctrl) = ctrl_weak.upgrade() {
-                                    if let Some(handle) = ctrl.settings_dialog.borrow().as_ref() {
-                                        handle.refresh();
-                                    }
-                                }
-                            }
-                            IncomingNotification::PermissionUpdated(p) => {
-                                if let Some(ctrl) = ctrl_weak.upgrade() {
-                                    ctrl.update_permission_value(&p.session_id, &p.current_value);
-                                }
-                            }
-                            _ => {}
                         }
-                    }
+                        IncomingNotification::AgentStream(p) => {
+                            let mut sess_guard = active_sess.borrow_mut();
+                            if let Some(sess) = sess_guard.as_mut() {
+                                if p.session_id == sess.id {
+                                    if let crate::protocol::AssistantStreamFrame::Chunk {
+                                        chunk: crate::protocol::StreamChunk::Usage { usage },
+                                        ..
+                                    } = &p.frame
+                                    {
+                                        conv_view.set_usage(usage);
+                                    }
+                                    sess.handle_stream_frame(p.frame);
+                                    conv_view.update_transcript(&sess.transcript);
+                                }
+                            }
+                        }
+                        IncomingNotification::SessionStatus(p) => {
+                            if let Some(ctrl) = ctrl_weak.upgrade() {
+                                ctrl.handle_status_notification(&p.session_id, &p.status);
+                            }
+                        }
+                        IncomingNotification::SessionTitle(p) => {
+                            if let Some(ctrl) = ctrl_weak.upgrade() {
+                                ctrl.cache_session_title(&p.session_id, &p.title);
+                                ctrl.update_session_title(&p.session_id, &p.title);
+                            }
+                            let mut sess_guard = active_sess.borrow_mut();
+                            if let Some(sess) = sess_guard.as_mut() {
+                                if p.session_id == sess.id {
+                                    sess.handle_title(&p.title);
+                                    window.set_title(Some(&p.title));
+                                    conv_view.set_title(&p.title);
+                                }
+                            }
+                        }
+                        IncomingNotification::SessionInbox(p) => {
+                            let matches_active = active_sess
+                                .borrow()
+                                .as_ref()
+                                .map(|sess| sess.id == p.session_id)
+                                .unwrap_or(false);
+                            if matches_active {
+                                conv_view.update_queue(&p.items);
+                            }
+                        }
+                        IncomingNotification::SessionProjection(p) => {
+                            if matches_active_session(&active_sess, &p.session_id) {
+                                match p.kind.as_str() {
+                                    "contextPressure" => {
+                                        conv_view.set_context(Some(&p.value), None);
+                                    }
+                                    "contextBreakdown" => {
+                                        conv_view.set_context(None, Some(&p.value));
+                                    }
+                                    "tokenUsage" => conv_view.set_usage(&p.value),
+                                    _ => {}
+                                }
+                            }
+                        }
+                        IncomingNotification::JobOutput(p) => {
+                            let matches_active = active_sess
+                                .borrow()
+                                .as_ref()
+                                .map(|sess| sess.id == p.session_id)
+                                .unwrap_or(false);
+                            if matches_active {
+                                conv_view.job_output_append(&p.chunks);
+                            }
+                        }
+                        IncomingNotification::ScheduleChanged(_) => {
+                            if let Some(ctrl) = ctrl_weak.upgrade() {
+                                ctrl.load_schedules();
+                            }
+                        }
+                        IncomingNotification::PluginInstallState(p) => {
+                            if let Some(ctrl) = ctrl_weak.upgrade() {
+                                ctrl.conversation_view
+                                    .plugins_page()
+                                    .handle_install_state(&p.request_id, &p.phase);
+                            }
+                        }
+                        IncomingNotification::PluginInstallLog(p) => {
+                            if let Some(ctrl) = ctrl_weak.upgrade() {
+                                ctrl.conversation_view
+                                    .plugins_page()
+                                    .handle_install_log_chunk(
+                                        p.request_id.as_deref(),
+                                        &p.job_id,
+                                        &p.argv,
+                                        &p.cwd,
+                                        &p.text,
+                                        p.exit_code,
+                                    );
+                            }
+                        }
+                        IncomingNotification::PluginChanged(_) => {
+                            if let Some(ctrl) = ctrl_weak.upgrade() {
+                                ctrl.conversation_view.plugins_page().reload_after_change();
+                            }
+                        }
+                        IncomingNotification::PluginUpdateState(p) => {
+                            if let Some(ctrl) = ctrl_weak.upgrade() {
+                                ctrl.conversation_view
+                                    .plugins_page()
+                                    .handle_update_state(&p.request_id, &p.step);
+                            }
+                        }
+                        IncomingNotification::PluginMarketChanged(_) => {
+                            if let Some(ctrl) = ctrl_weak.upgrade() {
+                                ctrl.conversation_view.plugins_page().probe_market();
+                            }
+                        }
+                        IncomingNotification::SettingsUpdated(_) => {
+                            if let Some(ctrl) = ctrl_weak.upgrade() {
+                                if let Some(handle) = ctrl.settings_dialog.borrow().as_ref() {
+                                    handle.refresh();
+                                }
+                                ctrl.conversation_view.plugins_page().reload_forms();
+                            }
+                        }
+                        IncomingNotification::GoalUpdated(p) => {
+                            if matches_active_session(&active_sess, &p.session_id) {
+                                conv_view.goal_bar().set_goal(p.goal);
+                            }
+                            if let Some(ctrl) = ctrl_weak.upgrade() {
+                                if let Some(handle) = ctrl.settings_dialog.borrow().as_ref() {
+                                    handle.refresh();
+                                }
+                            }
+                        }
+                        IncomingNotification::PermissionUpdated(p) => {
+                            if let Some(ctrl) = ctrl_weak.upgrade() {
+                                ctrl.update_permission_value(&p.session_id, &p.current_value);
+                            }
+                        }
+                        _ => {}
+                    },
                     UiMessage::Toast(msg) => {
                         toast_overlay.add_toast(adw::Toast::new(&msg));
                     }
@@ -3115,23 +3917,17 @@ impl SessionController {
                             show_onboarding_dialog(&win, ctrl, store.clone());
                         }
                     }
-                    UiMessage::PluginRestartRequired => {
-                        toast_overlay
-                            .add_toast(adw::Toast::new("Plugin updated. Restart dsh to apply."));
-                    }
                     UiMessage::SupervisorRestarted(new_conn) => {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
                             ctrl.show_ready();
                             ctrl.set_connection(new_conn);
-                            let sess_id_opt = {
-                                active_sess
-                                    .borrow()
-                                    .as_ref()
-                                    .map(|s| s.id.clone())
-                            };
+                            let sess_id_opt =
+                                { active_sess.borrow().as_ref().map(|s| s.id.clone()) };
                             if let Some(id) = sess_id_opt {
                                 ctrl.follow_session(&id);
                             }
+                            ctrl.conversation_view.plugins_page().on_connection_ready();
+                            ctrl.refresh_permission_catalog();
                         }
                         toast_overlay.add_toast(adw::Toast::new("dsh restarted successfully"));
                     }
@@ -3144,15 +3940,19 @@ impl SessionController {
                             ctrl.mark_restore_pending();
                             ctrl.set_supervisor(supervisor);
                             ctrl.set_connection(connection);
+                            ctrl.conversation_view.plugins_page().on_connection_ready();
+                            ctrl.refresh_permission_catalog();
                         }
                     }
                     UiMessage::SupervisorStartFailed(message) => {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.pending_draft.borrow_mut().take();
                             ctrl.show_startup_error(&message);
                         }
                     }
                     UiMessage::ConnectionLost => {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.pending_draft.borrow_mut().take();
                             ctrl.show_connection_lost();
                         }
                     }
@@ -3166,18 +3966,12 @@ impl SessionController {
                             ctrl.follow_session(&session_id);
                         }
                     }
-                    UiMessage::SessionRenamed {
-                        session_id,
-                        title,
-                    } => {
+                    UiMessage::SessionRenamed { session_id, title } => {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
                             ctrl.apply_rename(&session_id, &title);
                         }
                     }
-                    UiMessage::QueueUpdated {
-                        session_id,
-                        items,
-                    } => {
+                    UiMessage::QueueUpdated { session_id, items } => {
                         let matches_active = active_sess
                             .borrow()
                             .as_ref()
@@ -3306,6 +4100,11 @@ impl SessionController {
                             ctrl.apply_permission_state(state);
                         }
                     }
+                    UiMessage::PermissionCatalogLoaded(result) => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.handle_permission_catalog(result);
+                        }
+                    }
                     UiMessage::PermissionValueUpdated {
                         session_id,
                         current_value,
@@ -3321,7 +4120,7 @@ impl SessionController {
                         }
                         if events.is_empty() {
                             let _ = has_more;
-                            return;
+                            continue;
                         }
                         let adjustment = conv_view.transcript_adjustment();
                         let distance_from_bottom = adjustment.upper() - adjustment.value();
@@ -3330,19 +4129,21 @@ impl SessionController {
                             session.transcript.prepend_events(events.clone());
                             session.record_older_events(events);
                             conv_view.rerender_transcript(&session.transcript);
-                            conv_view
-                                .trajectory_view()
-                                .set_events(&session.raw_events().iter().cloned().collect::<Vec<_>>());
+                            conv_view.trajectory_view().set_events(
+                                &session.raw_events().iter().cloned().collect::<Vec<_>>(),
+                            );
                         }
                         let adjustment = conv_view.transcript_adjustment();
-                        adjustment
-                            .set_value((adjustment.upper() - distance_from_bottom).max(0.0));
+                        adjustment.set_value((adjustment.upper() - distance_from_bottom).max(0.0));
                     }
-                    UiMessage::EchoAck => {
-                        let buffer = conv_view.composer().text_view().buffer();
-                        buffer.set_text("");
+                    UiMessage::EchoAck { session_id } => {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
-                            ctrl.pending_images.borrow_mut().clear();
+                            if ctrl.active_session_id().as_deref() == Some(session_id.as_str()) {
+                                let buffer = conv_view.composer().text_view().buffer();
+                                buffer.set_text("");
+                                ctrl.pending_images.borrow_mut().clear();
+                                ctrl.clear_composer_draft(&session_id);
+                            }
                         }
                     }
                     UiMessage::ImageAttached {
@@ -3362,7 +4163,7 @@ impl SessionController {
                     }
                     UiMessage::SessionSearchLoaded(items) => {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
-                            let sessions = items
+                            let results = items
                                 .into_iter()
                                 .map(|item| SessionListItem {
                                     id: item.id,
@@ -3374,8 +4175,7 @@ impl SessionController {
                                     is_archived: false,
                                 })
                                 .collect::<Vec<_>>();
-                            *ctrl.sessions_cache.borrow_mut() = sessions.clone();
-                            ctrl.refresh_sidebar_sessions();
+                            ctrl.sidebar.show_search_results(&results);
                         }
                     }
                     UiMessage::FileAttached(path) => {
@@ -3385,13 +4185,25 @@ impl SessionController {
                             }
                         }
                     }
-                    UiMessage::EchoFailed { text, error } => {
-                        let mut guard = active_sess.borrow_mut();
-                        if let Some(session) = guard.as_mut() {
-                            session.transcript.clear_pending_user();
-                            conv_view.update_transcript(&session.transcript);
+                    UiMessage::EchoFailed {
+                        session_id,
+                        text,
+                        error,
+                    } => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            if ctrl.active_session_id().as_deref() == Some(session_id.as_str()) {
+                                let mut guard = active_sess.borrow_mut();
+                                if let Some(session) = guard.as_mut() {
+                                    session.transcript.clear_pending_user();
+                                    conv_view.update_transcript(&session.transcript);
+                                }
+                                drop(guard);
+                                conv_view.composer().text_view().buffer().set_text(&text);
+                                ctrl.store_composer_draft(&session_id, &text);
+                            } else {
+                                ctrl.store_composer_draft(&session_id, &text);
+                            }
                         }
-                        conv_view.composer().text_view().buffer().set_text(&text);
                         toast_overlay
                             .add_toast(adw::Toast::new(&format!("Send failed: {}", error)));
                     }
@@ -3426,9 +4238,7 @@ impl SessionController {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
                             *ctrl.active_provider.borrow_mut() = model.provider;
                             *ctrl.active_model.borrow_mut() = model.model.clone();
-                            conv_view
-                                .composer()
-                                .set_model_label(&model.model);
+                            conv_view.composer().set_model_label(&model.model);
                         }
                     }
                     UiMessage::ModelSwitchFailed { provider, model } => {
@@ -3441,13 +4251,24 @@ impl SessionController {
                             "Model switch failed; previous model restored",
                         ));
                     }
-                    UiMessage::TrajectorySnapshotLoaded(events) => {
-                        let mut guard = active_sess.borrow_mut();
-                        if let Some(session) = guard.as_mut() {
-                            session.record_older_events(events);
-                            conv_view.trajectory_view().set_events(
-                                &session.raw_events().iter().cloned().collect::<Vec<_>>(),
-                            );
+                    UiMessage::SessionWindowLoaded { session_id, events } => {
+                        let active_id = ctrl_weak.upgrade().and_then(|ctrl| ctrl.active_session_id());
+                        if active_id.as_deref() == Some(session_id.as_str()) {
+                            let mut guard = active_sess.borrow_mut();
+                            if let Some(session) = guard.as_mut() {
+                                if session.id == session_id
+                                    && session.transcript.blocks().is_empty()
+                                    && !events.is_empty()
+                                {
+                                    session.transcript.prepend_events(events.clone());
+                                    conv_view.rerender_transcript(&session.transcript);
+                                    conv_view.scroll_transcript_to_bottom();
+                                }
+                                session.record_older_events(events);
+                                conv_view.trajectory_view().set_events(
+                                    &session.raw_events().iter().cloned().collect::<Vec<_>>(),
+                                );
+                            }
                         }
                     }
                     UiMessage::ProjectionsLoaded(projections) => {
@@ -3462,14 +4283,47 @@ impl SessionController {
                     UiMessage::ScheduleCatalogLoaded(entries) => {
                         conv_view.schedules_page().handle_catalog(&entries);
                     }
-                    UiMessage::ScheduleHistoryLoaded(value) => {
-                        conv_view.schedules_page().show_history(&value);
+                    UiMessage::ScheduleCatalogFailed => {
+                        conv_view.schedules_page().handle_catalog_failed();
                     }
-                    UiMessage::ScheduleOperationDone { label, value } => {
-                        let text = serde_json::to_string(&value).unwrap_or_default();
-                        toast_overlay
-                            .add_toast(adw::Toast::new(&format!("{}: {}", label, text)));
-                        conv_view.schedules_page().load();
+                    UiMessage::ScheduleHistoryLoaded { id, page } => {
+                        conv_view.schedules_page().handle_history(&id, page);
+                    }
+                    UiMessage::ScheduleMutationDone { message, created } => {
+                        if !message.is_empty() {
+                            toast_overlay.add_toast(adw::Toast::new(&message));
+                        }
+                        let page = conv_view.schedules_page();
+                        if let Some(entry) = created.as_ref() {
+                            page.handle_created(entry);
+                        } else {
+                            page.handle_mutation_settled();
+                        }
+                        page.load();
+                    }
+                    UiMessage::ScheduleMutationFailed { op, failure } => {
+                        let locale = ui_locale();
+                        let message = match &op {
+                            ScheduleMutationOp::Delete { .. } => Some(match failure {
+                                ScheduleFailure::Missing | ScheduleFailure::Conflict => {
+                                    failure_text(failure, false, locale).to_string()
+                                }
+                                _ => schedule_copy(locale, "toast.deleteFailed").to_string(),
+                            }),
+                            ScheduleMutationOp::ClearEnded => {
+                                Some(schedule_copy(locale, "toast.clearFailed").to_string())
+                            }
+                            _ => None,
+                        };
+                        if let Some(message) = message {
+                            toast_overlay.add_toast(adw::Toast::new(&message));
+                        }
+                        conv_view
+                            .schedules_page()
+                            .handle_mutation_failed(&op, failure);
+                    }
+                    UiMessage::ScheduleLimitsLoaded(value) => {
+                        conv_view.schedules_page().handle_limits(value);
                     }
                     UiMessage::QuestionReopened(request) => {
                         let (sender, _receiver) = oneshot::channel();
@@ -3478,24 +4332,84 @@ impl SessionController {
                     UiMessage::FeedbackLoaded(items) => {
                         crate::ui::message_renderer::set_feedback_items(&items);
                     }
-                    UiMessage::PluginInventoryLoaded(inventory) => {
+                    UiMessage::PluginsInventoryLoaded(result) => {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
-                            if let Some(handle) = ctrl.settings_dialog.borrow().as_ref() {
-                                handle.plugin_inventory(&inventory);
-                            }
+                            ctrl.conversation_view
+                                .plugins_page()
+                                .handle_inventory(result);
                         }
                     }
-                    UiMessage::PluginOperationDone { label, value } => {
+                    UiMessage::PluginsToggleDone { key, result } => {
                         if let Some(ctrl) = ctrl_weak.upgrade() {
-                            if let Some(handle) = ctrl.settings_dialog.borrow().as_ref() {
-                                handle.plugin_operation(&label, &value);
-                            }
+                            ctrl.conversation_view
+                                .plugins_page()
+                                .handle_toggle_done(key, result);
                         }
                     }
-                    UiMessage::PluginInstallState { .. }
-                    | UiMessage::PluginInstallLog { .. }
-                    | UiMessage::AccountLoaded { .. }
-                    | UiMessage::CredentialRecordsLoaded(_) => {}
+                    UiMessage::PluginsRemoveDone { name, result } => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.conversation_view
+                                .plugins_page()
+                                .handle_remove_done(name, result);
+                        }
+                    }
+                    UiMessage::PluginInspectDone(result) => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.conversation_view
+                                .plugins_page()
+                                .handle_inspect_done(result);
+                        }
+                    }
+                    UiMessage::PluginInstallDone { request_id, result } => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.conversation_view
+                                .plugins_page()
+                                .handle_install_done(request_id, result);
+                        }
+                    }
+                    UiMessage::PluginCancelInstallDone(result) => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.conversation_view
+                                .plugins_page()
+                                .handle_cancel_install_done(result);
+                        }
+                    }
+                    UiMessage::PluginWaitInstallDone(result) => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.conversation_view
+                                .plugins_page()
+                                .handle_wait_install_done(result);
+                        }
+                    }
+                    UiMessage::PluginRegistriesLoaded(result) => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.conversation_view
+                                .plugins_page()
+                                .handle_registries_loaded(result);
+                        }
+                    }
+                    UiMessage::PluginRegistryProbeDone(result) => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.conversation_view
+                                .plugins_page()
+                                .handle_registry_probe_done(result);
+                        }
+                    }
+                    UiMessage::PluginVersionsLoaded { name, result } => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.conversation_view
+                                .plugins_page()
+                                .handle_versions_loaded(name, result);
+                        }
+                    }
+                    UiMessage::PluginUpdateDone(result) => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            ctrl.conversation_view
+                                .plugins_page()
+                                .handle_update_done(result);
+                        }
+                    }
+                    UiMessage::AccountLoaded { .. } | UiMessage::CredentialRecordsLoaded(_) => {}
                 }
             }
         });
@@ -3593,10 +4507,7 @@ impl SessionController {
             {
                 if let Some(display) = gtk4::gdk::Display::default() {
                     let clipboard = display.clipboard();
-                    if clipboard
-                        .formats()
-                        .contain_mime_type("image/png")
-                    {
+                    if clipboard.formats().contain_mime_type("image/png") {
                         let c = c_weak_paste.clone();
                         clipboard.read_texture_async(
                             None::<&gtk4::gio::Cancellable>,
@@ -3710,175 +4621,6 @@ impl SessionController {
             let result = conn.call::<P, R>(method, params, timeout).await;
             let _ = ui_sender.send(map(result));
         });
-    }
-
-    pub fn refresh_plugins(&self) {
-        self.dispatch_call(
-            METHOD_PLUGIN_INVENTORY,
-            serde_json::json!({}),
-            Duration::from_secs(10),
-            |result| match result {
-                Ok(inventory) => UiMessage::PluginInventoryLoaded(inventory),
-                Err(err) => UiMessage::Toast(format!("Plugin inventory failed: {}", err)),
-            },
-        );
-    }
-
-    pub fn set_plugin_registry(&self, registry: Option<String>) {
-        self.prefs.borrow_mut().plugin_registry = registry;
-        self.save_prefs();
-    }
-
-    pub fn retry_plugins(&self) {
-        self.dispatch_call(
-            METHOD_PLUGIN_RETRY,
-            serde_json::json!({}),
-            Duration::from_secs(15),
-            |result: Result<PluginInventoryResult, ConnectionError>| match result {
-                Ok(inventory) => UiMessage::PluginInventoryLoaded(inventory),
-                Err(err) => UiMessage::Toast(format!("Plugin retry failed: {}", err)),
-            },
-        );
-    }
-
-    pub fn plugin_inspect(&self, spec: &str, registry: Option<String>) {
-        let params = PluginInspectParams {
-            spec: spec.to_string(),
-            registry,
-        };
-        self.dispatch_call(
-            METHOD_PLUGIN_INSPECT,
-            params,
-            Duration::from_secs(30),
-            |result: Result<PluginOperationResult, ConnectionError>| match result {
-                Ok(value) => UiMessage::PluginOperationDone {
-                    label: "Inspect".to_string(),
-                    value: value.result,
-                },
-                Err(err) => UiMessage::Toast(format!("Inspect failed: {}", err)),
-            },
-        );
-    }
-
-    pub fn plugin_install(
-        &self,
-        spec: &str,
-        request_id: Option<String>,
-        registry: Option<String>,
-    ) {
-        let params = PluginInstallParams {
-            spec: spec.to_string(),
-            enabled: None,
-            save_exact: None,
-            request_id,
-            approved_builds: None,
-            registry,
-        };
-        self.dispatch_call(
-            METHOD_PLUGIN_INSTALL,
-            params,
-            Duration::from_secs(300),
-            |result: Result<PluginOperationResult, ConnectionError>| match result {
-                Ok(value) => UiMessage::PluginOperationDone {
-                    label: "Install".to_string(),
-                    value: value.result,
-                },
-                Err(err) => UiMessage::Toast(format!("Install failed: {}", err)),
-            },
-        );
-    }
-
-    pub fn plugin_cancel_install(&self, request_id: &str) {
-        let params = PluginRequestParams {
-            request_id: request_id.to_string(),
-        };
-        self.dispatch_call(
-            METHOD_PLUGIN_CANCEL_INSTALL,
-            params,
-            Duration::from_secs(10),
-            |result: Result<PluginOperationResult, ConnectionError>| match result {
-                Ok(value) => UiMessage::PluginOperationDone {
-                    label: "Cancel install".to_string(),
-                    value: value.result,
-                },
-                Err(err) => UiMessage::Toast(format!("Cancel failed: {}", err)),
-            },
-        );
-    }
-
-    pub fn plugin_wait_install(&self, request_id: &str) {
-        let params = PluginRequestParams {
-            request_id: request_id.to_string(),
-        };
-        self.dispatch_call(
-            METHOD_PLUGIN_WAIT_INSTALL,
-            params,
-            Duration::from_secs(300),
-            |result: Result<PluginOperationResult, ConnectionError>| match result {
-                Ok(value) => UiMessage::PluginOperationDone {
-                    label: "Install".to_string(),
-                    value: value.result,
-                },
-                Err(err) => UiMessage::Toast(format!("Wait install failed: {}", err)),
-            },
-        );
-    }
-
-    pub fn plugin_remove(&self, name: &str) {
-        let params = PluginRemoveParams {
-            name: name.to_string(),
-        };
-        self.dispatch_call(
-            METHOD_PLUGIN_REMOVE,
-            params,
-            Duration::from_secs(120),
-            |result: Result<PluginOperationResult, ConnectionError>| match result {
-                Ok(value) => UiMessage::PluginOperationDone {
-                    label: "Remove".to_string(),
-                    value: value.result,
-                },
-                Err(err) => UiMessage::Toast(format!("Remove failed: {}", err)),
-            },
-        );
-    }
-
-    pub fn plugin_versions(&self, name: &str) {
-        let params = PluginVersionsParams {
-            name: name.to_string(),
-            registry: None,
-        };
-        self.dispatch_call(
-            METHOD_PLUGIN_VERSIONS,
-            params,
-            Duration::from_secs(30),
-            |result: Result<PluginOperationResult, ConnectionError>| match result {
-                Ok(value) => UiMessage::PluginOperationDone {
-                    label: "Versions".to_string(),
-                    value: value.result,
-                },
-                Err(err) => UiMessage::Toast(format!("Versions failed: {}", err)),
-            },
-        );
-    }
-
-    pub fn plugin_update(&self, name: &str, version: &str) {
-        let params = PluginUpdateParams {
-            name: name.to_string(),
-            version: version.to_string(),
-            registry: None,
-        };
-        self.dispatch_call(
-            METHOD_PLUGIN_UPDATE,
-            params,
-            Duration::from_secs(300),
-            |result: Result<PluginOperationResult, ConnectionError>| match result {
-                Ok(value) => UiMessage::PluginOperationDone {
-                    label: "Update".to_string(),
-                    value: value.result,
-                },
-                Err(err) => UiMessage::Toast(format!("Update failed: {}", err)),
-            },
-        );
     }
 
     pub fn refresh_subagents(&self) {
@@ -4134,54 +4876,6 @@ impl SessionController {
         );
     }
 
-    pub fn credential_record_read(&self, key: &str) {
-        let params = CredentialRecordReadParams {
-            key: key.to_string(),
-        };
-        self.dispatch_call(
-            METHOD_CREDENTIALS_RECORDS_READ,
-            params,
-            Duration::from_secs(10),
-            |result: Result<CredentialRecordReadResult, ConnectionError>| match result {
-                Ok(read) => UiMessage::PluginOperationDone {
-                    label: "Credential record".to_string(),
-                    value: serde_json::json!({
-                        "key": read.key,
-                        "configured": read.configured,
-                        "kind": read.kind,
-                        "writable": read.writable,
-                        "hasKey": read.has_key,
-                        "envNames": read.env_names,
-                        "payloadRedacted": read.payload_redacted,
-                    }),
-                },
-                Err(err) => UiMessage::Toast(format!("Credential read failed: {}", err)),
-            },
-        );
-    }
-
-    pub fn credential_record_delete(&self, key: &str) {
-        let params = CredentialRecordDeleteParams {
-            key: key.to_string(),
-        };
-        self.dispatch_call(
-            METHOD_CREDENTIALS_RECORDS_DELETE,
-            params,
-            Duration::from_secs(10),
-            |result: Result<CredentialRecordMutationResult, ConnectionError>| match result {
-                Ok(metadata) => UiMessage::PluginOperationDone {
-                    label: "Credential deleted".to_string(),
-                    value: serde_json::json!({
-                        "key": metadata.metadata.key,
-                        "configured": metadata.metadata.configured,
-                    }),
-                },
-                Err(err) => UiMessage::Toast(format!("Credential delete failed: {}", err)),
-            },
-        );
-    }
-
-
     pub fn load_terminals(&self, session_id: &str) {
         self.dispatch_call(
             METHOD_TERMINAL_LIST,
@@ -4227,12 +4921,7 @@ impl SessionController {
         );
     }
 
-    pub fn poll_terminal_output(
-        &self,
-        session_id: &str,
-        terminal_id: &str,
-        offset: Option<u64>,
-    ) {
+    pub fn poll_terminal_output(&self, session_id: &str, terminal_id: &str, offset: Option<u64>) {
         self.dispatch_call(
             METHOD_TERMINAL_OUTPUT,
             TerminalOutputParams {
@@ -4271,104 +4960,234 @@ impl SessionController {
             Duration::from_secs(10),
             |result: Result<ScheduleCatalogResult, ConnectionError>| match result {
                 Ok(catalog) => UiMessage::ScheduleCatalogLoaded(catalog.result),
-                Err(err) => UiMessage::Toast(format!("Schedule catalog failed: {}", err)),
+                Err(_) => UiMessage::ScheduleCatalogFailed,
             },
         );
     }
 
-    pub fn schedule_create(&self, title: &str, prompt: &str, timing: serde_json::Value) {
+    pub fn schedule_create(
+        &self,
+        title: &str,
+        prompt: &str,
+        timing: ScheduleTiming,
+        target: Option<ScheduleTargetRequest>,
+    ) {
         self.dispatch_call(
             METHOD_SCHEDULE_CREATE,
             ScheduleCreateParams {
                 title: title.to_string(),
                 prompt: prompt.to_string(),
                 timing,
-                target: None,
+                target,
             },
             Duration::from_secs(15),
-            |result: Result<ScheduleOperationResult, ConnectionError>| match result {
-                Ok(value) => UiMessage::ScheduleOperationDone {
-                    label: "Created".to_string(),
-                    value: value.result,
+            move |result: Result<ScheduleOperationResult, ConnectionError>| match result {
+                Ok(value) => match serde_json::from_value::<
+                    crate::schedule_model::ScheduleCatalogEntry,
+                >(value.result)
+                {
+                    Ok(entry) => UiMessage::ScheduleMutationDone {
+                        message: String::new(),
+                        created: Some(entry),
+                    },
+                    Err(_) => UiMessage::ScheduleMutationFailed {
+                        op: ScheduleMutationOp::Create,
+                        failure: ScheduleFailure::SaveError,
+                    },
                 },
-                Err(err) => UiMessage::Toast(format!("Schedule create failed: {}", err)),
+                Err(err) => UiMessage::ScheduleMutationFailed {
+                    op: ScheduleMutationOp::Create,
+                    failure: failure_from_error(&err),
+                },
             },
         );
     }
 
     pub fn schedule_run(&self, id: &str) {
+        let op = ScheduleMutationOp::Run { id: id.to_string() };
         self.dispatch_call(
             METHOD_SCHEDULE_RUN,
             ScheduleRunParams { id: id.to_string() },
-            Duration::from_secs(10),
-            |result: Result<ScheduleOperationResult, ConnectionError>| match result {
-                Ok(value) => UiMessage::ScheduleOperationDone {
-                    label: "Run".to_string(),
-                    value: value.result,
-                },
-                Err(err) => UiMessage::Toast(format!("Schedule run failed: {}", err)),
+            Duration::from_secs(15),
+            move |result: Result<ScheduleOperationResult, ConnectionError>| {
+                let failure = match result {
+                    Ok(value) => failure_from_result(&value.result),
+                    Err(err) => Some(failure_from_error(&err)),
+                };
+                match failure {
+                    Some(failure) => UiMessage::ScheduleMutationFailed {
+                        op,
+                        failure: run_failure(failure),
+                    },
+                    None => UiMessage::ScheduleMutationDone {
+                        message: String::new(),
+                        created: None,
+                    },
+                }
             },
         );
     }
 
-    pub fn schedule_history(&self, id: &str) {
+    pub fn schedule_history(&self, id: &str, before: Option<String>) {
+        let id_owned = id.to_string();
         self.dispatch_call(
             METHOD_SCHEDULE_HISTORY,
             ScheduleHistoryParams {
                 id: id.to_string(),
-                limit: Some(50),
-                before: None,
+                limit: Some(HISTORY_PAGE_LIMIT),
+                before,
             },
             Duration::from_secs(10),
-            |result: Result<ScheduleOperationResult, ConnectionError>| match result {
-                Ok(value) => UiMessage::ScheduleHistoryLoaded(value.result),
-                Err(err) => UiMessage::Toast(format!("Schedule history failed: {}", err)),
+            move |result: Result<ScheduleHistoryResult, ConnectionError>| {
+                let page = match result {
+                    Ok(value) => match value.result {
+                        ScheduleHistoryOutcome::Page(page) => Ok(page),
+                        ScheduleHistoryOutcome::Miss { code } => {
+                            Err(history_miss(&code))
+                        }
+                    },
+                    Err(_) => Err(ScheduleHistoryMiss::Failed),
+                };
+                UiMessage::ScheduleHistoryLoaded { id: id_owned, page }
             },
         );
     }
 
-    pub fn schedule_delete(&self, id: &str) {
+    pub fn schedule_delete(&self, id: &str, expected_updated_at: Option<String>) {
+        let locale = ui_locale();
+        let id_owned = id.to_string();
         self.dispatch_call(
             METHOD_SCHEDULE_DELETE,
             ScheduleDeleteParams {
                 id: id.to_string(),
-                expected_updated_at: None,
+                expected_updated_at,
             },
             Duration::from_secs(10),
-            |result: Result<ScheduleOperationResult, ConnectionError>| match result {
-                Ok(value) => UiMessage::ScheduleOperationDone {
-                    label: "Deleted".to_string(),
-                    value: value.result,
-                },
-                Err(err) => UiMessage::Toast(format!("Schedule delete failed: {}", err)),
+            move |result: Result<ScheduleOperationResult, ConnectionError>| {
+                let failure = match result {
+                    Ok(value) => failure_from_result(&value.result),
+                    Err(err) => Some(failure_from_error(&err)),
+                };
+                match failure {
+                    Some(failure) => UiMessage::ScheduleMutationFailed {
+                        op: ScheduleMutationOp::Delete { id: id_owned },
+                        failure,
+                    },
+                    None => UiMessage::ScheduleMutationDone {
+                        message: delete_toast(locale).to_string(),
+                        created: None,
+                    },
+                }
             },
         );
     }
-    pub fn schedule_edit(&self, id: &str, patch: serde_json::Value) {
+
+    pub fn schedule_edit(
+        &self,
+        id: &str,
+        patch: SchedulePatch,
+        expected_updated_at: Option<String>,
+    ) {
+        let op = ScheduleMutationOp::Edit { id: id.to_string() };
         self.dispatch_call(
             METHOD_SCHEDULE_EDIT,
             ScheduleEditParams {
                 id: id.to_string(),
                 action: "update".to_string(),
                 patch: Some(patch),
-                expected_updated_at: None,
+                expected_updated_at,
             },
-            Duration::from_secs(10),
-            |result: Result<ScheduleOperationResult, ConnectionError>| match result {
-                Ok(value) => UiMessage::ScheduleOperationDone {
-                    label: "Updated".to_string(),
-                    value: value.result,
-                },
-                Err(err) => UiMessage::Toast(format!("Schedule edit failed: {}", err)),
+            Duration::from_secs(15),
+            move |result: Result<ScheduleOperationResult, ConnectionError>| {
+                let failure = match result {
+                    Ok(value) => failure_from_result(&value.result),
+                    Err(err) => Some(failure_from_error(&err)),
+                };
+                match failure {
+                    Some(failure) => UiMessage::ScheduleMutationFailed { op, failure },
+                    None => UiMessage::ScheduleMutationDone {
+                        message: String::new(),
+                        created: None,
+                    },
+                }
             },
         );
     }
+
+    pub fn schedule_delete_inactive(&self) {
+        let locale = ui_locale();
+        self.dispatch_call(
+            METHOD_SCHEDULE_DELETE_INACTIVE,
+            serde_json::json!({}),
+            Duration::from_secs(15),
+            move |result: Result<ScheduleOperationResult, ConnectionError>| match result {
+                Ok(value) => {
+                    let deleted = value
+                        .result
+                        .get("deleted")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(0);
+                    UiMessage::ScheduleMutationDone {
+                        message: clear_ended_toast(deleted, locale),
+                        created: None,
+                    }
+                }
+                Err(_) => UiMessage::ScheduleMutationFailed {
+                    op: ScheduleMutationOp::ClearEnded,
+                    failure: ScheduleFailure::SaveError,
+                },
+            },
+        );
+    }
+
+    pub fn schedule_delivery_limits(&self) {
+        self.dispatch_call(
+            METHOD_SCHEDULE_DELIVERY_LIMITS,
+            serde_json::json!({}),
+            Duration::from_secs(10),
+            |result: Result<ScheduleOperationResult, ConnectionError>| match result {
+                Ok(value) => UiMessage::ScheduleLimitsLoaded(
+                    value
+                        .result
+                        .get("newSessionIntervalSeconds")
+                        .and_then(serde_json::Value::as_i64),
+                ),
+                Err(_) => UiMessage::ScheduleLimitsLoaded(None),
+            },
+        );
+    }
+
+    pub fn start_schedule_session(&self) {
+        self.start_session_in(None, None, Some(create_prompt(ui_locale())));
+    }
+
+    pub fn open_schedule_session(&self, session_id: &str) {
+        self.panel_state.set_active_panel(None);
+        self.follow_session(session_id);
+    }
+
+    pub fn workspace_choices(&self) -> Vec<WorkspaceView> {
+        self.workspaces.borrow().clone()
+    }
+
+    pub fn session_archived(&self, session_id: &str) -> Option<bool> {
+        self.sessions_cache
+            .borrow()
+            .iter()
+            .find(|item| item.id == session_id)
+            .map(|item| item.is_archived)
+    }
+
+    pub fn session_display_title(&self, session_id: &str) -> Option<String> {
+        self.sessions_cache
+            .borrow()
+            .iter()
+            .find(|item| item.id == session_id)
+            .map(|item| item.title.clone())
+    }
 }
 
-fn matches_active_session(
-    active: &Rc<RefCell<Option<SessionModel>>>,
-    session_id: &str,
-) -> bool {
+fn matches_active_session(active: &Rc<RefCell<Option<SessionModel>>>, session_id: &str) -> bool {
     active
         .borrow()
         .as_ref()
@@ -4377,6 +5196,9 @@ fn matches_active_session(
 }
 
 pub fn permission_display_label(state: &PermissionGetResult) -> String {
+    if let Some(label) = permission_preset_builtin_label(&state.current_value) {
+        return label.to_string();
+    }
     state
         .catalog
         .options
@@ -4385,4 +5207,34 @@ pub fn permission_display_label(state: &PermissionGetResult) -> String {
         .find(|option| option.value == state.current_value)
         .map(|option| option.name.clone())
         .unwrap_or_else(|| state.current_value.clone())
+}
+
+fn permission_preset_builtin_label(value: &str) -> Option<&'static str> {
+    match value {
+        "read-only" => Some("仅可查看"),
+        "workspace-write" => Some("工作区内修改"),
+        "danger-full-access" => Some("完全权限"),
+        "auto" => Some("自动审查"),
+        _ => None,
+    }
+}
+
+fn permission_preset_label(option: &PresetOptionItem) -> String {
+    permission_preset_builtin_label(&option.value)
+        .map(str::to_string)
+        .unwrap_or_else(|| option.name.clone())
+}
+
+fn permission_preset_icon(value: &str) -> &'static str {
+    match value {
+        "read-only" => "changes-prevent-symbolic",
+        "workspace-write" => "document-edit-symbolic",
+        "danger-full-access" => "dialog-warning-symbolic",
+        "auto" => "emblem-system-symbolic",
+        _ => "dialog-question-symbolic",
+    }
+}
+
+fn permission_preset_requires_confirmation(value: &str) -> bool {
+    matches!(value, "danger-full-access" | "auto")
 }

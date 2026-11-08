@@ -1,13 +1,16 @@
 use crate::ui::controller::SessionController;
 use crate::ui::conversation::ConversationView;
 use crate::ui::desktop::{begin_background_continuation, build_shortcuts_window};
+use crate::ui::layout::{
+    SIDEBAR_AUTO_COLLAPSE, SIDEBAR_COLLAPSED, SIDEBAR_DEFAULT, SIDEBAR_DRAWER_BREAKPOINT,
+};
 use crate::ui::right_dock::RightDock;
 use crate::ui::settings::show_settings_dialog;
-use crate::ui::sidebar::Sidebar;
+use crate::ui::sidebar::{animations_enabled, PanelState, Sidebar};
 use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 pub struct MainWindow {
@@ -17,61 +20,148 @@ pub struct MainWindow {
     sidebar: Rc<Sidebar>,
     conversation_view: Rc<ConversationView>,
     right_dock: Rc<RightDock>,
-    window_title: adw::WindowTitle,
-    model_btn: gtk4::Button,
     controller: RefCell<Option<Rc<SessionController>>>,
-    shortcuts_window: Rc<RefCell<Option<gtk4::ShortcutsWindow>>>,
     startup_banner: adw::Banner,
     content_stack: gtk4::Stack,
     startup_page: adw::StatusPage,
     startup_spinner: gtk4::Spinner,
-}
-fn apply_responsive_layout(
-    window: &adw::ApplicationWindow,
-    split_view: &adw::OverlaySplitView,
-    sidebar: &Sidebar,
-) {
-    let width = if window.width() > 0 {
-        window.width()
-    } else {
-        window.default_width()
-    };
-    let rail = width < 1024 && width >= 768;
-    sidebar.set_rail_mode(rail);
-    sidebar
-        .widget()
-        .set_width_request(if rail { 56 } else { 280 });
-    split_view.set_collapsed(width < 768);
+    panel_state: Rc<PanelState>,
+    chrome: Rc<SidebarChrome>,
 }
 
-fn configure_responsive_layout(
-    window: &adw::ApplicationWindow,
-    split_view: &adw::OverlaySplitView,
-    sidebar: &Rc<Sidebar>,
-) {
-    apply_responsive_layout(window, split_view, sidebar);
-    let split_for_width = split_view.clone();
-    let sidebar_for_width = sidebar.clone();
-    window.connect_default_width_notify(move |window| {
-        apply_responsive_layout(window, &split_for_width, &sidebar_for_width);
-    });
-    let split_for_map = split_view.clone();
-    let sidebar_for_map = sidebar.clone();
-    window.connect_map(move |window| {
-        apply_responsive_layout(window, &split_for_map, &sidebar_for_map);
-    });
+struct SidebarLayout {
+    collapsed: Cell<bool>,
+    narrow_expanded: Cell<bool>,
+    last_width: Cell<i32>,
+}
+
+impl SidebarLayout {
+    fn new() -> Self {
+        Self {
+            collapsed: Cell::new(false),
+            narrow_expanded: Cell::new(false),
+            last_width: Cell::new(0),
+        }
+    }
+}
+
+struct SidebarChrome {
+    window: adw::ApplicationWindow,
+    split_view: adw::OverlaySplitView,
+    sidebar: Rc<Sidebar>,
+    conversation_view: Rc<ConversationView>,
+    layout: Rc<SidebarLayout>,
+    width_animation: Rc<RefCell<Option<adw::TimedAnimation>>>,
+    opener: gtk4::Button,
+}
+
+impl SidebarChrome {
+    fn window_width(&self) -> i32 {
+        if self.window.width() > 0 {
+            self.window.width()
+        } else {
+            self.window.default_width()
+        }
+    }
+
+    fn apply(&self, force: bool) {
+        let width = self.window_width();
+        if !force && width == self.layout.last_width.get() {
+            return;
+        }
+        let animate = self.layout.last_width.get() != 0 && animations_enabled();
+        self.layout.last_width.set(width);
+        let drawer = f64::from(width) < SIDEBAR_DRAWER_BREAKPOINT;
+        self.split_view.set_collapsed(drawer);
+        if drawer {
+            self.sidebar.set_rail(false, animate);
+            self.animate_width(SIDEBAR_DEFAULT, animate);
+            self.update_opener(!self.split_view.shows_sidebar());
+            return;
+        }
+        self.update_opener(false);
+        let rail = if f64::from(width) < SIDEBAR_AUTO_COLLAPSE {
+            !self.layout.narrow_expanded.get()
+        } else {
+            self.layout.collapsed.get()
+        };
+        self.sidebar.set_rail(rail, animate);
+        let target = if rail {
+            SIDEBAR_COLLAPSED
+        } else {
+            SIDEBAR_DEFAULT
+        };
+        self.animate_width(target, animate);
+    }
+
+    fn toggle(&self) {
+        let width = self.window_width();
+        if f64::from(width) < SIDEBAR_DRAWER_BREAKPOINT {
+            self.split_view.set_show_sidebar(false);
+            return;
+        }
+        if f64::from(width) < SIDEBAR_AUTO_COLLAPSE {
+            self.layout
+                .narrow_expanded
+                .set(!self.layout.narrow_expanded.get());
+        } else {
+            self.layout.collapsed.set(!self.layout.collapsed.get());
+        }
+        self.apply(true);
+    }
+
+    fn expand(&self) {
+        let width = self.window_width();
+        if f64::from(width) < SIDEBAR_DRAWER_BREAKPOINT {
+            self.split_view.set_show_sidebar(true);
+            return;
+        }
+        if f64::from(width) < SIDEBAR_AUTO_COLLAPSE {
+            self.layout.narrow_expanded.set(true);
+        } else {
+            self.layout.collapsed.set(false);
+        }
+        self.apply(true);
+    }
+
+    fn update_opener(&self, visible: bool) {
+        self.opener.set_visible(visible);
+        self.conversation_view.set_drawer_opener_visible(visible);
+    }
+
+    fn animate_width(&self, target: f64, animate: bool) {        let split_view = &self.split_view;
+        if !animate {
+            split_view.set_min_sidebar_width(target);
+            split_view.set_max_sidebar_width(target);
+            return;
+        }
+        let from = split_view.min_sidebar_width();
+        if (from - target).abs() < f64::EPSILON {
+            return;
+        }
+        let split_for_target = split_view.clone();
+        let step = adw::CallbackAnimationTarget::new(move |value| {
+            let width = from + (target - from) * value;
+            split_for_target.set_min_sidebar_width(width);
+            split_for_target.set_max_sidebar_width(width);
+        });
+        let animation = adw::TimedAnimation::new(split_view, 0.0, 1.0, 300, step);
+        animation.set_easing(adw::Easing::EaseInOutCubic);
+        *self.width_animation.borrow_mut() = Some(animation.clone());
+        animation.play();
+    }
 }
 
 impl MainWindow {
     pub fn new(app: &adw::Application) -> Self {
-        let sidebar = Rc::new(Sidebar::new());
+        let panel_state = PanelState::new();
+        let sidebar = Sidebar::new(panel_state.clone());
         let conversation_view = Rc::new(ConversationView::new());
         let right_dock = Rc::new(RightDock::new());
 
         let split_view = adw::OverlaySplitView::builder()
-            .sidebar_width_fraction(0.24)
-            .min_sidebar_width(264.0)
-            .max_sidebar_width(420.0)
+            .min_sidebar_width(SIDEBAR_DEFAULT)
+            .max_sidebar_width(SIDEBAR_DEFAULT)
             .build();
         split_view.set_sidebar(Some(sidebar.widget()));
 
@@ -88,50 +178,25 @@ impl MainWindow {
         split_view.set_content(Some(&paned));
         split_view.set_show_sidebar(true);
 
-        let header_bar = adw::HeaderBar::builder()
-            .css_classes(["dsh-header-bar"])
-            .show_title(false)
-            .build();
-
-
-        let window_title = adw::WindowTitle::builder()
-            .title("dsh")
-            .subtitle(crate::ui::copy::Copybook::for_code("system").new_session)
-            .css_classes(["dsh-header-title"])
-            .build();
-        header_bar.set_title_widget(None::<&gtk4::Widget>);
-
-        let settings_btn = gtk4::Button::builder()
-            .icon_name("emblem-system-symbolic")
-            .tooltip_text("Settings (Ctrl+,)")
-            .action_name("app.settings")
+        let opener_btn = gtk4::Button::builder()
+            .icon_name("sidebar-show-symbolic")
+            .tooltip_text(crate::ui::copy::Copybook::for_code("system").open_sidebar)
+            .css_classes(["dsh-icon-button", "dsh-chrome-opener"])
+            .halign(gtk4::Align::Start)
+            .valign(gtk4::Align::Start)
             .visible(false)
             .build();
-        header_bar.pack_end(&settings_btn);
 
-        let new_session_btn = gtk4::Button::builder()
-            .icon_name("list-add-symbolic")
-            .tooltip_text("New Session (Ctrl+N)")
-            .action_name("win.new-session")
-            .visible(false)
+        let window_controls = gtk4::WindowControls::new(gtk4::PackType::End);
+        let controls_box = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Horizontal)
+            .halign(gtk4::Align::End)
+            .valign(gtk4::Align::Start)
+            .margin_top(6)
+            .margin_end(8)
+            .css_classes(["dsh-window-chrome"])
             .build();
-        header_bar.pack_end(&new_session_btn);
-
-        let dock_btn = gtk4::Button::builder()
-            .icon_name("sidebar-show-right-symbolic")
-            .tooltip_text(crate::ui::copy::Copybook::for_code("system").open_right_sidebar)
-            .action_name("win.toggle-dock")
-            .css_classes(["dsh-icon-button"])
-            .build();
-        header_bar.pack_end(&dock_btn);
-
-        let model_btn = gtk4::Button::builder()
-            .label("deepseek-chat")
-            .css_classes(["flat"])
-            .tooltip_text("Active Model")
-            .visible(false)
-            .build();
-        header_bar.pack_end(&model_btn);
+        controls_box.append(&window_controls);
 
         let startup_banner = adw::Banner::builder()
             .title("dsh failed to start")
@@ -149,17 +214,23 @@ impl MainWindow {
             .description("Connecting to the local harness")
             .child(&startup_spinner)
             .build();
+        let startup_handle = gtk4::WindowHandle::new();
+        startup_handle.set_child(Some(&startup_page));
         let content_stack = gtk4::Stack::builder()
             .transition_type(gtk4::StackTransitionType::Crossfade)
             .build();
-        content_stack.add_named(&startup_page, Some("startup"));
+        content_stack.add_named(&startup_handle, Some("startup"));
         content_stack.add_named(&split_view, Some("main"));
         content_stack.set_visible_child_name("startup");
 
+        let overlay = gtk4::Overlay::new();
+        overlay.set_child(Some(&content_stack));
+        overlay.add_overlay(&opener_btn);
+        overlay.add_overlay(&controls_box);
+
         let toolbar_view = adw::ToolbarView::new();
-        toolbar_view.add_top_bar(&header_bar);
         toolbar_view.add_top_bar(&startup_banner);
-        toolbar_view.set_content(Some(&content_stack));
+        toolbar_view.set_content(Some(&overlay));
 
         let toast_overlay = adw::ToastOverlay::new();
         toast_overlay.set_child(Some(&toolbar_view));
@@ -172,34 +243,112 @@ impl MainWindow {
             .default_height(820)
             .css_classes(["dsh-window"])
             .build();
-        configure_responsive_layout(&window, &split_view, &sidebar);
 
-        let split_view_weak = split_view.downgrade();
-        let toggle_sidebar_action = gtk4::gio::SimpleAction::new("toggle-sidebar", None);
-        toggle_sidebar_action.connect_activate(move |_, _| {
-            if let Some(sv) = split_view_weak.upgrade() {
-                sv.set_show_sidebar(!sv.shows_sidebar());
-            }
+        let chrome = Rc::new(SidebarChrome {
+            window: window.clone(),
+            split_view: split_view.clone(),
+            sidebar: sidebar.clone(),
+            conversation_view: conversation_view.clone(),
+            layout: Rc::new(SidebarLayout::new()),
+            width_animation: Rc::new(RefCell::new(None)),
+            opener: opener_btn.clone(),
         });
+        {
+            let chrome_for_resize = chrome.clone();
+            let layout_hooked = Rc::new(Cell::new(false));
+            window.connect_realize(move |window| {
+                if layout_hooked.get() {
+                    return;
+                }
+                let Some(surface) = window.surface() else {
+                    return;
+                };
+                layout_hooked.set(true);
+                let chrome_for_layout = chrome_for_resize.clone();
+                surface.connect_layout(move |_, width, _| {
+                    if width > 0 {
+                        chrome_for_layout.apply(false);
+                    }
+                });
+            });
+        }        {
+            let chrome_for_show = chrome.clone();
+            split_view.connect_show_sidebar_notify(move |split_view| {
+                let width = chrome_for_show.window_width();
+                chrome_for_show.update_opener(
+                    f64::from(width) < SIDEBAR_DRAWER_BREAKPOINT && !split_view.shows_sidebar(),
+                );
+            });
+        }
+        {
+            let chrome_for_opener = chrome.clone();
+            opener_btn.connect_clicked(move |_| {
+                chrome_for_opener.split_view.set_show_sidebar(true);
+            });
+        }
+
+        let toggle_sidebar_action = gtk4::gio::SimpleAction::new("toggle-sidebar", None);
+        {
+            let chrome_for_toggle = chrome.clone();
+            toggle_sidebar_action.connect_activate(move |_, _| {
+                chrome_for_toggle.toggle();
+            });
+        }
         window.add_action(&toggle_sidebar_action);
 
-        let conv_plugins = Rc::downgrade(&conversation_view);
+        let focus_search_action = gtk4::gio::SimpleAction::new("focus-search", None);
+        {
+            let chrome_for_search = chrome.clone();
+            let search_entry = sidebar.search_entry().clone();
+            focus_search_action.connect_activate(move |_, _| {
+                chrome_for_search.expand();
+                search_entry.grab_focus();
+            });
+        }
+        window.add_action(&focus_search_action);
+
+        let panel_plugins = panel_state.clone();
         let show_plugins_action = gtk4::gio::SimpleAction::new("show-plugins", None);
         show_plugins_action.connect_activate(move |_, _| {
-            if let Some(cv) = conv_plugins.upgrade() {
-                cv.select_panel("plugins");
-            }
+            panel_plugins.set_active_panel(Some("plugins"));
         });
         window.add_action(&show_plugins_action);
 
-        let conv_schedules = Rc::downgrade(&conversation_view);
+        let panel_schedules = panel_state.clone();
         let show_schedules_action = gtk4::gio::SimpleAction::new("show-schedules", None);
         show_schedules_action.connect_activate(move |_, _| {
-            if let Some(cv) = conv_schedules.upgrade() {
-                cv.select_panel("schedules");
-            }
+            panel_schedules.set_active_panel(Some("schedules"));
         });
         window.add_action(&show_schedules_action);
+
+        let open_plugin_target = gtk4::gio::SimpleAction::new(
+            "open-plugin-target",
+            Some(&gtk4::glib::VariantTy::STRING),
+        );
+        {
+            let conv_for_plugin = conversation_view.clone();
+            open_plugin_target.connect_activate(move |_, param| {
+                if let Some(target) = param.and_then(|value| value.get::<String>()) {
+                    conv_for_plugin.plugins_page().open_plugin_target(&target);
+                }
+            });
+        }
+        window.add_action(&open_plugin_target);
+
+        {
+            let conv_for_panel = conversation_view.clone();
+            let chrome_for_panel = chrome.clone();
+            panel_state.connect_changed(move |panel| {
+                conv_for_panel.select_panel(panel.unwrap_or("conversation"));
+                let width = f64::from(chrome_for_panel.window_width());
+                if width < SIDEBAR_DRAWER_BREAKPOINT {
+                    chrome_for_panel.split_view.set_show_sidebar(false);
+                } else if panel.is_some() && width < SIDEBAR_AUTO_COLLAPSE {
+                    chrome_for_panel.layout.narrow_expanded.set(false);
+                    chrome_for_panel.apply(true);
+                }
+            });
+        }
 
 
         let shortcuts_window = Rc::new(RefCell::new(None));
@@ -235,14 +384,13 @@ impl MainWindow {
             sidebar,
             conversation_view,
             right_dock,
-            window_title,
-            model_btn,
             controller: RefCell::new(None),
-            shortcuts_window,
             startup_banner,
             content_stack,
             startup_page,
             startup_spinner,
+            panel_state,
+            chrome,
         }
     }
 
@@ -255,19 +403,6 @@ impl MainWindow {
             }
         });
         self.window.add_action(&new_workspace_action);
-
-        let ctrl_select_workspace = Rc::downgrade(&controller);
-        let select_workspace_action = gtk4::gio::SimpleAction::new(
-            "select-workspace",
-            Some(&gtk4::glib::VariantTy::STRING),
-        );
-        select_workspace_action.connect_activate(move |_, param| {
-            let id = param.and_then(|p| p.get::<String>());
-            if let (Some(c), Some(id)) = (ctrl_select_workspace.upgrade(), id) {
-                c.switch_workspace(&id);
-            }
-        });
-        self.window.add_action(&select_workspace_action);
 
         let ctrl_rename_workspace = Rc::downgrade(&controller);
         let rename_workspace_action = gtk4::gio::SimpleAction::new(
@@ -499,6 +634,26 @@ impl MainWindow {
         });
         self.window.add_action(&new_session_in_workspace);
 
+        let ctrl_create_plugin = Rc::downgrade(&controller);
+        let create_plugin_action = gtk4::gio::SimpleAction::new("create-plugin", None);
+        create_plugin_action.connect_activate(move |_, _| {
+            if let Some(c) = ctrl_create_plugin.upgrade() {
+                c.start_plugin_creator_session();
+            }
+        });
+        self.window.add_action(&create_plugin_action);
+
+        let chrome_for_expand = self.chrome.clone();
+        let ctrl_expand_add = Rc::downgrade(&controller);
+        let expand_new_workspace = gtk4::gio::SimpleAction::new("expand-new-workspace", None);
+        expand_new_workspace.connect_activate(move |_, _| {
+            chrome_for_expand.expand();
+            if let Some(c) = ctrl_expand_add.upgrade() {
+                c.prompt_new_workspace();
+            }
+        });
+        self.window.add_action(&expand_new_workspace);
+
         let ctrl_reveal = Rc::downgrade(&controller);
         let reveal_workspace = gtk4::gio::SimpleAction::new(
             "reveal-workspace",
@@ -599,13 +754,6 @@ impl MainWindow {
         });
         self.window.add_action(&fork_session_action);
 
-        let ctrl_model = Rc::downgrade(&controller);
-        self.model_btn.connect_clicked(move |btn| {
-            if let Some(c) = ctrl_model.upgrade() {
-                c.open_model_picker(btn);
-            }
-        });
-
         let ctrl_settings = Rc::downgrade(&controller);
         let show_settings_action = gtk4::gio::SimpleAction::new("show-account", None);
         show_settings_action.connect_activate(move |_, _| {
@@ -617,8 +765,8 @@ impl MainWindow {
 
         let ctrl_close = Rc::downgrade(&controller);
         let window_for_close = self.window.clone();
-        self.window.connect_close_request(move |_| {
-            if let Some(c) = ctrl_close.upgrade() {
+        self.window.connect_close_request(move |_| {            if let Some(c) = ctrl_close.upgrade() {
+                c.remember_composer_draft();
                 if c.any_session_running() {
                     if let Some((session_id, title)) = c.running_session_info() {
                         if let Some(app) = window_for_close.application() {
@@ -636,6 +784,16 @@ impl MainWindow {
                 }
             }
             gtk4::glib::Propagation::Proceed
+        });
+        let dock_for_panel = self.conversation_view.header_dock_button().clone();
+        let panel_for_dock = self.panel_state.clone();
+        let ctrl_for_dock = Rc::downgrade(&controller);
+        self.panel_state.connect_changed(move |_| {
+            if let Some(c) = ctrl_for_dock.upgrade() {
+                dock_for_panel.set_visible(
+                    c.active_session_id().is_some() && panel_for_dock.active_panel().is_none(),
+                );
+            }
         });
         *self.controller.borrow_mut() = Some(controller);
     }
@@ -656,6 +814,14 @@ impl MainWindow {
         &self.sidebar
     }
 
+    pub fn panel_state(&self) -> &Rc<PanelState> {
+        &self.panel_state
+    }
+
+    pub fn dock_button(&self) -> &gtk4::Button {
+        self.conversation_view.header_dock_button()
+    }
+
     pub fn conversation_view_rc(&self) -> &Rc<ConversationView> {
         &self.conversation_view
     }
@@ -666,14 +832,6 @@ impl MainWindow {
 
     pub fn split_view(&self) -> &adw::OverlaySplitView {
         &self.split_view
-    }
-
-    pub fn window_title(&self) -> &adw::WindowTitle {
-        &self.window_title
-    }
-
-    pub fn shortcuts_window(&self) -> &Rc<RefCell<Option<gtk4::ShortcutsWindow>>> {
-        &self.shortcuts_window
     }
 
     pub fn startup_banner(&self) -> &adw::Banner {

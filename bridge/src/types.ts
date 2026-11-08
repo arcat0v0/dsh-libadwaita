@@ -47,6 +47,7 @@ export const BRIDGE_ERROR_CODES = {
   TERMINAL_NOT_FOUND: -32042,
   ACCOUNT_UNAVAILABLE: -32043,
   MODEL_DISCOVERY_FAILED: -32044,
+  SCHEDULE_OPERATION_FAILED: -32045,
 } as const;
 
 export class BridgeError extends Error {
@@ -319,11 +320,29 @@ export interface PluginToggleParams {
   id: string;
 }
 
+export interface PluginBundleToggleParams {
+  name: string;
+}
+
+export interface PluginChangeError {
+  code: string;
+  diagnostic?: string;
+  incompatible?: unknown[];
+}
+
 export interface PluginToggleResult {
-  id: string;
-  enabled: boolean;
-  status: string;
-  restartRequired: boolean;
+  changed: boolean;
+  application: 'applied' | 'restart-required' | 'overridden' | 'cancelled' | 'failed';
+  restartReason?:
+    | 'no-hmr'
+    | 'package-moved'
+    | 'host-module'
+    | 'unmanaged-plugin'
+    | 'module-comparison';
+  stage: 'install' | 'enable' | 'remove';
+  target: string;
+  enabled?: boolean;
+  error?: PluginChangeError;
 }
 
 export interface CredentialStatusItem {
@@ -986,6 +1005,7 @@ export interface AttachmentReadResult {
 export interface PluginDetailParams {
   name: string;
   language?: string;
+  npmFileSources?: string[];
 }
 
 export interface PluginInspectParams {
@@ -1018,6 +1038,7 @@ export interface PluginVersionsParams {
 export interface PluginUpdateParams {
   name: string;
   version: string;
+  requestId?: string;
   registry?: string;
 }
 
@@ -1030,10 +1051,45 @@ export interface PluginOperationResult {
   result: unknown;
 }
 
+export interface PluginRegistryProbeResult {
+  result: string | null;
+}
+
+export interface PluginMarketSetIndexesParams {
+  urls: string[];
+}
+
+export interface PluginMarketSearchParams {
+  url: string;
+  query: Record<string, unknown>;
+}
+
+export interface PluginMarketReadEntryDetailParams {
+  url: string;
+  name: string;
+  version: string;
+  language?: string;
+  refresh?: boolean;
+  npmFileSources?: string[];
+}
+
 export interface PluginInstallStateNotification {
   requestId: string;
   phase: string;
   attempt?: unknown;
+}
+
+export interface PluginChangedNotification {
+  reason: string;
+}
+
+export interface PluginUpdateStateNotification {
+  requestId: string;
+  step: string;
+}
+
+export interface PluginMarketChangedNotification {
+  changed: true;
 }
 
 export interface PluginInstallLogNotification {
@@ -1289,6 +1345,10 @@ declare module '@deepseek-ai/cordis' {
     'goal/activation-changed'(payload: unknown): void;
     'plugin-manager/install-state'(payload: unknown): void;
     'plugin-manager/install-log'(payload: unknown): void;
+    'plugin-manager/changed'(payload: unknown): void;
+    'plugin-manager/update-state'(payload: unknown): void;
+    'plugin-market/changed'(payload: unknown): void;
     'schedule/changed'(): void;
+    'schedule/resolve-agent'(sessionId: string, next: () => Promise<unknown>): Promise<unknown>;
   }
 }

@@ -15,6 +15,10 @@ impl DraftStore {
         self.drafts.get(session_id).map(|value| value.as_str())
     }
 
+    pub fn text_for(&self, session_id: &str) -> String {
+        self.drafts.get(session_id).cloned().unwrap_or_default()
+    }
+
     pub fn set(&mut self, session_id: &str, text: &str) {
         if text.trim().is_empty() {
             self.drafts.remove(session_id);

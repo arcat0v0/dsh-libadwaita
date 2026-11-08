@@ -5,6 +5,7 @@ use crate::ui::copy::Copybook;
 use crate::ui::desktop::{open_path_in_default_app, open_terminal_in_dir};
 use crate::ui::message_renderer::{render_block, AssistantLiveHandle};
 use crate::ui::goal_bar::GoalBar;
+use crate::ui::plugins_page::PluginsPage;
 use crate::ui::queue_dock::QueueDock;
 use crate::ui::schedules::SchedulesPage;
 use crate::ui::trajectory::TrajectoryView;
@@ -15,6 +16,64 @@ use gtk4::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
+
+pub fn compact_token_count(value: u64) -> String {
+    if value < 1_000 {
+        return value.to_string();
+    }
+    if value < 1_000_000 {
+        return format!("{:.1}K", value as f64 / 1_000.0);
+    }
+    format!("{:.1}M", value as f64 / 1_000_000.0)
+}
+
+pub fn token_usage_total(usage: &serde_json::Value) -> Option<u64> {
+    let buckets = [
+        "uncachedInputTokens",
+        "outputTokens",
+        "cacheReadTokens",
+        "cacheWriteTokens",
+    ];
+    let mut total = 0u64;
+    let mut found = false;
+    for key in buckets {
+        if let Some(value) = usage.get(key).and_then(|value| value.as_u64()) {
+            total = total.saturating_add(value);
+            found = true;
+        }
+    }
+    found.then_some(total)
+}
+
+pub fn context_occupancy(pressure: &serde_json::Value) -> Option<(u64, u64, u32)> {
+    let used = pressure
+        .get("projectedTokens")
+        .and_then(|value| value.as_u64())
+        .or_else(|| pressure.get("pressureTokens").and_then(|value| value.as_u64()))?;
+    let window = pressure
+        .get("contextWindow")
+        .and_then(|value| value.as_u64())
+        .filter(|window| *window > 0)?;
+    let percent =
+        (((used.saturating_mul(100) + window / 2) / window).min(100)) as u32;
+    Some((used, window, percent))
+}
+
+pub fn context_breakdown_rows(breakdown: &serde_json::Value) -> Vec<(&'static str, u64)> {
+    [
+        ("系统", "systemTokens"),
+        ("工具", "toolsTokens"),
+        ("消息", "messageTokens"),
+    ]
+    .into_iter()
+    .filter_map(|(label, key)| {
+        breakdown
+            .get(key)
+            .and_then(|value| value.as_u64())
+            .map(|value| (label, value))
+    })
+    .collect()
+}
 
 pub struct ConversationView {
     stack: gtk4::Stack,
@@ -39,17 +98,21 @@ pub struct ConversationView {
     on_load_older: Rc<RefCell<Option<Box<dyn Fn()>>>>,
     live_handle: RefCell<Option<AssistantLiveHandle>>,
     schedules_page: SchedulesPage,
+    plugins_page: PluginsPage,
     trajectory_page: adw::ViewStackPage,
     trajectory_view: TrajectoryView,
     view_mode: Cell<TranscriptView>,
     on_view_mode: Rc<RefCell<Option<Box<dyn Fn(TranscriptView)>>>>,
     view_dropdown: gtk4::DropDown,
+    view_stack: adw::ViewStack,
+    on_view_selected: Rc<RefCell<Option<Box<dyn Fn(&str)>>>>,
     rendered_count: Cell<usize>,
     active_cwd: Rc<RefCell<PathBuf>>,
     title_activate: Rc<RefCell<Option<Box<dyn Fn()>>>>,
     hero_composer_slot: gtk4::Box,
     composer_dock: gtk4::Box,
     session_header: gtk4::Box,
+    dock_button: gtk4::Button,
     switcher_bar: gtk4::Box,
     preset_menu: gtk4::MenuButton,
     preset_label: gtk4::Label,
@@ -74,8 +137,8 @@ impl ConversationView {
             .orientation(gtk4::Orientation::Horizontal)
             .spacing(12)
             .margin_start(12)
-            .margin_end(12)
-            .margin_top(8)
+            .margin_end(112)
+            .margin_top(6)
             .margin_bottom(8)
             .visible(false)
             .build();
@@ -164,6 +227,7 @@ impl ConversationView {
 
         let usage_label = gtk4::Label::builder()
             .label("")
+            .visible(false)
             .css_classes(["dim-label", "caption"])
             .build();
         session_header.append(&usage_label);
@@ -216,6 +280,15 @@ impl ConversationView {
             .css_classes(["dim-label", "caption"])
             .build();
         session_header.append(&status_label);
+
+        let dock_button = gtk4::Button::builder()
+            .icon_name("sidebar-show-right-symbolic")
+            .tooltip_text(Copybook::for_code("system").open_right_sidebar)
+            .action_name("win.toggle-dock")
+            .css_classes(["dsh-icon-button"])
+            .visible(false)
+            .build();
+        session_header.append(&dock_button);
 
         conversation_box.append(&session_header);
 
@@ -278,6 +351,17 @@ impl ConversationView {
             .halign(gtk4::Align::Center)
             .build();
 
+        let on_view_selected: Rc<RefCell<Option<Box<dyn Fn(&str)>>>> =
+            Rc::new(RefCell::new(None));
+        let on_view_selected_notify = on_view_selected.clone();
+        view_stack.connect_visible_child_name_notify(move |stack| {
+            if let Some(name) = stack.visible_child_name() {
+                if let Some(callback) = on_view_selected_notify.borrow().as_ref() {
+                    callback(name.as_str());
+                }
+            }
+        });
+
         let switcher_bar = gtk4::Box::builder()
             .orientation(gtk4::Orientation::Horizontal)
             .halign(gtk4::Align::Center)
@@ -308,12 +392,8 @@ impl ConversationView {
 
         stack.add_named(&conversation_box, Some("conversation"));
 
-        let plugins_page = adw::StatusPage::builder()
-            .title("Plugin Manager")
-            .description("Discover and manage installed Cordis plugin bundles")
-            .icon_name("application-x-addon-symbolic")
-            .build();
-        stack.add_named(&plugins_page, Some("plugins"));
+        let plugins_page = PluginsPage::new();
+        stack.add_named(plugins_page.widget(), Some("plugins"));
 
         let schedules_page = SchedulesPage::new();
         stack.add_named(schedules_page.widget(), Some("schedules"));
@@ -341,17 +421,21 @@ impl ConversationView {
             on_load_older: load_slot_for_scroll,
             live_handle: RefCell::new(None),
             schedules_page,
+            plugins_page,
             trajectory_page: traj_page,
             trajectory_view,
             view_mode: Cell::new(TranscriptView::Standard),
             on_view_mode,
             view_dropdown,
+            view_stack,
+            on_view_selected,
             rendered_count: Cell::new(0),
             active_cwd,
             title_activate,
             hero_composer_slot,
             composer_dock,
             session_header,
+            dock_button,
             switcher_bar,
             preset_menu,
             preset_label,
@@ -379,6 +463,21 @@ impl ConversationView {
         }
     }
 
+    pub fn set_on_view_selected<F: Fn(&str) + 'static>(&self, callback: F) {
+        *self.on_view_selected.borrow_mut() = Some(Box::new(callback));
+    }
+
+    pub fn set_active_view(&self, name: &str) {
+        let name = if name == "trajectory" && !self.trajectory_page.is_visible() {
+            "chat"
+        } else {
+            name
+        };
+        if self.view_stack.visible_child_name().as_deref() != Some(name) {
+            self.view_stack.set_visible_child_name(name);
+        }
+    }
+
     pub fn trajectory_view(&self) -> &TrajectoryView {
         &self.trajectory_view
     }
@@ -391,8 +490,16 @@ impl ConversationView {
         &self.schedules_page
     }
 
+    pub fn plugins_page(&self) -> &PluginsPage {
+        &self.plugins_page
+    }
+
     pub fn composer(&self) -> &Composer {
         &self.composer
+    }
+
+    pub fn header_dock_button(&self) -> &gtk4::Button {
+        &self.dock_button
     }
 
     pub fn queue_dock(&self) -> &QueueDock {
@@ -409,6 +516,11 @@ impl ConversationView {
 
     pub fn set_title(&self, title: &str) {
         self.title_label.set_label(title);
+    }
+
+    pub fn set_drawer_opener_visible(&self, visible: bool) {
+        self.session_header
+            .set_margin_start(if visible { 48 } else { 12 });
     }
 
     pub fn set_status(&self, status: &str) {
@@ -455,6 +567,13 @@ impl ConversationView {
 
     pub fn transcript_adjustment(&self) -> gtk4::Adjustment {
         self.transcript_scroll.vadjustment()
+    }
+
+    pub fn scroll_transcript_to_bottom(&self) {
+        let adjustment = self.transcript_scroll.vadjustment();
+        gtk4::glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
+            adjustment.set_value((adjustment.upper() - adjustment.page_size()).max(0.0));
+        });
     }
 
     pub fn rerender_transcript(&self, transcript: &ConversationTranscript) {
@@ -541,16 +660,24 @@ impl ConversationView {
     }
 
     pub fn set_usage(&self, usage: &serde_json::Value) {
-        let text = usage
-            .get("totalTokens")
-            .and_then(|value| value.as_u64())
-            .or_else(|| usage.get("total").and_then(|value| value.as_u64()))
-            .map(|value| format!("{} tok", value))
-            .unwrap_or_else(|| serde_json::to_string(usage).unwrap_or_default());
-        self.usage_label.set_label(&text);
+        match token_usage_total(usage) {
+            Some(total) if total > 0 => {
+                self.usage_label
+                    .set_label(&format!("{} tok", compact_token_count(total)));
+                self.usage_label.set_visible(true);
+            }
+            _ => {
+                self.usage_label.set_label("");
+                self.usage_label.set_visible(false);
+            }
+        }
     }
 
-    pub fn set_context(&self, pressure: Option<&serde_json::Value>, breakdown: Option<&serde_json::Value>) {
+    pub fn set_context(
+        &self,
+        pressure: Option<&serde_json::Value>,
+        breakdown: Option<&serde_json::Value>,
+    ) {
         if let Some(pressure) = pressure {
             *self.context_pressure.borrow_mut() = Some(pressure.clone());
         }
@@ -562,21 +689,48 @@ impl ConversationView {
             self.context_button.set_visible(false);
             return;
         };
-        let text = pressure
-            .get("used")
-            .and_then(|value| value.as_u64())
-            .zip(pressure.get("limit").and_then(|value| value.as_u64()))
-            .map(|(used, limit)| format!("{}%", used.saturating_mul(100) / limit.max(1)))
-            .unwrap_or_else(|| serde_json::to_string(&pressure).unwrap_or_default());
-        self.context_button.set_label(&format!("Context {}", text));
+        let Some((used, window, percent)) = context_occupancy(&pressure) else {
+            self.context_button.set_visible(false);
+            return;
+        };
+        self.context_button
+            .set_label(&format!("Context {}%", percent));
         self.context_button.set_visible(true);
-        let details = self
+        let occupancy = format!(
+            "已用 {} / {} tokens（{}%）",
+            compact_token_count(used),
+            compact_token_count(window),
+            percent
+        );
+        let rows = self
             .context_breakdown
             .borrow()
             .as_ref()
-            .map(|value| serde_json::to_string_pretty(value).unwrap_or_default())
-            .unwrap_or_else(|| serde_json::to_string_pretty(&pressure).unwrap_or_default());
+            .map(context_breakdown_rows)
+            .unwrap_or_default();
+        let details = if rows.is_empty() {
+            occupancy
+        } else {
+            let mut lines = vec![occupancy];
+            let mut total = 0u64;
+            for (label, value) in rows {
+                total = total.saturating_add(value);
+                lines.push(format!("{}：{}", label, compact_token_count(value)));
+            }
+            lines.push(format!("合计：{}", compact_token_count(total)));
+            lines.join("\n")
+        };
         self.context_label.set_label(&details);
+    }
+
+    pub fn reset_meters(&self) {
+        *self.context_pressure.borrow_mut() = None;
+        *self.context_breakdown.borrow_mut() = None;
+        self.usage_label.set_label("");
+        self.usage_label.set_visible(false);
+        self.context_button.set_label("Context");
+        self.context_button.set_visible(false);
+        self.context_label.set_label("");
     }
 
     pub fn job_output_append(&self, chunks: &[crate::protocol::JobChunkWire]) {
@@ -704,6 +858,7 @@ impl ConversationView {
         self.set_title(Copybook::for_code("system").new_session);
         self.set_status("Idle");
         self.queue_dock.update(&[]);
+        self.reset_meters();
     }
 
     pub fn select_panel(&self, panel_name: &str) {

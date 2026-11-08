@@ -38,6 +38,19 @@ fn test_archive_filter_and_dock_prefs_persist() {
 }
 
 #[test]
+fn test_session_view_preference_round_trips() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("ui-prefs.json");
+    let mut prefs = UiPrefs::default();
+    assert_eq!(prefs.session_view("s1"), None);
+    prefs.set_session_view("s1", "trajectory");
+    prefs.save(&path).unwrap();
+    let loaded = UiPrefs::load(&path);
+    assert_eq!(loaded.session_view("s1"), Some("trajectory"));
+    assert_eq!(loaded.session_view("s2"), None);
+}
+
+#[test]
 fn test_settings_schema_fields_and_find_key() {
     let schema = json!({
         "type": "object",

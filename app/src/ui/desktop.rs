@@ -201,14 +201,12 @@ pub fn configure_system_style() {
         settings.set_gtk_enable_animations(!reduced_motion);
     }
 
-    let provider: &'static gtk4::CssProvider = Box::leak(Box::new(gtk4::CssProvider::new()));
-    let install = |dark: bool| provider.load_from_string(&crate::ui::theme::shell_css(dark));
-    install(style_manager.is_dark());
-    style_manager.connect_dark_notify(move |manager| install(manager.is_dark()));
+    let provider = gtk4::CssProvider::new();
+    provider.load_from_string(crate::ui::theme::shell_css());
     if let Some(display) = gtk4::gdk::Display::default() {
         gtk4::style_context_add_provider_for_display(
             &display,
-            provider,
+            &provider,
             gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
     }

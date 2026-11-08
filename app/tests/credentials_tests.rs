@@ -60,15 +60,21 @@ fn test_should_show_onboarding_logic() {
 
 #[test]
 fn test_plugin_toggle_restart_required_semantics() {
-    let toggle_res = PluginToggleResult {
-        id: "tool-plugin-manager".to_string(),
-        enabled: true,
-        status: "restart-required".to_string(),
-        restart_required: true,
-    };
+    let toggle_res: PluginChangeResult = serde_json::from_str(
+        r#"{
+            "changed": true,
+            "application": "restart-required",
+            "restartReason": "no-hmr",
+            "stage": "enable",
+            "target": "tool-plugin-manager",
+            "enabled": true
+        }"#,
+    )
+    .unwrap();
 
-    assert!(toggle_res.restart_required);
-    assert_eq!(toggle_res.status, "restart-required");
+    assert_eq!(toggle_res.application, "restart-required");
+    assert_eq!(toggle_res.restart_reason.as_deref(), Some("no-hmr"));
+    assert_eq!(toggle_res.enabled, Some(true));
 }
 
 #[test]

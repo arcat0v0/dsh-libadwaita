@@ -1,4 +1,9 @@
-use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize, Serializer};
+use crate::schedule_model::{
+    ScheduleCatalogEntry, ScheduleDeliveryHistoryPage, SchedulePatch, ScheduleTargetRequest,
+    ScheduleTiming,
+};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
+use std::collections::HashMap;
 use std::fmt;
 
 pub const JSONRPC_VERSION: &str = "2.0";
@@ -319,7 +324,11 @@ pub struct JsonRpcRequest<T = serde_json::Value> {
 }
 
 impl JsonRpcRequest<serde_json::Value> {
-    pub fn new(id: impl Into<RequestId>, method: impl Into<String>, params: Option<serde_json::Value>) -> Self {
+    pub fn new(
+        id: impl Into<RequestId>,
+        method: impl Into<String>,
+        params: Option<serde_json::Value>,
+    ) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.to_string(),
             id: id.into(),
@@ -429,7 +438,9 @@ impl<'de> Deserialize<'de> for IncomingMessage {
                 params: raw.params.unwrap_or(serde_json::Value::Null),
             })
         } else {
-            Err(serde::de::Error::custom("unrecognized JSON-RPC message framing"))
+            Err(serde::de::Error::custom(
+                "unrecognized JSON-RPC message framing",
+            ))
         }
     }
 }
@@ -543,15 +554,9 @@ pub struct SessionProjectionsSnapshot {
 #[serde(tag = "type")]
 pub enum StreamChunk {
     #[serde(rename = "text-delta")]
-    TextDelta {
-        index: u32,
-        text: String,
-    },
+    TextDelta { index: u32, text: String },
     #[serde(rename = "reasoning-delta")]
-    ReasoningDelta {
-        index: u32,
-        text: String,
-    },
+    ReasoningDelta { index: u32, text: String },
     #[serde(rename = "tool-call-delta")]
     ToolCallDelta {
         index: u32,
@@ -573,13 +578,9 @@ pub enum StreamChunk {
         block: serde_json::Value,
     },
     #[serde(rename = "usage")]
-    Usage {
-        usage: serde_json::Value,
-    },
+    Usage { usage: serde_json::Value },
     #[serde(rename = "finish")]
-    Finish {
-        reason: String,
-    },
+    Finish { reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -838,9 +839,7 @@ impl SdkUserQuestionResult {
 #[serde(tag = "type")]
 pub enum PromptContentBlock {
     #[serde(rename = "text")]
-    Text {
-        text: String,
-    },
+    Text { text: String },
     #[serde(rename = "image")]
     Image {
         data: String,
@@ -1215,6 +1214,7 @@ pub struct SettingsResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SettingsMutateParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
@@ -1224,17 +1224,19 @@ pub struct SettingsMutateParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SettingsDescriptor {
     pub ns: String,
+    #[serde(default)]
     pub auto_generate: bool,
     pub schema: serde_json::Value,
     pub value: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<serde_json::Value>,
     pub revision: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secrets: Option<serde_json::Value>,
 }
 
@@ -1306,6 +1308,7 @@ pub struct PresetOptionItem {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PermissionCatalogResult {
     pub options: Vec<PresetOptionItem>,
     pub default_options: Vec<PresetOptionItem>,
@@ -1319,6 +1322,7 @@ pub struct PermissionGetParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PermissionGetResult {
     pub current_value: String,
     pub catalog: PermissionCatalogResult,
@@ -1332,6 +1336,7 @@ pub struct PermissionSetParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PermissionSetResult {
     pub current_value: String,
 }
@@ -1507,12 +1512,67 @@ pub struct PluginToggleParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginBundleToggleParams {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncompatiblePlugin {
+    pub name: String,
+    pub version: String,
+    #[serde(rename = "runtimeVersion")]
+    pub runtime_version: String,
+    pub requirements: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginChangeError {
+    pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incompatible: Option<Vec<IncompatiblePlugin>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginPackageResult {
+    #[serde(rename = "exitCode")]
+    pub exit_code: i64,
+    pub output: String,
+    pub truncated: bool,
+    #[serde(rename = "logPath")]
+    pub log_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PluginToggleResult {
-    pub id: String,
-    pub enabled: bool,
-    pub status: String,
-    pub restart_required: bool,
+pub struct PluginChangeResult {
+    pub changed: bool,
+    pub application: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_reason: Option<String>,
+    pub stage: String,
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<PluginChangeError>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_result: Option<PluginPackageResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_builds: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_builds: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registries: Option<Vec<Option<String>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1620,6 +1680,14 @@ pub struct TodoWriteData {
 
 pub const METHOD_PLUGIN_INVENTORY: &str = "libadwaita/plugin/inventory";
 pub const METHOD_PLUGIN_DETAIL: &str = "libadwaita/plugin/detail";
+pub const METHOD_PLUGIN_BUNDLE_ENABLE: &str = "libadwaita/plugin/bundle/enable";
+pub const METHOD_PLUGIN_BUNDLE_DISABLE: &str = "libadwaita/plugin/bundle/disable";
+pub const METHOD_PLUGIN_REGISTRY_PROBE: &str = "libadwaita/plugin/registry-probe";
+pub const METHOD_PLUGIN_MARKET_LIST_INDEXES: &str = "libadwaita/plugin-market/list-indexes";
+pub const METHOD_PLUGIN_MARKET_SET_INDEXES: &str = "libadwaita/plugin-market/set-indexes";
+pub const METHOD_PLUGIN_MARKET_SEARCH: &str = "libadwaita/plugin-market/search";
+pub const METHOD_PLUGIN_MARKET_READ_ENTRY_DETAIL: &str =
+    "libadwaita/plugin-market/read-entry-detail";
 pub const METHOD_PLUGIN_INSPECT: &str = "libadwaita/plugin/inspect";
 pub const METHOD_PLUGIN_INSTALL: &str = "libadwaita/plugin/install";
 pub const METHOD_PLUGIN_CANCEL_INSTALL: &str = "libadwaita/plugin/cancel-install";
@@ -1656,6 +1724,9 @@ pub const METHOD_JOB_KILL: &str = "libadwaita/job/kill";
 pub const NOTIFICATION_JOB_OUTPUT: &str = "job.output";
 pub const NOTIFICATION_PLUGIN_INSTALL_STATE: &str = "plugin.install-state";
 pub const NOTIFICATION_PLUGIN_INSTALL_LOG: &str = "plugin.install-log";
+pub const NOTIFICATION_PLUGIN_CHANGED: &str = "plugin.changed";
+pub const NOTIFICATION_PLUGIN_UPDATE_STATE: &str = "plugin.update-state";
+pub const NOTIFICATION_PLUGIN_MARKET_CHANGED: &str = "plugin.market-changed";
 
 pub const ERR_QUESTION_NOT_PENDING: i64 = -32030;
 pub const ERR_FEEDBACK_CONFLICT: i64 = -32031;
@@ -1685,6 +1756,41 @@ pub struct PluginDetailParams {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub npm_file_sources: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginBundleDetail {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub markdown: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginRegistries {
+    pub registry: Option<String>,
+    #[serde(rename = "fallbackRegistries", default)]
+    pub fallback_registries: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginRegistriesResult {
+    pub result: PluginRegistries,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginRegistryProbeResult {
+    pub result: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PluginMarketListIndexesResult {
+    pub result: Vec<MarketIndexSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1692,6 +1798,100 @@ pub struct PluginInspectParams {
     pub spec: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub registry: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum PluginSpecInspection {
+    #[serde(rename = "accepted")]
+    Accepted {
+        kind: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bundle: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        registry: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<String>,
+    },
+    #[serde(rename = "refused")]
+    Refused {
+        problem: String,
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        registries: Option<Vec<Option<String>>>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginCancellationResult {
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistryAttempt {
+    pub registry: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginVersionItem {
+    pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_at: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub prerelease: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<String>,
+    #[serde(default)]
+    pub bundle: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incompatible: Option<IncompatiblePlugin>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum PluginVersionList {
+    #[serde(rename = "listed")]
+    Listed {
+        installed: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        registry: Option<String>,
+        #[serde(default)]
+        attempts: Vec<RegistryAttempt>,
+        #[serde(default)]
+        versions: Vec<PluginVersionItem>,
+        #[serde(default)]
+        omitted: usize,
+    },
+    #[serde(rename = "refused")]
+    Refused {
+        problem: String,
+        reason: String,
+        #[serde(default)]
+        attempts: Vec<RegistryAttempt>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginUpdateResult {
+    pub from: String,
+    pub to: String,
+    pub step: String,
+    pub result: PluginChangeResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore: Option<PluginChangeResult>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1729,14 +1929,18 @@ pub struct PluginVersionsParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PluginUpdateParams {
     pub name: String,
     pub version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub registry: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PluginInstallStateNotificationParams {
     pub request_id: String,
     pub phase: String,
@@ -1756,6 +1960,271 @@ pub struct PluginInstallLogNotificationParams {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginChangedNotificationParams {
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginUpdateStateNotificationParams {
+    pub request_id: String,
+    pub step: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginMarketChangedNotificationParams {
+    pub changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MarketIndexSummary {
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MarketSortDirection {
+    Asc,
+    Desc,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum MarketSort {
+    #[serde(rename = "index")]
+    Index,
+    #[serde(rename = "relevance")]
+    Relevance,
+    #[serde(rename = "published")]
+    Published { direction: MarketSortDirection },
+    #[serde(rename = "key")]
+    Key {
+        id: String,
+        direction: MarketSortDirection,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MarketDeclaration {
+    #[serde(default)]
+    pub title: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MarketSortKeyDeclaration {
+    #[serde(default)]
+    pub title: serde_json::Value,
+    pub order: MarketSortDirection,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketIndexMetadata {
+    #[serde(default)]
+    pub categories: HashMap<String, MarketDeclaration>,
+    #[serde(default)]
+    pub labels: HashMap<String, MarketDeclaration>,
+    #[serde(default, rename = "sortKeys")]
+    pub sort_keys: HashMap<String, MarketSortKeyDeclaration>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketRepository {
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum MarketSource {
+    #[serde(rename = "npm")]
+    Npm {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        registry: Option<String>,
+    },
+    #[serde(rename = "git")]
+    Git {
+        url: String,
+        commit: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketCompatibility {
+    pub compatible: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_version: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub requirements: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exempted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketInstallTarget {
+    pub spec: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketListingVersion {
+    pub version: String,
+    pub publish_timestamp: u64,
+    pub source: MarketSource,
+    #[serde(default)]
+    pub engines: HashMap<String, String>,
+    pub install: MarketInstallTarget,
+    pub compatibility: MarketCompatibility,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketPluginMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    #[serde(default, rename = "sortKeys")]
+    pub sort_keys: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketInstallation {
+    #[serde(default)]
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketListingEntry {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub homepage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<MarketRepository>,
+    #[serde(default)]
+    pub metadata: MarketPluginMetadata,
+    #[serde(default)]
+    pub versions: Vec<MarketListingVersion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_version: Option<String>,
+    #[serde(default)]
+    pub installation: MarketInstallation,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketSearchResult {
+    pub url: String,
+    #[serde(default)]
+    pub title: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<serde_json::Value>,
+    #[serde(default)]
+    pub metadata: MarketIndexMetadata,
+    pub fetched_at: u64,
+    #[serde(default)]
+    pub entries: Vec<MarketListingEntry>,
+    #[serde(default)]
+    pub total: u64,
+    #[serde(default)]
+    pub next_offset: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketQuery {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels: Option<Vec<String>>,
+    pub sort: MarketSort,
+    pub offset: u32,
+    pub limit: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fetched_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginMarketSearchParams {
+    pub url: String,
+    pub query: MarketQuery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginMarketSetIndexesParams {
+    pub urls: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginMarketReadEntryDetailParams {
+    pub url: String,
+    pub name: String,
+    pub version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub npm_file_sources: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PluginMarketSearchResult {
+    pub result: MarketSearchResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginMarketReadEntryDetailResult {
+    pub result: PluginMarketDetail,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginMarketDetail {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub markdown: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2086,6 +2555,8 @@ pub const METHOD_SCHEDULE_EDIT: &str = "libadwaita/schedule/edit";
 pub const METHOD_SCHEDULE_RUN: &str = "libadwaita/schedule/run";
 pub const METHOD_SCHEDULE_HISTORY: &str = "libadwaita/schedule/history";
 pub const METHOD_SCHEDULE_DELETE: &str = "libadwaita/schedule/delete";
+pub const METHOD_SCHEDULE_DELETE_INACTIVE: &str = "libadwaita/schedule/delete-inactive";
+pub const METHOD_SCHEDULE_DELIVERY_LIMITS: &str = "libadwaita/schedule/delivery-limits";
 pub const NOTIFICATION_SCHEDULE_CHANGED: &str = "schedule.changed";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2170,7 +2641,7 @@ pub struct TerminalCloseResult {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScheduleCatalogResult {
-    pub result: Vec<serde_json::Value>,
+    pub result: Vec<ScheduleCatalogEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2178,9 +2649,9 @@ pub struct ScheduleCatalogResult {
 pub struct ScheduleCreateParams {
     pub title: String,
     pub prompt: String,
-    pub timing: serde_json::Value,
+    pub timing: ScheduleTiming,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub target: Option<serde_json::Value>,
+    pub target: Option<ScheduleTargetRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2189,17 +2660,19 @@ pub struct ScheduleEditParams {
     pub id: String,
     pub action: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub patch: Option<serde_json::Value>,
+    pub patch: Option<SchedulePatch>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_updated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ScheduleRunParams {
     pub id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ScheduleHistoryParams {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2208,7 +2681,20 @@ pub struct ScheduleHistoryParams {
     pub before: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ScheduleHistoryOutcome {
+    Page(ScheduleDeliveryHistoryPage),
+    Miss { code: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScheduleHistoryResult {
+    pub result: ScheduleHistoryOutcome,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ScheduleDeleteParams {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2241,10 +2727,6 @@ pub fn build_question_answer(
         id: id.to_string(),
         selected,
     }
-}
-
-pub fn schedule_field<'a>(entry: &'a serde_json::Value, key: &str) -> Option<&'a str> {
-    entry.get(key).and_then(|value| value.as_str())
 }
 
 pub const METHOD_ATTACHMENT_UPLOAD: &str = "libadwaita/attachment/upload";

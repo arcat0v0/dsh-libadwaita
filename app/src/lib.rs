@@ -9,6 +9,7 @@ pub mod ui_prefs;
 pub mod credentials;
 pub mod drafts;
 pub mod protocol;
+pub mod schedule_model;
 pub mod session;
 pub mod session_state;
 pub mod supervisor;

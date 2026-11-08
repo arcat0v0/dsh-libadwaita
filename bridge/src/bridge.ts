@@ -2,8 +2,11 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { type Context, Service } from '@deepseek-ai/cordis';
+import type { SessionId } from '@deepseek-ai/dsh-session';
 import { buildForkSeed } from '@deepseek-ai/dsh-session/fork';
+import { SessionPersistenceNotFoundError } from '@deepseek-ai/dsh-session-persistence';
 import type { BridgeCredentials } from './credentials.js';
+import { RegistryProbe } from './registry-probe.js';
 import { BridgeServer } from './server.js';
 import {
   type AccountBalanceResult,
@@ -71,6 +74,8 @@ import {
   type PermissionSetParams,
   type PermissionSetResult,
   type PermissionUpdatedNotification,
+  type PluginBundleToggleParams,
+  type PluginChangedNotification,
   type PluginDetailParams,
   type PluginInspectParams,
   type PluginInstallLogNotification,
@@ -78,11 +83,18 @@ import {
   type PluginInstallStateNotification,
   type PluginInventoryResult,
   type PluginListResult,
+  type PluginMarketChangedNotification,
+  type PluginMarketReadEntryDetailParams,
+  type PluginMarketSearchParams,
+  type PluginMarketSetIndexesParams,
   type PluginOperationResult,
+  type PluginRegistryProbeResult,
   type PluginRemoveParams,
   type PluginRequestParams,
+  type PluginToggleParams,
   type PluginToggleResult,
   type PluginUpdateParams,
+  type PluginUpdateStateNotification,
   type PluginVersionsParams,
   type QuestionReopenParams,
   type QuestionReopenResult,
@@ -217,6 +229,13 @@ function increasedForkTitle(title: string, taken: ReadonlySet<string>): string {
   return candidate;
 }
 
+export function isMissingSessionError(error: unknown): boolean {
+  if (error instanceof SessionPersistenceNotFoundError) return true;
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { isDSHRemoteError?: unknown; code?: unknown };
+  return candidate.isDSHRemoteError === true && candidate.code === 'session/not-found';
+}
+
 interface PendingMessage {
   id: string;
   source?: { kind?: string };
@@ -259,6 +278,7 @@ interface WorkspaceRecordLike {
   sessionIds: readonly string[];
   setTitle: (title: string) => Promise<void>;
   status: () => Promise<'ok' | 'missing-dir'>;
+  attachSession: (sessionId: string) => Promise<void>;
 }
 
 interface GoalServiceLike {
@@ -295,6 +315,7 @@ export class BridgeService extends Service {
   private readonly pendingQuestionsBySession = new Map<string, SdkUserQuestionRequest>();
   private readonly projectionRevisions = new Map<string, number>();
   private readonly projectionSignatures = new Map<string, string>();
+  private readonly registryProbe = new RegistryProbe();
 
   constructor(ctx: Context, config: BridgeConfig = {}) {
     super(ctx, 'bridge');
@@ -309,6 +330,17 @@ export class BridgeService extends Service {
       generationId: this.generationId,
       dshVersion: DSH_PINNED_VERSION,
       onMethod: (method, params) => this.dispatchMethod(method, params),
+    });
+    this.ctx.reflect.provide('sessionController', {
+      create: (request: { sessionId?: string; cwd?: string; agentPreset?: string }) =>
+        this.createSessionAgent(request).then((agent) => ({ agent })),
+      resolveAgent: async (sessionId: string) => {
+        try {
+          return { agent: await this.resolveScheduleAgent(sessionId) };
+        } catch (error) {
+          return { error: error instanceof Error ? error : new Error(String(error)) };
+        }
+      },
     });
   }
 
@@ -505,6 +537,41 @@ export class BridgeService extends Service {
       };
       this.server.notify('plugin.install-log', notification);
     });
+
+    this.ctx.on('plugin-manager/changed', (payload: unknown) => {
+      if (!payload || typeof payload !== 'object') return;
+      const p = payload as { reason?: string };
+      if (!p.reason) return;
+      const notification: PluginChangedNotification = { reason: p.reason };
+      this.server.notify('plugin.changed', notification);
+    });
+
+    this.ctx.on('plugin-manager/update-state', (payload: unknown) => {
+      if (!payload || typeof payload !== 'object') return;
+      const p = payload as { requestId?: string; step?: string };
+      if (!p.requestId || !p.step) return;
+      const notification: PluginUpdateStateNotification = {
+        requestId: p.requestId,
+        step: p.step,
+      };
+      this.server.notify('plugin.update-state', notification);
+    });
+
+    this.ctx.on('plugin-market/changed', () => {
+      const notification: PluginMarketChangedNotification = { changed: true };
+      this.server.notify('plugin.market-changed', notification);
+    });
+
+    this.ctx.on(
+      'schedule/resolve-agent',
+      async (sessionId: string, next: () => Promise<unknown>) => {
+        try {
+          return await this.resolveScheduleAgent(sessionId);
+        } catch {
+          return next();
+        }
+      },
+    );
 
     this.ctx.on('schedule/changed', () => {
       const notification: ScheduleChangedNotification = { changed: true };
@@ -742,9 +809,25 @@ export class BridgeService extends Service {
       case 'libadwaita/plugin/list':
         return this.handlePluginList();
       case 'libadwaita/plugin/enable':
-        return this.handlePluginEnable(params as unknown as { id: string });
+        return this.handlePluginEnable(params as unknown as PluginToggleParams);
       case 'libadwaita/plugin/disable':
-        return this.handlePluginDisable(params as unknown as { id: string });
+        return this.handlePluginDisable(params as unknown as PluginToggleParams);
+      case 'libadwaita/plugin/bundle/enable':
+        return this.handlePluginBundleEnable(params as unknown as PluginBundleToggleParams);
+      case 'libadwaita/plugin/bundle/disable':
+        return this.handlePluginBundleDisable(params as unknown as PluginBundleToggleParams);
+      case 'libadwaita/plugin/registry-probe':
+        return this.handlePluginRegistryProbe();
+      case 'libadwaita/plugin-market/list-indexes':
+        return this.handlePluginMarketListIndexes();
+      case 'libadwaita/plugin-market/set-indexes':
+        return this.handlePluginMarketSetIndexes(params as unknown as PluginMarketSetIndexesParams);
+      case 'libadwaita/plugin-market/search':
+        return this.handlePluginMarketSearch(params as unknown as PluginMarketSearchParams);
+      case 'libadwaita/plugin-market/read-entry-detail':
+        return this.handlePluginMarketReadEntryDetail(
+          params as unknown as PluginMarketReadEntryDetailParams,
+        );
       case 'libadwaita/plugin/detail':
         return this.handlePluginDetail(params as unknown as PluginDetailParams);
       case 'libadwaita/plugin/inspect':
@@ -809,6 +892,10 @@ export class BridgeService extends Service {
         return this.handleScheduleHistory(params as unknown as ScheduleHistoryParams);
       case 'libadwaita/schedule/delete':
         return this.handleScheduleDelete(params as unknown as ScheduleEditParams);
+      case 'libadwaita/schedule/delete-inactive':
+        return this.handleScheduleDeleteInactive();
+      case 'libadwaita/schedule/delivery-limits':
+        return this.handleScheduleDeliveryLimits();
       case 'libadwaita/terminal/create':
         return this.handleTerminalCreate(params as unknown as TerminalCreateParams);
       case 'libadwaita/terminal/list':
@@ -845,85 +932,172 @@ export class BridgeService extends Service {
     return { ok: true };
   }
 
-  private async handleSessionCreate(params: SessionCreateParams): Promise<SessionCreateResult> {
+  private async createSessionAgent(options: {
+    sessionId?: string;
+    cwd?: string;
+    agentPreset?: string;
+    provider?: string;
+    model?: string;
+  }): Promise<AgentLike> {
     const agents = this.ctx.get('agents') as unknown as {
-      create: (
-        options: object,
-      ) => Promise<{ agent: { id: string; session: { header: SessionHeader } } }>;
+      create: (options: object) => Promise<{ agent: AgentLike }>;
     };
     if (!agents) {
       throw new BridgeError(BRIDGE_ERROR_CODES.INTERNAL_ERROR, 'agents service not available');
     }
-
-    const sessionId = params.sessionId ?? `sess-${crypto.randomUUID()}`;
     const handle = await agents.create({
-      sessionId,
+      sessionId: options.sessionId ?? `sess-${crypto.randomUUID()}`,
       meta: {
-        cwd: params.cwd,
-        ...(params.agentPreset ? { agentPreset: params.agentPreset } : {}),
+        ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+        ...(options.agentPreset === undefined ? {} : { agentPreset: options.agentPreset }),
       },
     });
-
     const agent = handle.agent;
-    const provider = params.provider ?? 'deepseek-official';
-    const model = params.model ?? 'deepseek-chat';
-    const modelService = (agent as unknown as { model?: { select: (opt: object) => void } }).model;
-    modelService?.select({ provider, model });
+    this.applySessionModel(agent, {
+      sessionId: options.sessionId,
+      cwd: options.cwd ?? '',
+      provider: options.provider,
+      model: options.model,
+      agentPreset: options.agentPreset,
+    });
+    return agent;
+  }
+
+  private async handleSessionCreate(params: SessionCreateParams): Promise<SessionCreateResult> {
+    if (params.sessionId !== undefined) {
+      const reused = await this.reuseNamedSession(params.sessionId, params);
+      if (reused) {
+        await this.attachSessionToWorkspace(reused.header.cwd ?? params.cwd, reused.sessionId);
+        return reused;
+      }
+    }
+    const agent = await this.createSessionAgent(params);
+    await this.attachSessionToWorkspace(agent.session.header.cwd ?? params.cwd, agent.id);
     return {
       sessionId: agent.id,
       header: agent.session.header,
     };
   }
 
+  private async reuseNamedSession(
+    sessionId: string,
+    params: SessionCreateParams,
+  ): Promise<SessionCreateResult | undefined> {
+    const sessionsService = this.ctx.get('sessions') as unknown as {
+      get: (id: string) => SessionLike | undefined;
+    };
+    const agentsService = this.ctx.get('agents') as unknown as {
+      get: (id: string) => AgentLike | undefined;
+      resume?: (options: object) => Promise<{ agent: AgentLike }>;
+    };
+    const session = sessionsService?.get(sessionId);
+    if (session) {
+      const live = agentsService?.get(sessionId);
+      if (live) this.applySessionModel(live, params);
+      return { sessionId, header: session.header };
+    }
+    if (!agentsService?.resume) return undefined;
+    try {
+      const handle = await agentsService.resume({ resumeSessionId: sessionId });
+      this.applySessionModel(handle.agent, params);
+      return { sessionId, header: handle.agent.session.header };
+    } catch (error) {
+      if (isMissingSessionError(error)) return undefined;
+      throw error;
+    }
+  }
+
+  private applySessionModel(agent: AgentLike, params: SessionCreateParams): void {
+    const provider = params.provider ?? 'deepseek-official';
+    const model = params.model ?? 'deepseek-chat';
+    agent.model?.select({ provider, model });
+  }
+
   private async handleSessionList(params: SessionListParams): Promise<SessionListResult> {
     const sessionsService = this.ctx.get('sessions') as unknown as {
-      list: () => Array<{
-        id: string;
-        header: SessionHeader;
-        snapshotEvents: () => SessionEvent[];
-      }>;
+      list: () => SessionLike[];
     };
-
     if (!sessionsService) {
       return { sessions: [] };
     }
 
     const includeArchived = params.archived ?? false;
     const limit = params.limit ?? 100;
-    const all = sessionsService.list();
-    const items: SessionListItem[] = [];
+    const liveSessions = sessionsService.list();
+    const liveById = new Map(liveSessions.map((session) => [session.id, session]));
 
-    for (const session of all) {
-      const isArchived = this.archivedSessions.has(session.id);
+    const query = this.ctx.get('sessionQuery') as unknown as {
+      listSessions: (
+        signal?: AbortSignal,
+      ) => Promise<Array<{ header: SessionHeader; live?: boolean }>>;
+    };
+    let headers: SessionHeader[];
+    if (query?.listSessions) {
+      try {
+        headers = (await query.listSessions()).map((record) => record.header);
+      } catch (error) {
+        throw new BridgeError(
+          BRIDGE_ERROR_CODES.INTERNAL_ERROR,
+          `session listing failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    } else {
+      headers = liveSessions.map((session) => session.header);
+    }
+
+    const archivedIds = await this.archivedSessionIds();
+
+    const projectionCache = this.ctx.get('sessionProjectionCache') as unknown as
+      | {
+          cachedSnapshot?: (
+            header: SessionHeader,
+            keys: string[],
+          ) => { values: Record<string, unknown> } | undefined;
+        }
+      | undefined;
+
+    const items: SessionListItem[] = [];
+    for (const header of headers) {
+      const isArchived = archivedIds.has(header.id);
       if (isArchived && !includeArchived) continue;
 
-      const events = session.snapshotEvents();
-      const lastEvent = events.at(-1);
-      const titleEvent = events.findLast((e) => e.type === 'session/title');
-      const title =
-        titleEvent?.data && typeof titleEvent.data === 'object' && 'title' in titleEvent.data
-          ? String((titleEvent.data as { title: unknown }).title)
-          : session.header.cwd
-            ? `Session in ${session.header.cwd}`
-            : 'New Session';
+      const live = liveById.get(header.id);
+      let title = header.cwd ? `Session in ${header.cwd}` : 'New Session';
+      let updatedAt = header.createdAt;
+      let turnCount = 0;
 
-      const turnStarts = events.filter((e) => e.type === 'turn/start').length;
+      if (live) {
+        const events = live.snapshotEvents();
+        const lastEvent = events.at(-1);
+        const titleEvent = events.findLast((e) => e.type === 'session/title');
+        if (titleEvent?.data && typeof titleEvent.data === 'object' && 'title' in titleEvent.data) {
+          title = String((titleEvent.data as { title: unknown }).title);
+        }
+        if (lastEvent) updatedAt = lastEvent.time;
+        turnCount = events.filter((e) => e.type === 'turn/start').length;
+      } else {
+        const cached = projectionCache?.cachedSnapshot?.(header, ['title', 'turnBoundary']);
+        const cachedTitle = cached?.values.title;
+        if (typeof cachedTitle === 'string' && cachedTitle.length > 0) {
+          title = cachedTitle;
+        }
+        const boundary = cached?.values.turnBoundary as { lastTurn?: unknown } | undefined;
+        if (typeof boundary?.lastTurn === 'number') turnCount = boundary.lastTurn;
+      }
 
       items.push({
-        id: session.id,
-        createdAt: session.header.createdAt,
-        updatedAt: lastEvent ? lastEvent.time : session.header.createdAt,
-        cwd: session.header.cwd ?? '',
+        id: header.id,
+        createdAt: header.createdAt,
+        updatedAt,
+        cwd: header.cwd ?? '',
         title,
-        turnCount: turnStarts,
+        turnCount,
         isArchived,
       });
-
-      if (items.length >= limit) break;
     }
 
     items.sort((a, b) => b.updatedAt - a.updatedAt);
-    return { sessions: items };
+    return { sessions: items.slice(0, limit) };
   }
 
   private async handleSessionFollow(params: SessionFollowParams): Promise<SessionFollowResult> {
@@ -1150,7 +1324,20 @@ export class BridgeService extends Service {
 
   private async handleSessionArchive(params: SessionArchiveParams): Promise<SessionArchiveResult> {
     const sessionId = params.sessionId;
+    const registry = await this.workspaceRegistry();
     if (params.archived) {
+      if (registry) {
+        try {
+          await registry.archiveSession(sessionId, { stopActivity: true });
+        } catch (error) {
+          throw new BridgeError(
+            BRIDGE_ERROR_CODES.INTERNAL_ERROR,
+            `failed to archive session "${sessionId}": ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
       this.archivedSessions.add(sessionId);
       const agentsService = this.ctx.get('agents') as unknown as {
         get: (id: string) =>
@@ -1169,6 +1356,18 @@ export class BridgeService extends Service {
         agent.inbox?.clear();
       }
     } else {
+      if (registry) {
+        try {
+          await registry.unarchiveSession(sessionId);
+        } catch (error) {
+          throw new BridgeError(
+            BRIDGE_ERROR_CODES.INTERNAL_ERROR,
+            `failed to unarchive session "${sessionId}": ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
       this.archivedSessions.delete(sessionId);
     }
     return {
@@ -1203,6 +1402,25 @@ export class BridgeService extends Service {
       );
     }
     return { session, agent };
+  }
+
+  private async resolveScheduleAgent(sessionId: string): Promise<AgentLike> {
+    const agentsService = this.ctx.get('agents') as unknown as {
+      get: (id: string) => AgentLike | undefined;
+      resume?: (options: object) => Promise<{ agent: AgentLike }>;
+    };
+    const live = agentsService?.get(sessionId);
+    if (live) return live;
+    if (!agentsService?.resume) {
+      throw new SessionPersistenceNotFoundError(sessionId as SessionId);
+    }
+    try {
+      const handle = await agentsService.resume({ resumeSessionId: sessionId });
+      return handle.agent;
+    } catch (error) {
+      if (!isMissingSessionError(error)) throw error;
+      throw new SessionPersistenceNotFoundError(sessionId as SessionId);
+    }
   }
 
   private buildQueueItems(agent: AgentLike): QueueItem[] {
@@ -1301,6 +1519,7 @@ export class BridgeService extends Service {
         { sessionId: params.sessionId },
       );
     }
+    await this.attachSessionToWorkspace(session.header.cwd, childId);
     if (params.increaseTitle) {
       const titleService = this.ctx.get('sessionTitle') as unknown as {
         get: (session: SessionLike) => SessionTitleSnapshot | undefined;
@@ -1747,10 +1966,32 @@ export class BridgeService extends Service {
         create: (path: string, title?: string) => Promise<WorkspaceRecordLike>;
         resolveByPath: (path: string) => Promise<WorkspaceRecordLike | undefined>;
         delete: (id: string) => Promise<boolean>;
+        archiveSession: (sessionId: string, options?: object) => Promise<void>;
+        unarchiveSession: (sessionId: string) => Promise<void>;
+        readonly archivedSessionIds: readonly string[];
       }
     | undefined
   > {
     return this.waitForService('workspaceRegistry');
+  }
+
+  private async archivedSessionIds(): Promise<Set<string>> {
+    const registry = await this.workspaceRegistry();
+    const ids = new Set<string>(registry?.archivedSessionIds ?? []);
+    for (const id of this.archivedSessions) ids.add(id);
+    return ids;
+  }
+
+  private async attachSessionToWorkspace(
+    cwd: string | undefined,
+    sessionId: string,
+  ): Promise<void> {
+    if (!cwd) return;
+    const registry = await this.workspaceRegistry();
+    if (!registry) return;
+    const workspace = await registry.resolveByPath(cwd);
+    if (!workspace) return;
+    await workspace.attachSession(sessionId);
   }
 
   private async workspaceView(workspace: WorkspaceRecordLike): Promise<WorkspaceView> {
@@ -2563,9 +2804,10 @@ export class BridgeService extends Service {
     const limit = Math.min(Math.max(params.limit ?? 50, 1), 200);
     const query = params.query.trim().toLowerCase();
     const includeArchived = params.archived ?? false;
+    const archivedIds = await this.archivedSessionIds();
     const items: SessionSearchItem[] = [];
     for (const session of sessions?.list() ?? []) {
-      const archived = this.archivedSessions.has(session.id);
+      const archived = archivedIds.has(session.id);
       if (archived && !includeArchived) continue;
       const events = session.snapshotEvents();
       const titleEvent = events.findLast((event) => event.type === 'session/title');
@@ -2699,6 +2941,8 @@ export class BridgeService extends Service {
         listVersions?: (name: string, options?: object, signal?: AbortSignal) => Promise<unknown>;
         updateBundle?: (name: string, version: string, options?: object) => Promise<unknown>;
         registries?: () => Promise<unknown>;
+        setPluginEnabled?: (id: string, enabled: boolean) => Promise<unknown>;
+        setBundleEnabled?: (name: string, enabled: boolean) => Promise<unknown>;
         listPlugins?: () => Promise<unknown[]>;
         listBundles?: () => Promise<unknown[]>;
       }
@@ -2714,6 +2958,8 @@ export class BridgeService extends Service {
           listVersions?: (name: string, options?: object, signal?: AbortSignal) => Promise<unknown>;
           updateBundle?: (name: string, version: string, options?: object) => Promise<unknown>;
           registries?: () => Promise<unknown>;
+          setPluginEnabled?: (id: string, enabled: boolean) => Promise<unknown>;
+          setBundleEnabled?: (name: string, enabled: boolean) => Promise<unknown>;
           listPlugins?: () => Promise<unknown[]>;
           listBundles?: () => Promise<unknown[]>;
         }
@@ -2731,6 +2977,17 @@ export class BridgeService extends Service {
     }
   }
 
+  private async pluginChange(operation: () => Promise<unknown>): Promise<PluginToggleResult> {
+    try {
+      return (await operation()) as PluginToggleResult;
+    } catch (error) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.PLUGIN_OPERATION_FAILED,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
   private async handlePluginDetail(params: PluginDetailParams): Promise<PluginOperationResult> {
     const manager = this.pluginManager();
     if (!manager?.readBundleDetail) {
@@ -2740,7 +2997,9 @@ export class BridgeService extends Service {
       );
     }
     return this.pluginOperation(() =>
-      manager.readBundleDetail!(params.name, params.language ?? 'en'),
+      manager.readBundleDetail!(params.name, params.language ?? 'en', {
+        ...(params.npmFileSources === undefined ? {} : { npmFileSources: params.npmFileSources }),
+      }),
     );
   }
 
@@ -2843,11 +3102,10 @@ export class BridgeService extends Service {
       );
     }
     return this.pluginOperation(() =>
-      manager.updateBundle!(
-        params.name,
-        params.version,
-        params.registry === undefined ? undefined : { registry: params.registry },
-      ),
+      manager.updateBundle!(params.name, params.version, {
+        ...(params.requestId === undefined ? {} : { requestId: params.requestId }),
+        ...(params.registry === undefined ? {} : { registry: params.registry }),
+      }),
     );
   }
 
@@ -3209,10 +3467,25 @@ export class BridgeService extends Service {
         edit: (request: object, actorSessionId?: string, signal?: AbortSignal) => Promise<unknown>;
         run: (request: object, signal?: AbortSignal) => Promise<unknown>;
         history: (request: object) => Promise<unknown>;
+        deleteInactive: () => Promise<unknown>;
+        deliveryLimits: () => unknown;
       }
     | undefined
   > {
     return this.waitForService('schedule');
+  }
+
+  private scheduleError(error: unknown): BridgeError {
+    const message = error instanceof Error ? error.message : String(error);
+    const code = (error as { code?: unknown } | null)?.code;
+    if (typeof code !== 'string') {
+      return new BridgeError(BRIDGE_ERROR_CODES.SCHEDULE_OPERATION_FAILED, message);
+    }
+    const details = (error as { details?: unknown }).details;
+    return new BridgeError(BRIDGE_ERROR_CODES.SCHEDULE_OPERATION_FAILED, message, {
+      code,
+      ...(details === undefined ? {} : { details }),
+    });
   }
 
   private async handleScheduleCatalog(): Promise<ScheduleOperationResult> {
@@ -3236,18 +3509,22 @@ export class BridgeService extends Service {
         'schedule service is not available',
       );
     }
-    return {
-      result: await schedule.create(
-        {
-          title: params.title,
-          prompt: params.prompt,
-          timing: params.timing,
-          ...(params.target === undefined ? {} : { target: params.target }),
-        },
-        undefined,
-        new AbortController().signal,
-      ),
-    };
+    try {
+      return {
+        result: await schedule.create(
+          {
+            title: params.title,
+            prompt: params.prompt,
+            timing: params.timing,
+            ...(params.target === undefined ? {} : { target: params.target }),
+          },
+          undefined,
+          new AbortController().signal,
+        ),
+      };
+    } catch (error) {
+      throw this.scheduleError(error);
+    }
   }
 
   private async handleScheduleEdit(params: ScheduleEditParams): Promise<ScheduleOperationResult> {
@@ -3258,20 +3535,24 @@ export class BridgeService extends Service {
         'schedule service is not available',
       );
     }
-    return {
-      result: await schedule.edit(
-        {
-          id: params.id,
-          action: params.action,
-          ...(params.patch === undefined ? {} : { patch: params.patch }),
-          ...(params.expectedUpdatedAt === undefined
-            ? {}
-            : { expectedUpdatedAt: params.expectedUpdatedAt }),
-        },
-        undefined,
-        new AbortController().signal,
-      ),
-    };
+    try {
+      return {
+        result: await schedule.edit(
+          {
+            id: params.id,
+            action: params.action,
+            ...(params.patch === undefined ? {} : { patch: params.patch }),
+            ...(params.expectedUpdatedAt === undefined
+              ? {}
+              : { expectedUpdatedAt: params.expectedUpdatedAt }),
+          },
+          undefined,
+          new AbortController().signal,
+        ),
+      };
+    } catch (error) {
+      throw this.scheduleError(error);
+    }
   }
 
   private async handleScheduleRun(params: ScheduleRunParams): Promise<ScheduleOperationResult> {
@@ -3282,9 +3563,13 @@ export class BridgeService extends Service {
         'schedule service is not available',
       );
     }
-    return {
-      result: await schedule.run({ id: params.id }, new AbortController().signal),
-    };
+    try {
+      return {
+        result: await schedule.run({ id: params.id }, new AbortController().signal),
+      };
+    } catch (error) {
+      throw this.scheduleError(error);
+    }
   }
 
   private async handleScheduleHistory(
@@ -3314,6 +3599,28 @@ export class BridgeService extends Service {
         ? {}
         : { expectedUpdatedAt: params.expectedUpdatedAt }),
     });
+  }
+
+  private async handleScheduleDeleteInactive(): Promise<ScheduleOperationResult> {
+    const schedule = await this.scheduleService();
+    if (!schedule?.deleteInactive) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.SCHEDULE_UNAVAILABLE,
+        'schedule service is not available',
+      );
+    }
+    return { result: await schedule.deleteInactive() };
+  }
+
+  private async handleScheduleDeliveryLimits(): Promise<ScheduleOperationResult> {
+    const schedule = await this.scheduleService();
+    if (!schedule?.deliveryLimits) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.SCHEDULE_UNAVAILABLE,
+        'schedule service is not available',
+      );
+    }
+    return { result: schedule.deliveryLimits() };
   }
 
   private async terminalService(): Promise<
@@ -3498,42 +3805,132 @@ export class BridgeService extends Service {
     };
   }
 
-  private async handlePluginEnable(params: { id: string }): Promise<PluginToggleResult> {
-    const pm = this.ctx.get('pluginManager') as unknown as {
-      setPluginEnabled?: (id: string, enabled: boolean) => Promise<unknown>;
-    };
-
-    if (pm?.setPluginEnabled) {
-      try {
-        await pm.setPluginEnabled(params.id, true);
-      } catch {}
+  private async handlePluginEnable(params: PluginToggleParams): Promise<PluginToggleResult> {
+    const manager = this.pluginManager();
+    if (!manager?.setPluginEnabled) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.PLUGIN_OPERATION_FAILED,
+        'plugin manager is not available',
+      );
     }
-
-    return {
-      id: params.id,
-      enabled: true,
-      status: 'restart-required',
-      restartRequired: true,
-    };
+    return this.pluginChange(() => manager.setPluginEnabled!(params.id, true));
   }
 
-  private async handlePluginDisable(params: { id: string }): Promise<PluginToggleResult> {
-    const pm = this.ctx.get('pluginManager') as unknown as {
-      setPluginEnabled?: (id: string, enabled: boolean) => Promise<unknown>;
-    };
-
-    if (pm?.setPluginEnabled) {
-      try {
-        await pm.setPluginEnabled(params.id, false);
-      } catch {}
+  private async handlePluginDisable(params: PluginToggleParams): Promise<PluginToggleResult> {
+    const manager = this.pluginManager();
+    if (!manager?.setPluginEnabled) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.PLUGIN_OPERATION_FAILED,
+        'plugin manager is not available',
+      );
     }
+    return this.pluginChange(() => manager.setPluginEnabled!(params.id, false));
+  }
 
-    return {
-      id: params.id,
-      enabled: false,
-      status: 'restart-required',
-      restartRequired: true,
-    };
+  private async handlePluginBundleEnable(
+    params: PluginBundleToggleParams,
+  ): Promise<PluginToggleResult> {
+    const manager = this.pluginManager();
+    if (!manager?.setBundleEnabled) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.PLUGIN_OPERATION_FAILED,
+        'plugin manager is not available',
+      );
+    }
+    return this.pluginChange(() => manager.setBundleEnabled!(params.name, true));
+  }
+
+  private async handlePluginBundleDisable(
+    params: PluginBundleToggleParams,
+  ): Promise<PluginToggleResult> {
+    const manager = this.pluginManager();
+    if (!manager?.setBundleEnabled) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.PLUGIN_OPERATION_FAILED,
+        'plugin manager is not available',
+      );
+    }
+    return this.pluginChange(() => manager.setBundleEnabled!(params.name, false));
+  }
+
+  private async handlePluginRegistryProbe(): Promise<PluginRegistryProbeResult> {
+    return { result: await this.registryProbe.fastest() };
+  }
+
+  private async pluginMarketService(): Promise<
+    | {
+        listIndexes?: () => unknown;
+        setIndexes?: (urls: string[]) => Promise<void>;
+        search?: (url: string, query: object) => Promise<unknown>;
+        readEntryDetail?: (
+          url: string,
+          name: string,
+          version: string,
+          language: string,
+          options?: object,
+        ) => Promise<unknown>;
+      }
+    | undefined
+  > {
+    return this.waitForService('pluginMarket');
+  }
+
+  private async handlePluginMarketListIndexes(): Promise<PluginOperationResult> {
+    const market = await this.pluginMarketService();
+    if (!market?.listIndexes) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.PLUGIN_OPERATION_FAILED,
+        'plugin market is not available',
+      );
+    }
+    return this.pluginOperation(async () => await market.listIndexes!());
+  }
+
+  private async handlePluginMarketSetIndexes(
+    params: PluginMarketSetIndexesParams,
+  ): Promise<PluginOperationResult> {
+    const market = await this.pluginMarketService();
+    if (!market?.setIndexes) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.PLUGIN_OPERATION_FAILED,
+        'plugin market is not available',
+      );
+    }
+    return this.pluginOperation(async () => {
+      await market.setIndexes!(params.urls);
+      return null;
+    });
+  }
+
+  private async handlePluginMarketSearch(
+    params: PluginMarketSearchParams,
+  ): Promise<PluginOperationResult> {
+    const market = await this.pluginMarketService();
+    if (!market?.search) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.PLUGIN_OPERATION_FAILED,
+        'plugin market is not available',
+      );
+    }
+    return this.pluginOperation(() => market.search!(params.url, params.query));
+  }
+
+  private async handlePluginMarketReadEntryDetail(
+    params: PluginMarketReadEntryDetailParams,
+  ): Promise<PluginOperationResult> {
+    const market = await this.pluginMarketService();
+    if (!market?.readEntryDetail) {
+      throw new BridgeError(
+        BRIDGE_ERROR_CODES.PLUGIN_OPERATION_FAILED,
+        'plugin market is not available',
+      );
+    }
+    return this.pluginOperation(() =>
+      market.readEntryDetail!(params.url, params.name, params.version, params.language ?? 'en', {
+        ...(params.refresh === undefined ? {} : { refresh: params.refresh }),
+        ...(params.npmFileSources === undefined ? {} : { npmFileSources: params.npmFileSources }),
+      }),
+    );
   }
 
   private async handleCredentialsStatus(): Promise<{ items: unknown[] }> {
