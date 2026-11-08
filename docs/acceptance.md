@@ -302,6 +302,6 @@
 - 项 3 异步响应会话隔离：主要 UiMessage 已加会话/代数守卫（`c5d0854`）；dock 布局与反馈映射的按会话隔离仍待补。
 - 项 4 重连与启动诊断：指数退避自动重连、恢复活动会话、保留 InitializeResult、console 诊断环形缓冲与设置页展示已完成（`644371b`）。
 - 项 5 统计与生命周期卡片：每轮 token/速率/耗时 Stats 面板、运行计时器、compaction/turn-error/max-tokens/llm-retry 卡片已完成（`8cdc5f5`）。
-- 项 6 结构化工具卡：auto-review 拒绝优先卡（参数隐藏、原因归一化）、`grep/glob` 结构化 meta 卡（matches/paths/total/truncated/recovery）、`web_search/web_fetch` 结构化卡（来源列表、HTTP 状态、截断说明、外部打开）、PTC 子调用树（嵌套渲染，含嵌套 sub-call 的独立专用卡）、助手消息图片/文件块画廊已完成；`parse_search_meta`/`parse_web_meta`/`parse_auto_review_denial`/PTC 组装等由 14 个单测覆盖。视觉截图验证受环境阻塞（headless sway 重启后新 GTK 窗口 VK surface lost、grim 无 screencopy；且本机 `DEEPSEEK_API_KEY` 已 401 失效无法发起真实模型轮次）。
+- 项 6 结构化工具卡：auto-review 拒绝优先卡（参数隐藏、原因归一化）、`grep/glob` 结构化 meta 卡（matches/paths/total/truncated/recovery）、`web_search/web_fetch` 结构化卡（来源列表、HTTP 状态、截断说明、外部打开）、PTC 子调用树（嵌套渲染，含嵌套 sub-call 的独立专用卡）、助手消息图片/文件块画廊已完成（`5318ac9`）；`parse_search_meta`/`parse_web_meta`/`parse_auto_review_denial`/PTC 组装等由 14 个单测覆盖。视觉截图验证受环境阻塞（headless sway 重启后新 GTK 窗口 VK surface lost、grim 无 screencopy；且本机 `DEEPSEEK_API_KEY` 已 401 失效无法发起真实模型轮次）。
 - 项 7–12：待实施。
 - 模型链路根因修复：bridge catalog 默认 provider 改为 `agentDefaultModel` 校验值（`deepseek-official`），App 采纳目录默认并纠正失效会话；BridgeCredentials 从 `*_API_KEY` 环境变量取种（`81f1d2c`）。
