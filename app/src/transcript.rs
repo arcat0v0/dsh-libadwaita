@@ -63,6 +63,22 @@ pub enum RenderBlock {
         summary: String,
         seq: i64,
     },
+    CompactionCard {
+        summary: String,
+        seq: i64,
+    },
+    TurnError {
+        message: String,
+        code: Option<String>,
+        seq: i64,
+    },
+    MaxTokensHint {
+        seq: i64,
+    },
+    RetryHint {
+        message: String,
+        seq: i64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -652,6 +668,60 @@ impl ConversationTranscript {
                 });
                 Ok(TranscriptUpdate::Appended(self.blocks.len() - 1))
             }
+            "compaction/summary" => {
+                let summary = event.data["summary"]
+                    .as_str()
+                    .or_else(|| event.data["summary"]["text"].as_str())
+                    .or_else(|| event.data["text"].as_str())
+                    .unwrap_or("Context compacted")
+                    .to_string();
+                self.blocks.push(RenderBlock::CompactionCard {
+                    summary,
+                    seq: event.seq,
+                });
+                Ok(TranscriptUpdate::Appended(self.blocks.len() - 1))
+            }
+            "compaction/start" | "compaction/end" | "llm/retry-started" => {
+                Ok(TranscriptUpdate::Ignored)
+            }
+            "turn/end" => {
+                let kind = event.data["reason"]["kind"].as_str().unwrap_or_default();
+                match kind {
+                    "error" => {
+                        let message = event.data["reason"]["error"]["message"]
+                            .as_str()
+                            .unwrap_or("Turn failed")
+                            .to_string();
+                        let code = event.data["reason"]["error"]["code"]
+                            .as_str()
+                            .map(str::to_string);
+                        self.blocks.push(RenderBlock::TurnError {
+                            message,
+                            code,
+                            seq: event.seq,
+                        });
+                        Ok(TranscriptUpdate::Appended(self.blocks.len() - 1))
+                    }
+                    "max-tokens" => {
+                        self.blocks.push(RenderBlock::MaxTokensHint { seq: event.seq });
+                        Ok(TranscriptUpdate::Appended(self.blocks.len() - 1))
+                    }
+                    _ => Ok(TranscriptUpdate::Ignored),
+                }
+            }
+            "llm/retry" => {
+                self.retire_live_blocks();
+                self.live_attempt = None;
+                let message = event.data["failure"]["message"]
+                    .as_str()
+                    .unwrap_or("Retrying request")
+                    .to_string();
+                self.blocks.push(RenderBlock::RetryHint {
+                    message,
+                    seq: event.seq,
+                });
+                Ok(TranscriptUpdate::Appended(self.blocks.len() - 1))
+            }
             _ => {
                 if event.is_ignorable() {
                     Ok(TranscriptUpdate::Ignored)
@@ -923,4 +993,70 @@ pub fn parse_web_tool(tool_name: &str, arguments: &str, result: &str) -> WebTool
         status_code,
         content: result.to_string(),
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TurnStat {
+    pub turn: u32,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub elapsed_ms: u64,
+    pub tokens_per_sec: f64,
+}
+
+pub fn turn_stats(events: &[SessionEvent]) -> Vec<TurnStat> {
+    let mut stats = Vec::new();
+    let mut current: Option<(u32, u64, u64, u64, u64, u64)> = None;
+    for event in events {
+        match event.event_type.as_str() {
+            "turn/start" => {
+                let turn = event.data["turn"].as_u64().unwrap_or(0) as u32;
+                current = Some((turn, event.time, 0, 0, 0, 0));
+            }
+            "assistant/attempt" => {
+                let Some(state) = current.as_mut() else {
+                    continue;
+                };
+                let Some(stream) = event.data["stream"].as_array() else {
+                    continue;
+                };
+                for entry in stream {
+                    let chunk = entry.get("chunk").unwrap_or(entry);
+                    if chunk["type"].as_str() != Some("usage") {
+                        continue;
+                    }
+                    let usage = &chunk["usage"];
+                    let bucket = |key: &str| usage[key].as_u64().unwrap_or(0);
+                    state.2 = state.2.saturating_add(bucket("uncachedInputTokens"));
+                    state.3 = state.3.saturating_add(bucket("outputTokens"));
+                    state.4 = state.4.saturating_add(bucket("reasoningTokens"));
+                    state.5 = state.5.saturating_add(bucket("cacheReadTokens"));
+                }
+            }
+            "turn/end" => {
+                let Some((turn, start, input, output, reasoning, cache)) = current.take() else {
+                    continue;
+                };
+                let elapsed_ms = event.time.saturating_sub(start);
+                let tokens_per_sec = if elapsed_ms > 0 {
+                    output as f64 / (elapsed_ms as f64 / 1000.0)
+                } else {
+                    0.0
+                };
+                stats.push(TurnStat {
+                    turn,
+                    input_tokens: input,
+                    output_tokens: output,
+                    reasoning_tokens: reasoning,
+                    cache_read_tokens: cache,
+                    elapsed_ms,
+                    tokens_per_sec,
+                });
+            }
+            _ => {}
+        }
+    }
+    stats
 }

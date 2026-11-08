@@ -1462,5 +1462,113 @@ pub fn render_block(block: &RenderBlock) -> (gtk4::Box, Option<AssistantLiveHand
             summary,
             seq,
         } => (build_generic_event(event_type, summary, *seq), None),
+        RenderBlock::CompactionCard { summary, .. } => (build_compaction_card(summary), None),
+        RenderBlock::TurnError { message, code, .. } => {
+            (build_turn_error(message, code.as_deref()), None)
+        }
+        RenderBlock::MaxTokensHint { .. } => (build_max_tokens_hint(), None),
+        RenderBlock::RetryHint { message, .. } => (build_retry_hint(message), None),
     }
+}
+
+fn build_compaction_card(summary: &str) -> gtk4::Box {
+    let row = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing(8)
+        .css_classes(["card", "dsh-compaction-card"])
+        .margin_top(4)
+        .margin_bottom(4)
+        .build();
+    let icon = gtk4::Image::from_icon_name("view-refresh-symbolic");
+    row.append(&icon);
+    let label = gtk4::Label::builder()
+        .label(&format!("上下文压缩 · {}", summary))
+        .xalign(0.0)
+        .wrap(true)
+        .hexpand(true)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    row.append(&label);
+    row
+}
+
+fn build_turn_error(message: &str, code: Option<&str>) -> gtk4::Box {
+    let row = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing(8)
+        .margin_top(4)
+        .margin_bottom(4)
+        .build();
+    let dot = gtk4::Label::builder().label("●").css_classes(["error"]).build();
+    row.append(&dot);
+    let copy = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(2)
+        .hexpand(true)
+        .build();
+    let title = gtk4::Label::builder()
+        .label("轮次出错")
+        .xalign(0.0)
+        .css_classes(["error", "caption"])
+        .build();
+    copy.append(&title);
+    let message_label = gtk4::Label::builder()
+        .label(message)
+        .xalign(0.0)
+        .wrap(true)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    copy.append(&message_label);
+    row.append(&copy);
+    if let Some(code) = code {
+        let code_label = gtk4::Label::builder()
+            .label(code)
+            .css_classes(["monospace", "caption", "dim-label"])
+            .build();
+        row.append(&code_label);
+    }
+    row
+}
+
+fn build_max_tokens_hint() -> gtk4::Box {
+    let row = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(2)
+        .margin_top(4)
+        .margin_bottom(4)
+        .build();
+    let title = gtk4::Label::builder()
+        .label("已达到输出 token 上限")
+        .xalign(0.0)
+        .css_classes(["warning", "caption"])
+        .build();
+    row.append(&title);
+    let hint = gtk4::Label::builder()
+        .label("回答被截断，已有输出保留在对话中。发送“继续”可让模型接着输出。")
+        .xalign(0.0)
+        .wrap(true)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    row.append(&hint);
+    row
+}
+
+fn build_retry_hint(message: &str) -> gtk4::Box {
+    let row = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing(8)
+        .margin_top(4)
+        .margin_bottom(4)
+        .build();
+    let icon = gtk4::Image::from_icon_name("view-refresh-symbolic");
+    row.append(&icon);
+    let label = gtk4::Label::builder()
+        .label(&format!("正在重试 · {}", message))
+        .xalign(0.0)
+        .wrap(true)
+        .hexpand(true)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    row.append(&label);
+    row
 }

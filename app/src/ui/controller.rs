@@ -697,6 +697,39 @@ impl SessionController {
                 );
             });
 
+        {
+            let conv = controller.conversation_view.clone();
+            let starts = controller.turn_start_times.clone();
+            let active = controller.active_session.clone();
+            gtk4::glib::timeout_add_seconds_local(1, move || {
+                let id = active.borrow().as_ref().map(|session| session.id.clone());
+                if let Some(id) = id {
+                    if let Some(start) = starts.borrow().get(&id) {
+                        conv.set_running_elapsed(start.elapsed().as_secs());
+                    }
+                }
+                gtk4::glib::ControlFlow::Continue
+            });
+        }
+
+        {
+            let conv = controller.conversation_view.clone();
+            let active = controller.active_session.clone();
+            let stats_button = conv.stats_button().clone();
+            stats_button.connect_active_notify(move |button| {
+                if !button.is_active() {
+                    return;
+                }
+                let events = active
+                    .borrow()
+                    .as_ref()
+                    .map(|session| session.raw_events().iter().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                let stats = crate::transcript::turn_stats(&events);
+                conv.set_turn_stats(&stats);
+            });
+        }
+
         crate::ui::message_renderer::set_controller(&controller);
         controller
             .conversation_view

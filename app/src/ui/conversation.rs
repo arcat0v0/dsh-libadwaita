@@ -1,5 +1,5 @@
 use crate::protocol::{QueueItem, WorkspaceView};
-use crate::transcript::{ConversationTranscript, RenderBlock};
+use crate::transcript::{ConversationTranscript, RenderBlock, TurnStat};
 use crate::ui::composer::Composer;
 use crate::ui::copy::Copybook;
 use crate::ui::desktop::{open_path_in_default_app, open_terminal_in_dir};
@@ -84,6 +84,9 @@ pub struct ConversationView {
     transcript_box: gtk4::Box,
     welcome_bubble: gtk4::Box,
     status_label: gtk4::Label,
+    running_timer: gtk4::Label,
+    stats_button: gtk4::MenuButton,
+    stats_list: gtk4::Box,
     title_label: gtk4::Label,
     breadcrumb: gtk4::Label,
     jobs_popover: gtk4::Popover,
@@ -234,6 +237,31 @@ impl ConversationView {
             .build();
         session_header.append(&usage_label);
 
+        let stats_button = gtk4::MenuButton::builder()
+            .label("Stats")
+            .css_classes(["flat", "caption"])
+            .visible(false)
+            .build();
+        let stats_popover = gtk4::Popover::builder().build();
+        let stats_scroll = gtk4::ScrolledWindow::builder()
+            .min_content_height(80)
+            .max_content_height(320)
+            .min_content_width(280)
+            .propagate_natural_height(true)
+            .build();
+        let stats_list = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Vertical)
+            .spacing(4)
+            .margin_start(8)
+            .margin_end(8)
+            .margin_top(8)
+            .margin_bottom(8)
+            .build();
+        stats_scroll.set_child(Some(&stats_list));
+        stats_popover.set_child(Some(&stats_scroll));
+        stats_button.set_popover(Some(&stats_popover));
+        session_header.append(&stats_button);
+
         let context_button = gtk4::MenuButton::builder()
             .label("Context")
             .css_classes(["flat"])
@@ -282,6 +310,13 @@ impl ConversationView {
             .css_classes(["dim-label", "caption"])
             .build();
         session_header.append(&status_label);
+
+        let running_timer = gtk4::Label::builder()
+            .label("")
+            .visible(false)
+            .css_classes(["dim-label", "caption", "monospace"])
+            .build();
+        session_header.append(&running_timer);
 
         let dock_button = gtk4::Button::builder()
             .icon_name("sidebar-show-right-symbolic")
@@ -415,6 +450,9 @@ impl ConversationView {
             transcript_box,
             welcome_bubble,
             status_label,
+            running_timer,
+            stats_button,
+            stats_list,
             title_label,
             breadcrumb,
             jobs_popover,
@@ -540,6 +578,9 @@ impl ConversationView {
             other => other,
         });
         self.composer.set_is_running(status == "Running");
+        if status != "Running" {
+            self.running_timer.set_visible(false);
+        }
     }
 
     pub fn set_disconnected(&self) {
@@ -548,6 +589,65 @@ impl ConversationView {
             self.status_label.set_label("运行中（已暂停）");
         } else {
             self.status_label.set_label("已断开连接");
+        }
+        self.running_timer.set_visible(false);
+    }
+
+    pub fn set_running_elapsed(&self, seconds: u64) {
+        let text = if seconds < 60 {
+            format!("{}s", seconds)
+        } else {
+            format!("{}m{:02}s", seconds / 60, seconds % 60)
+        };
+        self.running_timer.set_label(&text);
+        self.running_timer.set_visible(true);
+    }
+
+    pub fn stats_button(&self) -> &gtk4::MenuButton {
+        &self.stats_button
+    }
+
+    pub fn set_turn_stats(&self, stats: &[TurnStat]) {
+        while let Some(child) = self.stats_list.first_child() {
+            self.stats_list.remove(&child);
+        }
+        self.stats_button.set_visible(!stats.is_empty());
+        if stats.is_empty() {
+            return;
+        }
+        for stat in stats.iter().rev() {
+            let row = gtk4::Box::builder()
+                .orientation(gtk4::Orientation::Vertical)
+                .spacing(2)
+                .css_classes(["card"])
+                .margin_top(2)
+                .margin_bottom(2)
+                .build();
+            let title = gtk4::Label::builder()
+                .label(&format!(
+                    "Turn {} · {:.1} tok/s · {:.1}s",
+                    stat.turn,
+                    stat.tokens_per_sec,
+                    stat.elapsed_ms as f64 / 1000.0
+                ))
+                .xalign(0.0)
+                .css_classes(["heading", "caption"])
+                .build();
+            row.append(&title);
+            let detail = gtk4::Label::builder()
+                .label(&format!(
+                    "in {} · out {} · reasoning {} · cache {}",
+                    compact_token_count(stat.input_tokens),
+                    compact_token_count(stat.output_tokens),
+                    compact_token_count(stat.reasoning_tokens),
+                    compact_token_count(stat.cache_read_tokens)
+                ))
+                .xalign(0.0)
+                .wrap(true)
+                .css_classes(["dim-label", "caption"])
+                .build();
+            row.append(&detail);
+            self.stats_list.append(&row);
         }
     }
 

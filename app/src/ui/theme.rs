@@ -296,6 +296,9 @@ menubutton.dsh-icon-button > button:active, menubutton.dsh-icon-button > button:
   border-radius: 6px;
   background: color-mix(in srgb, var(--window-fg-color) 6%, transparent);
 }
+.dsh-compaction-card {
+  padding: 8px 12px;
+}
 .dsh-hero {
   background: transparent;
 }
