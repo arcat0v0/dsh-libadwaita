@@ -238,10 +238,10 @@
 
 | # | 剩余差异 | 用户可见影响 | 保留原因 | 应用内 workaround |
 |---:|---|---|---|---|
-| 1 | 附件上传无分块进度/失败重试，无按会话图片缓存 | 大文件上传缺少进度反馈，图片重复读取 | UI scope；bridge `attachment/upload|read` 已是单次 base64 请求 | 小文件直接重试；图片在消息/工具卡内按需读取 |
+| 1 | 附件上传无分块进度/失败重试 | 大文件上传缺少进度反馈 | UI scope；bridge `attachment/upload|read` 已是单次 base64 请求 | 小文件直接重试；会话图片已按 `(sessionId, attachmentId)` 缓存复用 |
 | 2 | Trajectory 缺时间线条与 turn outline，未订阅 `tool-result/watch` | 无法按时间缩放或查看未落盘中间工具值 | UI scope + G13 派生边界 | 使用事件表、搜索、JSON 检查器与 page 快照 |
-| 3 | 无生成速度与每轮 token 面板 | 不能分析每轮成本；上下文占用已按 `projectedTokens/pressureTokens` 与 `contextWindow` 显示百分比，并展示 system/tools/messages 分解 | G12 base 省略 sessionStats/turnOutline | 查看会话 token 胶囊与 Context 弹层分解 |
-| 4 | 审批仍是模态 dialog，不接管 composer，无命令预览 | 审批时布局与焦点流程和 Web 不同 | UI scope；displayReason/warning 依赖 bridge payload | 鼠标或 Enter/Esc 完成 Allow Once/Reject |
+| 3 | 无完整 turn outline 与会话统计投影 | 无法按 Web 的 turn outline 浏览历史轮次；每轮速率/token 面板已本地实现 | G12 base 省略 sessionStats/turnOutline | 使用本地 Stats 面板、Context 弹层分解与 trajectory 事件表 |
+| 4 | 审批缺少倒计时/慢慢回答 | 长时间等待与迟到决策体验弱于 Web | G28 remainingMs/attachWait base 限制 | composer 接管、键盘仲裁、命令预览、推荐项预选与 plan review 已可用 |
 | 5 | 提问无倒计时/聚焦暂停/迟到补答，问题草稿不持久化，推荐项不预选 | 长时间等待与跨刷新恢复体验弱于 Web | G28 remainingMs/attachWait base 限制 + UI scope | 问题选项、分页、Skip、自由文本与可重开快照可用 |
 | 6 | Locale 选择不翻译现有 GTK 文案；Host 表单仅 primitive schema 字段，复杂/嵌套/secret 字段跳过；无字体族选择 | 语言切换不会即时改界面文案，部分高级设置不可编辑 | UI scope + 无 Rust i18n 词典；G16 schema 已可用 | 主题/字号/Developer Tools/通知可持久化；其余用 JSON Settings Editor |
 | 7 | Models 无 provider 编辑/排序/增删与在线 discover | 只能使用 catalog 返回的 provider/model，不能管理自定义 provider | UI scope + G17 discovery base 限制 | 使用 API key 与动态 model picker |
@@ -253,7 +253,7 @@
 | 13 | 会话全文搜索仍为标题/cwd 元数据；手动排序仅支持同组内拖拽 | 大量历史消息时检索效率低于 Web；跨工作区不能靠拖拽改变归属 | G04 base `fullText:false` + UI scope | Pin 置顶、Active/Archived/All 过滤、标题/cwd 搜索、手动排序 |
 | 14 | 右栏无分屏、浮动、全屏 | 多资源并排布局能力弱于 Web | UI scope | 每会话 tab/可见性已持久化，可手动切换固定标签 |
 | 15 | 终端是轮询 fallback，不是 VTE PTY | 无 shell 选择、重命名、resize、主题终端 | UI scope + G05 无 resize RPC；构建无 VTE 依赖 | Entry 发送命令，TextView 查看有界回滚并 Close |
-| 16 | Markdown 流式尾部增量解析与超大表格虚拟化缺失 | 超长流式 Markdown 会重复重建，超大表格无虚拟行 | UI scope | 定稿后完整渲染；表格可横向滚动 |
+| 16 | 超大 Markdown 表格未虚拟化 | 超大表格滚动与渲染压力大 | UI scope | 流式尾部增量解析已实现；定稿后完整渲染，表格可横向滚动 |
 
 ## 11. 手动桌面验证清单
 
@@ -270,7 +270,7 @@
 
 ## 12. 验收结论
 
-当前实现已覆盖核心会话、可靠 transcript、Queue/Steer、审批与提问、Workspace、Files/Preview/Save As、Terminal fallback、Schedules、Jobs、插件生命周期与市场、Settings typed forms/CAS、GoalBar、Trajectory 检查器、附件、上下文/usage、credential records 与账号只读视图。2026-11-08 补齐了持久会话冷列表、工作区成员关系、持久归档、按会话草稿/视图、修复消息流 revision/attempt 防护与历史缺口修复、打开旧会话时加载最近 200 条历史、上下文 meter 字段修正、审批协议可选 callId / 本地化 displayReason、GFM 表格/任务列表/脚注与 `path:line:column` 链接。相对 DSH Web，主要剩余差距集中在附件进度/缓存、Trajectory 时间线、每轮统计、OAuth、构建审批、重型文档预览、VTE 终端与完整国际化。
+当前实现已覆盖核心会话、可靠 transcript、Queue/Steer、审批与提问、Workspace、Files/Preview/Save As、Terminal fallback、Schedules、Jobs、插件生命周期与市场、Settings typed forms/CAS、GoalBar、Trajectory 检查器、附件、上下文/usage、credential records 与账号只读视图。2026-11-08 补齐了持久会话冷列表、工作区成员关系、持久归档、按会话草稿/视图、修复消息流 revision/attempt 防护与历史缺口修复、打开旧会话时加载最近 200 条历史、上下文 meter 字段修正、审批协议可选 callId / 本地化 displayReason、GFM 表格/任务列表/脚注与 `path:line:column` 链接。相对 DSH Web，主要剩余差距集中在附件上传进度、Trajectory 时间线、turn outline、OAuth、构建审批、重型文档预览、VTE 终端与完整国际化。
 
 按 132 行统计（2026-11-08 审计前的基线）：**37 已实现、72 部分实现、14 缺失、8 有意不移植、1 有意简化**。因此不能宣称“功能与 DSH Web 无异”；上述 16 项差异与 G07/G09/G20/G23/G27 的 base-blocked 边界是后续验收和范围决策的明确输入。
 
