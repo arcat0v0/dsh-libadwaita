@@ -282,7 +282,7 @@
 |---:|---|---|
 | 1 | 消息流与历史 | 已完成最近窗口加载、缺口修复、attempt/revision 防护、UI 块替换/删除对账与流式尾部增量解析 |
 | 2 | 审批/提问/计划 | 窗口级模态改为会话内 composer 接管；键盘仲裁、命令预览、推荐项预选、倒计时 |
-| 3 | 异步响应会话隔离 | SessionFollowed/History/Projections/Feedback/Terminal/Files 已加会话/代数守卫；dock 布局与反馈映射仍需按会话隔离 |
+| 3 | 异步响应会话隔离 | SessionFollowed/History/Projections/Feedback/Terminal/Files 已加会话/代数守卫；dock 可见性与选中 tab 按 sessionId 持久化、切换时恢复且 tab 变更即时写回（恢复期间抑制误存）；反馈项以全局唯一 message UUID 为键，迟到响应按 active session 丢弃 |
 | 4 | 重连与启动诊断 | 自动退避重连、恢复活动会话、保留 InitializeResult、插件级启动诊断 |
 | 5 | 统计与生命周期卡片 | 每轮速度/缓存面板、Continue 可达性（已修事件/状态触发）、compaction/retry/error 专用卡片、运行计时 |
 | 6 | 工具卡 | 结构化 read/edit/grep/glob/web 卡、auto-review 拒绝原因、消息图片与文件块、PTC 调用树 |
@@ -299,7 +299,7 @@
 
 - 项 1 消息流与历史：最近窗口加载、缺口修复、attempt/revision 防护（`c5d0854`）与流式尾部增量解析（项 9）已完成；本轮补齐 UI 块替换/删除：`ConversationView` 以 block fingerprint 比较已渲染前缀，pending user 持久化替换（seq 由 -2 变为正数）与 abandoned live 移除（数量减少）都会清除旧控件并按当前 blocks 重建，追加仍走增量路径；live 定稿时先同步最终文本，messageId 迟到时向已建动作行补挂点赞/点踩/Feedback。验证：新增 5 个 conversation lib 单测（pending 文本/提交指纹、live 文本/attempt 指纹、前缀追加/替换/删除判定、pending 替换与 abandoned 删除的 transcript 端到端指纹变化），完整 39 个测试二进制通过。未验证：真实模型流式下 abandoned/替换的视觉效果（测试 key 401、无 live agent）。
 - 项 2 审批/提问/计划：composer 接管卡片、键盘仲裁、命令预览、推荐项预选、计划审查、会话路由与 fail-closed 已完成（`81f1d2c`）；倒计时/慢慢回答依赖 Host `remainingMs`/`attachWait`（G28），延后。
-- 项 3 异步响应会话隔离：主要 UiMessage 已加会话/代数守卫（`c5d0854`）；dock 布局与反馈映射的按会话隔离仍待补。
+- 项 3 异步响应会话隔离：主要 UiMessage 已加会话/代数守卫（`c5d0854`）；本轮补齐 dock 布局：右栏可见性与选中 tab 均按 sessionId 写入 `dockVisible`/`dockTabs`，切换会话时先保存旧会话再恢复新会话，AdwTabView `selected-page` 变化即时写回当前会话，恢复期间用 guard 抑制把新 tab 误存到旧 session。反馈注册表仍以 message UUID 为键（存档中 `msg-<uuid>` 全局唯一），`FeedbackLoaded/Saved/Removed/Conflict` 均校验 active session，切换后迟到响应不会污染当前会话的赞踩状态。验证：扩充两个会话的 dock tab/visible 独立持久化单测，prefs 测试 9 项通过；代码审查确认 file/terminal/preview 的迟到响应均带 session 校验。未验证：headless 下 AdwTabView 的 page tab 不暴露 AT-SPI action、无指针注入，无法实际点击 Files/Preview 验证即时写回，仅由 prefs 单测与代码路径覆盖。
 - 项 4 重连与启动诊断：指数退避自动重连、恢复活动会话、保留 InitializeResult、console 诊断环形缓冲与设置页展示已完成（`644371b`）。
 - 项 5 统计与生命周期卡片：每轮 token/速率/耗时 Stats 面板、运行计时器、compaction/turn-error/max-tokens/llm-retry 卡片已完成（`8cdc5f5`）。
 - 项 6 结构化工具卡：auto-review 拒绝优先卡（参数隐藏、原因归一化）、`grep/glob` 结构化 meta 卡（matches/paths/total/truncated/recovery）、`web_search/web_fetch` 结构化卡（来源列表、HTTP 状态、截断说明、外部打开）、PTC 子调用树（嵌套渲染，含嵌套 sub-call 的独立专用卡）、助手消息图片/文件块画廊已完成（`5318ac9`）；`parse_search_meta`/`parse_web_meta`/`parse_auto_review_denial`/PTC 组装等由 14 个单测覆盖。视觉截图验证受环境阻塞（headless sway 重启后新 GTK 窗口 VK surface lost、grim 无 screencopy；且本机 `DEEPSEEK_API_KEY` 已 401 失效无法发起真实模型轮次）。

@@ -489,6 +489,7 @@ pub struct SessionController {
     attachment_seq: Rc<Cell<u64>>,
     paned: gtk4::Paned,
     dock_pointer_down: Rc<Cell<bool>>,
+    dock_layout_restoring: Cell<bool>,
     dock_width_save_gen: Rc<Cell<u64>>,
     pending_auto_send: Rc<RefCell<Option<String>>>,
     reconnect_active: Rc<Cell<bool>>,
@@ -573,6 +574,7 @@ impl SessionController {
             attachment_seq: Rc::new(Cell::new(1)),
             paned: main_window.paned().clone(),
             dock_pointer_down: Rc::new(Cell::new(false)),
+            dock_layout_restoring: Cell::new(false),
             dock_width_save_gen: Rc::new(Cell::new(0)),
             pending_auto_send: Rc::new(RefCell::new(None)),
             reconnect_active: Rc::new(Cell::new(false)),
@@ -853,6 +855,28 @@ impl SessionController {
                 }
             });
         });
+        let weak_for_dock_tab = Rc::downgrade(&controller);
+        controller
+            .right_dock
+            .tab_view()
+            .connect_selected_page_notify(move |_| {
+                let Some(ctrl) = weak_for_dock_tab.upgrade() else {
+                    return;
+                };
+                if ctrl.dock_layout_restoring.get() {
+                    return;
+                }
+                let Some(session_id) = ctrl.active_session_id() else {
+                    return;
+                };
+                let index = ctrl.right_dock.selected_index();
+                let mut prefs = ctrl.prefs.borrow_mut();
+                if prefs.dock_tab(&session_id) != Some(index) {
+                    prefs.set_dock_tab(&session_id, index);
+                    drop(prefs);
+                    ctrl.save_prefs();
+                }
+            });
         let weak_for_reorder = Rc::downgrade(&controller);
         controller
             .sidebar
@@ -2500,7 +2524,9 @@ impl SessionController {
         if visible {
             self.apply_dock_width();
         }
+        self.dock_layout_restoring.set(true);
         self.right_dock.select_tab(tab);
+        self.dock_layout_restoring.set(false);
     }
 
     pub fn remember_dock_for_session(&self, session_id: &str) {

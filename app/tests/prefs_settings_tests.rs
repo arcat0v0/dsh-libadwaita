@@ -29,12 +29,17 @@ fn test_archive_filter_and_dock_prefs_persist() {
     prefs.notifications_enabled = false;
     prefs.set_dock_tab("s1", 2);
     prefs.set_dock_visible("s1", false);
+    prefs.set_dock_tab("s2", 1);
+    prefs.set_dock_visible("s2", true);
     prefs.save(&path).unwrap();
     let loaded = UiPrefs::load(&path);
     assert_eq!(loaded.archive_filter, ArchiveFilter::Archived);
     assert!(!loaded.notifications_enabled);
     assert_eq!(loaded.dock_tab("s1"), Some(2));
     assert!(!loaded.dock_visible("s1"));
+    assert_eq!(loaded.dock_tab("s2"), Some(1));
+    assert!(loaded.dock_visible("s2"));
+    assert_eq!(loaded.dock_tab("s3"), None);
 }
 
 #[test]
