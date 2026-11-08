@@ -54,7 +54,7 @@
 | N15 | Workspace 创建/层级/重命名/删除与目录选择 | 部分实现 | `prompt_new_workspace` 选目录，`create_workspace`/`switch_workspace`/`rename_workspace`/`remove_workspace` 使用 `libadwaita/workspace/*`；切换会 release 旧视图并创建新 cwd 会话，但不迁移 composer 草稿。 |
 | N16 | 右停靠栏框架 | 部分实现 | `RightDock::new` 使用 `AdwTabView`/`AdwTabBar` 固定 Terminal/Files/Preview；`UiPrefs` 按会话保存选中 tab 与 dock 可见性，`win.toggle-dock` 与 follow 恢复；缺分屏、浮动、全屏。 |
 | N17 | 终端 tab | 部分实现 | `app/src/ui/terminal_panel.rs::TerminalPanel` 使用只读 `GtkTextView` + `GtkEntry`，`restore` 调 `terminal/list`，无终端时 `create_terminal`，输入调 `terminal/input`，可见时 500ms `terminal/output` 轮询并有 5000 行缓冲，Close 调 `terminal/close`；无 VTE、shell 选择、重命名与 resize。 |
-| N18 | 文件 tab | 已实现 | `app/src/ui/files_panel.rs::FilesPanel` 使用 `libadwaita/files/list` 列目录、`files/stat` 显示状态，目录行调用 `navigate_to`，文件行调用 `preview_file`；根路径由 `session/workdir/get` 提供。 |
+| N18 | 文件 tab | 已实现 | `FilesPanel` 基于 `ui/file_tree.rs::FileTreeModel` 渲染可展开层级树（目录优先排序、按需加载、折叠保留缓存、消失目录剪枝、面包屑导航、刷新、预览定位），消费 `files/list` 的工作区相对路径与 `files/stat`；目录行切换展开并懒加载，文件行 `preview_file` 并展开祖先面包屑。 |
 | N19 | 文档预览 tab | 部分实现 | `PreviewPanel::show_text` 使用 `sourceview5::View` 与语言映射，`show_image` 使用 `GtkPicture`，`show_unavailable` 显示失败；缺 PDF、Office、HTML、行定位与渲染/源码切换。 |
 | N20 | 浏览器 tab | 有意不移植 | 项目禁止内嵌 WebView；`app/src/ui/desktop.rs::open_path_in_default_app` 使用系统默认应用作为原生替代。 |
 | N21 | 子代理目录/血缘/transcript/@引用 | 部分实现 | `Sidebar::load_subagents` 从 `subagent/list` 渲染子代理，`win.open-child` → `open_child_session` 调 follow 并设置面包屑，`win.interrupt-subagent` → `interrupt_subagent`；无子代理续接 prompt、深层血缘树与专用 @引用候选。 |
@@ -303,5 +303,6 @@
 - 项 4 重连与启动诊断：指数退避自动重连、恢复活动会话、保留 InitializeResult、console 诊断环形缓冲与设置页展示已完成（`644371b`）。
 - 项 5 统计与生命周期卡片：每轮 token/速率/耗时 Stats 面板、运行计时器、compaction/turn-error/max-tokens/llm-retry 卡片已完成（`8cdc5f5`）。
 - 项 6 结构化工具卡：auto-review 拒绝优先卡（参数隐藏、原因归一化）、`grep/glob` 结构化 meta 卡（matches/paths/total/truncated/recovery）、`web_search/web_fetch` 结构化卡（来源列表、HTTP 状态、截断说明、外部打开）、PTC 子调用树（嵌套渲染，含嵌套 sub-call 的独立专用卡）、助手消息图片/文件块画廊已完成（`5318ac9`）；`parse_search_meta`/`parse_web_meta`/`parse_auto_review_denial`/PTC 组装等由 14 个单测覆盖。视觉截图验证受环境阻塞（headless sway 重启后新 GTK 窗口 VK surface lost、grim 无 screencopy；且本机 `DEEPSEEK_API_KEY` 已 401 失效无法发起真实模型轮次）。
-- 项 7–12：待实施。
+- 项 7 文件与 Markdown：文件面板改为层级树（目录优先排序、按需展开、折叠保留、消失目录剪枝、`FileTreeModel` 8 单测）、面包屑与刷新、预览定位、会话切换重置已完成（`TBD`）；同时修复右栏 dock 被 paned 挤到零宽不可见的问题（dock 最小宽度 340、`shrink_end_child(false)`）。GFM 已启用；PDF/Office 预览受 G07（Host 无 `officeToPdf`）限制延后。视觉验证：headless sway 中 Files tab 截图确认树渲染（docs/src/README.md 排序正确、面包屑、刷新后列出），目录行展开因 AT-SPI 不给 ActionRow 暴露 action 且无指针注入而未能截图验证。
+- 项 8–12：待实施。
 - 模型链路根因修复：bridge catalog 默认 provider 改为 `agentDefaultModel` 校验值（`deepseek-official`），App 采纳目录默认并纠正失效会话；BridgeCredentials 从 `*_API_KEY` 环境变量取种（`81f1d2c`）。
