@@ -1,11 +1,16 @@
 use crate::protocol::TodoItem;
 use crate::transcript::{
-    parse_bash_tool, parse_file_diff, parse_file_read, parse_search_tool, parse_web_tool,
-    BashToolInfo, FileDiffInfo, FileReadInfo, SearchToolInfo, WebToolInfo,
+    parse_auto_review_denial, parse_bash_tool, parse_file_diff, parse_file_read, parse_search_meta,
+    parse_search_tool, parse_web_meta, parse_web_tool, AutoReviewDenial, BashToolInfo, FileDiffInfo,
+    FileReadInfo, SearchCardMeta, SearchToolInfo, ToolCallInfo, WebCardKind, WebToolInfo,
 };
 use crate::ui::message_renderer::{build_code_block, render_markdown};
 use gtk4::prelude::*;
 use sourceview5::prelude::*;
+
+fn zh_locale() -> bool {
+    crate::ui::copy::system_locale().starts_with("zh")
+}
 
 pub fn build_card_shell(
     icon_name: &str,
@@ -265,7 +270,7 @@ pub fn build_read_card(info: &FileReadInfo) -> gtk4::Box {
     )
 }
 
-pub fn build_search_card(info: &SearchToolInfo) -> gtk4::Box {
+pub fn build_search_card(info: &SearchToolInfo, meta: Option<&SearchCardMeta>) -> gtk4::Box {
     let body_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
         .margin_start(10)
@@ -273,8 +278,89 @@ pub fn build_search_card(info: &SearchToolInfo) -> gtk4::Box {
         .margin_bottom(8)
         .build();
 
-    let output_view = build_code_block("text", &info.results);
-    body_box.append(&output_view);
+    if let Some(meta) = meta {
+        if let Some(files) = &meta.files {
+            for file in files {
+                let header = gtk4::Label::builder()
+                    .label(&format!("{} · {} matches", file.path, file.matches.len()))
+                    .css_classes(["caption", "dim-label"])
+                    .halign(gtk4::Align::Start)
+                    .margin_top(4)
+                    .build();
+                body_box.append(&header);
+                for matched in &file.matches {
+                    let row = gtk4::Box::builder()
+                        .orientation(gtk4::Orientation::Horizontal)
+                        .spacing(8)
+                        .build();
+                    let line_no = gtk4::Label::builder()
+                        .label(&matched.line_number.to_string())
+                        .css_classes(["monospace", "caption", "dim-label"])
+                        .width_chars(5)
+                        .build();
+                    row.append(&line_no);
+                    let line = gtk4::Label::builder()
+                        .label(&matched.line)
+                        .css_classes(["monospace"])
+                        .ellipsize(gtk4::pango::EllipsizeMode::End)
+                        .hexpand(true)
+                        .halign(gtk4::Align::Start)
+                        .build();
+                    row.append(&line);
+                    body_box.append(&row);
+                }
+            }
+        }
+        if let Some(paths) = &meta.paths {
+            for path in paths {
+                let row = gtk4::Label::builder()
+                    .label(path)
+                    .ellipsize(gtk4::pango::EllipsizeMode::Middle)
+                    .hexpand(true)
+                    .halign(gtk4::Align::Start)
+                    .build();
+                body_box.append(&row);
+            }
+        }
+        if meta.truncated {
+            let note = if zh_locale() {
+                "结果已截断"
+            } else {
+                "Results truncated"
+            };
+            let truncated = gtk4::Label::builder()
+                .label(&format!(
+                    "{} · {} / {}",
+                    note,
+                    body_rows(&body_box),
+                    meta.total
+                ))
+                .css_classes(["caption", "dim-label"])
+                .halign(gtk4::Align::Start)
+                .margin_top(4)
+                .build();
+            body_box.append(&truncated);
+            if let Some(recovery) = &meta.recovery {
+                body_box.append(&build_code_block("text", recovery));
+            }
+        } else {
+            let total = if zh_locale() {
+                format!("共 {} 个结果", meta.total)
+            } else {
+                format!("{} total", meta.total)
+            };
+            let total_label = gtk4::Label::builder()
+                .label(&total)
+                .css_classes(["caption", "dim-label"])
+                .halign(gtk4::Align::Start)
+                .margin_top(4)
+                .build();
+            body_box.append(&total_label);
+        }
+    } else {
+        let output_view = build_code_block("text", &info.results);
+        body_box.append(&output_view);
+    }
 
     let subtitle = format!("'{}' in {}", info.pattern, info.path);
     build_card_shell(
@@ -288,7 +374,17 @@ pub fn build_search_card(info: &SearchToolInfo) -> gtk4::Box {
     )
 }
 
-pub fn build_web_card(info: &WebToolInfo) -> gtk4::Box {
+fn body_rows(container: &gtk4::Box) -> usize {
+    let mut count = 0;
+    let mut child = container.first_child();
+    while let Some(widget) = child {
+        count += 1;
+        child = widget.next_sibling();
+    }
+    count
+}
+
+pub fn build_web_card(info: &WebToolInfo, meta: Option<&WebCardKind>) -> gtk4::Box {
     let badge = info.status_code.map(|code| {
         let lbl = gtk4::Label::builder()
             .label(&code.to_string())
@@ -304,10 +400,92 @@ pub fn build_web_card(info: &WebToolInfo) -> gtk4::Box {
         .margin_bottom(8)
         .build();
 
-    let md = render_markdown(&info.content);
-    body_box.append(&md);
+    let mut structured_url: Option<String> = None;
+    if let Some(meta) = meta {
+        match meta {
+            WebCardKind::Search {
+                answer,
+                sources,
+                truncated,
+            } => {
+                if let Some(answer) = answer {
+                    body_box.append(&render_markdown(answer));
+                }
+                for source in sources {
+                    let row = gtk4::Box::builder()
+                        .orientation(gtk4::Orientation::Vertical)
+                        .spacing(2)
+                        .margin_top(4)
+                        .build();
+                    let title = source.title.as_deref().unwrap_or(&source.url);
+                    let title_label = gtk4::LinkButton::builder()
+                        .label(title)
+                        .uri(&source.url)
+                        .halign(gtk4::Align::Start)
+                        .build();
+                    row.append(&title_label);
+                    if let Some(snippet) = &source.snippet {
+                        let snippet_label = gtk4::Label::builder()
+                            .label(snippet)
+                            .wrap(true)
+                            .wrap_mode(gtk4::pango::WrapMode::WordChar)
+                            .css_classes(["caption", "dim-label"])
+                            .halign(gtk4::Align::Start)
+                            .build();
+                        row.append(&snippet_label);
+                    }
+                    body_box.append(&row);
+                }
+                if *truncated {
+                    let note = if zh_locale() {
+                        "结果已截断"
+                    } else {
+                        "Results truncated"
+                    };
+                    let truncated_label = gtk4::Label::builder()
+                        .label(note)
+                        .css_classes(["caption", "dim-label"])
+                        .halign(gtk4::Align::Start)
+                        .margin_top(4)
+                        .build();
+                    body_box.append(&truncated_label);
+                }
+            }
+            WebCardKind::Fetch {
+                url,
+                status_code,
+                truncated,
+            } => {
+                structured_url = Some(url.clone());
+                let status_label = gtk4::Label::builder()
+                    .label(&format!("HTTP {}", status_code))
+                    .css_classes(["caption", "dim-label"])
+                    .halign(gtk4::Align::Start)
+                    .build();
+                body_box.append(&status_label);
+                if *truncated {
+                    let note = if zh_locale() {
+                        "内容已截断"
+                    } else {
+                        "Content truncated"
+                    };
+                    let truncated_label = gtk4::Label::builder()
+                        .label(note)
+                        .css_classes(["caption", "dim-label"])
+                        .halign(gtk4::Align::Start)
+                        .build();
+                    body_box.append(&truncated_label);
+                }
+            }
+        }
+    }
 
-    build_card_shell(
+    if structured_url.is_none() {
+        let md = render_markdown(&info.content);
+        body_box.append(&md);
+    }
+
+    let card = build_card_shell(
         "web-browser-symbolic",
         &info.tool,
         &info.query_or_url,
@@ -315,7 +493,98 @@ pub fn build_web_card(info: &WebToolInfo) -> gtk4::Box {
         Some(info.content.clone()),
         body_box.upcast(),
         true,
-    )
+    );
+    if let Some(url) = structured_url.or_else(|| info.query_or_url.starts_with("http").then(|| info.query_or_url.clone())) {
+        let open = gtk4::Button::builder()
+            .icon_name("external-link-symbolic")
+            .tooltip_text(if zh_locale() { "在浏览器中打开" } else { "Open in browser" })
+            .css_classes(["flat", "circular"])
+            .build();
+        let uri = url;
+        open.connect_clicked(move |_| {
+            let launcher = gtk4::UriLauncher::new(&uri);
+            let _ = launcher.launch_future(None::<&gtk4::Window>);
+        });
+        if let Some(header_button) = card.first_child().and_then(|w| w.downcast::<gtk4::Button>().ok()) {
+            if let Some(header_box) = header_button.first_child().and_then(|w| w.downcast::<gtk4::Box>().ok()) {
+                if let Some(subtitle) = header_box.last_child() {
+                    header_box.insert_child_after(&open, Some(&subtitle));
+                }
+            }
+        }
+    }
+    card
+}
+
+pub fn build_auto_review_denial_card(denial: &AutoReviewDenial) -> gtk4::Box {
+    let container = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .css_classes(["card"])
+        .margin_start(16)
+        .margin_end(16)
+        .margin_top(4)
+        .margin_bottom(6)
+        .build();
+    let strip = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing(8)
+        .css_classes(["dsh-interaction-strip"])
+        .build();
+    let icon = gtk4::Image::from_icon_name("dialog-warning-symbolic");
+    strip.append(&icon);
+    let title = if zh_locale() {
+        "Auto review 已拒绝"
+    } else {
+        "Rejected by Auto review"
+    };
+    let title_label = gtk4::Label::builder()
+        .label(title)
+        .css_classes(["heading"])
+        .build();
+    strip.append(&title_label);
+    container.append(&strip);
+
+    let body = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(4)
+        .margin_start(12)
+        .margin_end(12)
+        .margin_bottom(10)
+        .margin_top(8)
+        .build();
+    let fallback = if zh_locale() {
+        "Auto review 未授权此次操作"
+    } else {
+        "Auto review did not authorize this action"
+    };
+    let reason = denial.reason.clone().unwrap_or_else(|| fallback.to_string());
+    let prefix = if zh_locale() {
+        "工具未执行。原因："
+    } else {
+        "Tool was not executed. Reason: "
+    };
+    let reason_label = gtk4::Label::builder()
+        .label(&format!("{}{}", prefix, reason))
+        .wrap(true)
+        .wrap_mode(gtk4::pango::WrapMode::WordChar)
+        .xalign(0.0)
+        .halign(gtk4::Align::Start)
+        .selectable(true)
+        .build();
+    body.append(&reason_label);
+    let note = if zh_locale() {
+        "参数已隐藏"
+    } else {
+        "Arguments hidden"
+    };
+    let note_label = gtk4::Label::builder()
+        .label(note)
+        .css_classes(["caption", "dim-label"])
+        .halign(gtk4::Align::Start)
+        .build();
+    body.append(&note_label);
+    container.append(&body);
+    container
 }
 
 pub fn build_todo_diff_card(items: &[TodoItem], summary: &str) -> gtk4::Box {
@@ -520,34 +789,54 @@ pub fn build_generic_fallback_card(name: &str, arguments: &str, result: &str) ->
     )
 }
 
-pub fn render_tool_result_card(
-    name: &str,
-    arguments: Option<&str>,
-    result: &str,
-    _is_error: bool,
-) -> gtk4::Box {
-    let args_str = arguments.unwrap_or("{}");
+pub fn render_tool_result_card(info: &ToolCallInfo) -> gtk4::Box {
+    let card = render_single_tool_card(info);
+    if info.sub_calls.is_empty() {
+        return card;
+    }
+    let container = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .css_classes(["dsh-subcalls"])
+        .build();
+    for sub_call in &info.sub_calls {
+        container.append(&render_tool_result_card(sub_call));
+    }
+    let wrapper = gtk4::Box::builder().orientation(gtk4::Orientation::Vertical).build();
+    wrapper.append(&card);
+    wrapper.append(&container);
+    wrapper
+}
+
+fn render_single_tool_card(info: &ToolCallInfo) -> gtk4::Box {
+    if let Some(denial) = info.error.as_ref().and_then(parse_auto_review_denial) {
+        return build_auto_review_denial_card(&denial);
+    }
+    let name = info.name.as_str();
+    let args_str = info.arguments.as_deref().unwrap_or("{}");
+    let result = info.result.as_str();
 
     match name {
         "bash" | "pwsh" | "terminal_send" => {
-            let info = parse_bash_tool(args_str, result);
-            build_bash_card(&info)
+            let parsed = parse_bash_tool(args_str, result);
+            build_bash_card(&parsed)
         }
         "write" | "edit" | "apply_patch" => {
-            let info = parse_file_diff(args_str, result);
-            build_diff_card(&info)
+            let parsed = parse_file_diff(args_str, result);
+            build_diff_card(&parsed)
         }
         "read" => {
-            let info = parse_file_read(args_str, result);
-            build_read_card(&info)
+            let parsed = parse_file_read(args_str, result);
+            build_read_card(&parsed)
         }
         "grep" | "glob" => {
-            let info = parse_search_tool(name, args_str, result);
-            build_search_card(&info)
+            let parsed = parse_search_tool(name, args_str, result);
+            let meta = parse_search_meta(info.meta.as_ref(), result);
+            build_search_card(&parsed, meta.as_ref())
         }
         "web_search" | "web_fetch" => {
-            let info = parse_web_tool(name, args_str, result);
-            build_web_card(&info)
+            let parsed = parse_web_tool(name, args_str, result);
+            let meta = parse_web_meta(name, info.meta.as_ref());
+            build_web_card(&parsed, meta.as_ref())
         }
         "read_image" => {
             let card = build_generic_fallback_card(name, args_str, result);

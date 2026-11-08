@@ -882,8 +882,10 @@ impl ConversationView {
         for block in blocks {
             let intermediate = matches!(
                 block,
-                RenderBlock::ToolResult { is_error: false, .. }
-                    | RenderBlock::GenericEvent { .. }
+                RenderBlock::ToolResult { info, .. } if !info.is_error
+            ) || matches!(
+                block,
+                RenderBlock::GenericEvent { .. }
                     | RenderBlock::TodoBlock { .. }
             );
             if intermediate {

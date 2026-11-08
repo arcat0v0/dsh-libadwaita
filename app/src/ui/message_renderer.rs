@@ -1,5 +1,5 @@
 use crate::protocol::{MessageFeedbackItem, TodoItem, UserImageAttachment};
-use crate::transcript::{RenderBlock, ToolCallItem};
+use crate::transcript::{MessageAttachment, MessageFileAttachment, RenderBlock, ToolCallItem};
 use crate::ui::controller::SessionController;
 use gtk4::prelude::*;
 use libadwaita::prelude::*;
@@ -770,6 +770,37 @@ pub fn build_attachment_thumbnail(image: &UserImageAttachment) -> gtk4::Button {
     build_user_image(image)
 }
 
+fn build_message_file_chip(file: &MessageFileAttachment) -> gtk4::Box {
+    let chip = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing(6)
+        .css_classes(["card"])
+        .margin_start(4)
+        .margin_end(4)
+        .margin_top(2)
+        .margin_bottom(2)
+        .build();
+    let icon = gtk4::Image::from_icon_name("text-x-generic-symbolic");
+    chip.append(&icon);
+    let size = file
+        .bytes
+        .map(crate::ui::conversation::compact_token_count)
+        .unwrap_or_default();
+    let label = if size.is_empty() {
+        file.name.clone()
+    } else {
+        format!("{} · {}", file.name, size)
+    };
+    let label = gtk4::Label::builder()
+        .label(&label)
+        .ellipsize(gtk4::pango::EllipsizeMode::End)
+        .max_width_chars(32)
+        .css_classes(["caption"])
+        .build();
+    chip.append(&label);
+    chip
+}
+
 fn build_question_reply(
     summary: &str,
     selected: &[String],
@@ -987,6 +1018,7 @@ pub fn build_assistant_message(
     text: &str,
     reasoning: Option<&str>,
     tool_calls: &[ToolCallItem],
+    attachments: &[MessageAttachment],
     is_live: bool,
     seq: Option<i64>,
     time: u64,
@@ -1058,6 +1090,26 @@ pub fn build_assistant_message(
         content_box.append(&rendered);
     }
     bubble.append(&content_box);
+    if !attachments.is_empty() {
+        let gallery = gtk4::FlowBox::builder()
+            .selection_mode(gtk4::SelectionMode::None)
+            .max_children_per_line(3)
+            .margin_start(10)
+            .margin_end(10)
+            .margin_top(6)
+            .build();
+        for attachment in attachments {
+            match attachment {
+                MessageAttachment::Image(image) => {
+                    gallery.append(&build_attachment_thumbnail(image));
+                }
+                MessageAttachment::File(file) => {
+                    gallery.append(&build_message_file_chip(file));
+                }
+            }
+        }
+        bubble.append(&gallery);
+    }
     let content_for_menu = content_box.clone();
     attach_dynamic_context_menu(
         &content_box,
@@ -1412,6 +1464,7 @@ pub fn render_block(block: &RenderBlock) -> (gtk4::Box, Option<AssistantLiveHand
             text,
             reasoning,
             tool_calls,
+            attachments,
             is_live,
             seq,
             time,
@@ -1421,25 +1474,15 @@ pub fn render_block(block: &RenderBlock) -> (gtk4::Box, Option<AssistantLiveHand
                 text,
                 reasoning.as_deref(),
                 tool_calls,
+                attachments,
                 *is_live,
                 *seq,
                 *time,
             );
             (widget, Some(handle))
         }
-        RenderBlock::ToolResult {
-            name,
-            arguments,
-            result,
-            is_error,
-            ..
-        } => (
-            crate::ui::cards::render_tool_result_card(
-                name,
-                arguments.as_deref(),
-                result,
-                *is_error,
-            ),
+        RenderBlock::ToolResult { info, .. } => (
+            crate::ui::cards::render_tool_result_card(info),
             None,
         ),
         RenderBlock::PlanCard { plan, status, .. } => (

@@ -1,5 +1,6 @@
 use crate::protocol::*;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCallItem {
@@ -27,6 +28,7 @@ pub enum RenderBlock {
         text: String,
         reasoning: Option<String>,
         tool_calls: Vec<ToolCallItem>,
+        attachments: Vec<MessageAttachment>,
         is_live: bool,
         attempt_id: Option<String>,
         seq: Option<i64>,
@@ -34,10 +36,7 @@ pub enum RenderBlock {
     },
     ToolResult {
         call_id: String,
-        name: String,
-        arguments: Option<String>,
-        result: String,
-        is_error: bool,
+        info: ToolCallInfo,
         seq: i64,
     },
     PlanModeBadge {
@@ -126,6 +125,7 @@ pub struct ConversationTranscript {
     stream_revision: u64,
     live_attempt: Option<LiveAttemptState>,
     pending_tool_calls: std::collections::HashMap<String, (String, String)>,
+    ptc_dispatches: Vec<PtcDispatchRecord>,
     pending_user: Option<usize>,
 }
 
@@ -143,6 +143,7 @@ impl ConversationTranscript {
             stream_revision: 0,
             live_attempt: None,
             pending_tool_calls: std::collections::HashMap::new(),
+            ptc_dispatches: Vec::new(),
             pending_user: None,
         }
     }
@@ -173,8 +174,8 @@ impl ConversationTranscript {
                     Some(trimmed.to_string())
                 }
             }
-            RenderBlock::ToolResult { result, .. } => {
-                let trimmed = result.trim();
+            RenderBlock::ToolResult { info, .. } => {
+                let trimmed = info.result.trim();
                 if trimmed.is_empty() {
                     None
                 } else {
@@ -203,6 +204,7 @@ impl ConversationTranscript {
         self.stream_revision = 0;
         self.live_attempt = None;
         self.pending_tool_calls.clear();
+        self.ptc_dispatches.clear();
         self.pending_user = None;
     }
 
@@ -297,6 +299,7 @@ impl ConversationTranscript {
                 text: state.text.clone(),
                 reasoning: state.reasoning.clone(),
                 tool_calls: state.tool_calls.clone(),
+                attachments: Vec::new(),
                 is_live: true,
                 attempt_id: Some(b.attempt_id),
                 seq: None,
@@ -350,6 +353,7 @@ impl ConversationTranscript {
                     text: String::new(),
                     reasoning: None,
                     tool_calls: Vec::new(),
+                    attachments: Vec::new(),
                     is_live: true,
                     attempt_id: Some(attempt_id),
                     seq: None,
@@ -458,6 +462,7 @@ impl ConversationTranscript {
                 text: live.text.clone(),
                 reasoning: live.reasoning.clone(),
                 tool_calls: live.tool_calls.clone(),
+                attachments: Vec::new(),
                 is_live: true,
                 attempt_id: Some(attempt_id.to_string()),
                 seq: None,
@@ -532,6 +537,7 @@ impl ConversationTranscript {
             }
             "assistant/message" => {
                 let text = Self::extract_assistant_text(&event.data);
+                let attachments = parse_message_attachments(&event.data);
                 let mut matched_idx = None;
 
                 for (idx, block) in self.blocks.iter_mut().enumerate().rev() {
@@ -541,6 +547,7 @@ impl ConversationTranscript {
                             seq,
                             text: b_text,
                             time: b_time,
+                            attachments: b_attachments,
                             ..
                         } => {
                             if *is_live || *seq == Some(event.seq) {
@@ -550,6 +557,7 @@ impl ConversationTranscript {
                                 if !text.is_empty() {
                                     *b_text = text.clone();
                                 }
+                                *b_attachments = attachments.clone();
                                 matched_idx = Some(idx);
                                 break;
                             }
@@ -566,6 +574,7 @@ impl ConversationTranscript {
                         text,
                         reasoning: None,
                         tool_calls: Vec::new(),
+                        attachments,
                         is_live: false,
                         attempt_id: None,
                         seq: Some(event.seq),
@@ -598,7 +607,9 @@ impl ConversationTranscript {
                     });
                 }
                 self.pending_tool_calls.insert(call_id, (name, arguments));
-                Ok(TranscriptUpdate::Appended(self.blocks.len() - 1))
+                Ok(TranscriptUpdate::Appended(
+                    self.blocks.len().saturating_sub(1),
+                ))
             }
             "tool/result" => {
                 let call_id = event.data["message"]["callId"]
@@ -617,29 +628,76 @@ impl ConversationTranscript {
                 } else {
                     String::new()
                 };
-                let result = if let Some(arr) = event.data["message"]["content"].as_array() {
-                    arr.iter()
-                        .filter_map(|c| c["text"].as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                } else {
-                    event.data["result"].as_str().unwrap_or_default().to_string()
-                };
-                let is_error = event.data["isError"].as_bool().unwrap_or(false);
+                let result = tool_result_text(&event.data);
+                let is_error = event.data["message"]["isError"]
+                    .as_bool()
+                    .or_else(|| event.data["isError"].as_bool())
+                    .unwrap_or(false);
+                let error = event.data["error"].as_object().map(|error| ToolErrorInfo {
+                    name: error.get("name").and_then(Value::as_str).unwrap_or_default().to_string(),
+                    code: error.get("code").and_then(Value::as_str).unwrap_or_default().to_string(),
+                    reason: error.get("reason").and_then(Value::as_str).map(str::to_string),
+                });
+                let meta = event.data["meta"].as_object().map(|_| event.data["meta"].clone());
+                let sub_calls = self.take_ptc_sub_calls(&call_id);
 
                 self.blocks.push(RenderBlock::ToolResult {
                     call_id,
-                    name,
-                    arguments: if pending_args.is_empty() {
-                        None
-                    } else {
-                        Some(pending_args)
+                    info: ToolCallInfo {
+                        name,
+                        arguments: if pending_args.is_empty() {
+                            None
+                        } else {
+                            Some(pending_args)
+                        },
+                        result,
+                        is_error,
+                        error,
+                        meta,
+                        sub_calls,
                     },
-                    result,
-                    is_error,
                     seq: event.seq,
                 });
                 Ok(TranscriptUpdate::Appended(self.blocks.len() - 1))
+            }
+            "tool/ptc-dispatch-start" => {
+                self.ptc_dispatches.push(PtcDispatchRecord {
+                    parent_call_id: event.data["parentCallId"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                    sub_call_id: event.data["subCallId"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                    name: event.data["name"].as_str().unwrap_or_default().to_string(),
+                    arguments: event.data["arguments"]
+                        .as_object()
+                        .map(|_| event.data["arguments"].to_string()),
+                    settled: None,
+                });
+                Ok(TranscriptUpdate::Ignored)
+            }
+            "tool/ptc-dispatch" => {
+                let sub_call_id = event.data["subCallId"].as_str().unwrap_or_default();
+                if let Some(record) = self
+                    .ptc_dispatches
+                    .iter_mut()
+                    .rev()
+                    .find(|record| record.sub_call_id == sub_call_id)
+                {
+                    record.settled = Some(SettledDispatch {
+                        result: tool_result_text(&event.data),
+                        is_error: event.data["isError"].as_bool().unwrap_or(false),
+                        error: event.data["error"].as_object().map(|error| ToolErrorInfo {
+                            name: error.get("name").and_then(Value::as_str).unwrap_or_default().to_string(),
+                            code: error.get("code").and_then(Value::as_str).unwrap_or_default().to_string(),
+                            reason: error.get("reason").and_then(Value::as_str).map(str::to_string),
+                        }),
+                        meta: event.data["meta"].as_object().map(|_| event.data["meta"].clone()),
+                    });
+                }
+                Ok(TranscriptUpdate::Ignored)
             }
             "workspace/changes" => {
                 let summary = event.data["summary"].clone();
@@ -735,6 +793,62 @@ impl ConversationTranscript {
                 }
             }
         }
+    }
+
+    fn take_ptc_sub_calls(&mut self, parent_call_id: &str) -> Vec<ToolCallInfo> {
+        let mut indexes = Vec::new();
+        for (index, record) in self.ptc_dispatches.iter().enumerate() {
+            if record.parent_call_id == parent_call_id {
+                indexes.push(index);
+            }
+        }
+        if indexes.is_empty() {
+            return Vec::new();
+        }
+        let mut collected = Vec::new();
+        let mut remaining = Vec::new();
+        for (index, mut record) in self.ptc_dispatches.drain(..).enumerate() {
+            if indexes.contains(&index) {
+                collected.push(std::mem::replace(
+                    &mut record,
+                    PtcDispatchRecord {
+                        parent_call_id: String::new(),
+                        sub_call_id: String::new(),
+                        name: String::new(),
+                        arguments: None,
+                        settled: None,
+                    },
+                ));
+            } else {
+                remaining.push(record);
+            }
+        }
+        self.ptc_dispatches = remaining;
+        collected
+            .into_iter()
+            .map(|record| {
+                let settled = record.settled;
+                let sub_calls = self.take_ptc_sub_calls(&record.sub_call_id);
+                let (result, is_error, error, meta) = match settled {
+                    Some(settled) => (
+                        settled.result,
+                        settled.is_error,
+                        settled.error,
+                        settled.meta,
+                    ),
+                    None => (String::new(), false, None, None),
+                };
+                ToolCallInfo {
+                    name: record.name,
+                    arguments: record.arguments,
+                    result,
+                    is_error,
+                    error,
+                    meta,
+                    sub_calls,
+                }
+            })
+            .collect()
     }
 
     fn accumulate_chunk(live: &mut LiveAttemptState, chunk: StreamChunk) {
@@ -867,6 +981,310 @@ pub struct WebToolInfo {
     pub query_or_url: String,
     pub status_code: Option<u16>,
     pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolErrorInfo {
+    pub name: String,
+    pub code: String,
+    pub reason: Option<String>,
+}
+
+impl ToolErrorInfo {
+    pub fn auto_review_denial(&self) -> Option<AutoReviewDenial> {
+        parse_auto_review_denial(self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoReviewDenial {
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ToolCallInfo {
+    pub name: String,
+    pub arguments: Option<String>,
+    pub result: String,
+    pub is_error: bool,
+    pub error: Option<ToolErrorInfo>,
+    pub meta: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sub_calls: Vec<ToolCallInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum MessageAttachment {
+    Image(UserImageAttachment),
+    File(MessageFileAttachment),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageFileAttachment {
+    pub name: String,
+    pub bytes: Option<u64>,
+    pub attachment_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PtcDispatchRecord {
+    parent_call_id: String,
+    sub_call_id: String,
+    name: String,
+    arguments: Option<String>,
+    settled: Option<SettledDispatch>,
+}
+
+#[derive(Debug, Clone)]
+struct SettledDispatch {
+    result: String,
+    is_error: bool,
+    error: Option<ToolErrorInfo>,
+    meta: Option<serde_json::Value>,
+}
+
+pub fn normalize_denial_reason(reason: &str) -> Option<String> {
+    let mut normalized = String::new();
+    let mut pending_space = false;
+    for character in reason.trim().chars() {
+        if matches!(character, '\r' | '\n' | '\u{2028}' | '\u{2029}') {
+            pending_space = !normalized.is_empty();
+        } else if character.is_whitespace() {
+            if !normalized.is_empty() {
+                normalized.push(character);
+            }
+        } else {
+            if pending_space {
+                normalized.push(' ');
+                pending_space = false;
+            }
+            normalized.push(character);
+        }
+    }
+    let normalized = normalized.trim_end().to_string();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+pub fn parse_auto_review_denial(error: &ToolErrorInfo) -> Option<AutoReviewDenial> {
+    if error.name != "AutoReviewDeniedError" || error.code != "AUTO_REVIEW_DENIED" {
+        return None;
+    }
+    Some(AutoReviewDenial {
+        reason: error.reason.as_deref().and_then(normalize_denial_reason),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchMatch {
+    pub line_number: u64,
+    pub line: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchFileMatches {
+    pub path: String,
+    pub matches: Vec<SearchMatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SearchCardMeta {
+    pub files: Option<Vec<SearchFileMatches>>,
+    pub paths: Option<Vec<String>>,
+    pub total: u64,
+    pub truncated: bool,
+    pub recovery: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebSource {
+    pub url: String,
+    pub title: Option<String>,
+    pub snippet: Option<String>,
+    pub published_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebCardKind {
+    Search {
+        answer: Option<String>,
+        sources: Vec<WebSource>,
+        truncated: bool,
+    },
+    Fetch {
+        url: String,
+        status_code: u16,
+        truncated: bool,
+    },
+}
+
+fn tool_result_text(data: &serde_json::Value) -> String {
+    if let Some(arr) = data["message"]["content"].as_array() {
+        let mut parts = Vec::new();
+        for block in arr {
+            if block["type"] == "text" {
+                if let Some(text) = block["text"].as_str() {
+                    parts.push(text.to_string());
+                }
+            }
+        }
+        if !parts.is_empty() {
+            return parts.join("\n");
+        }
+    }
+    if let Some(arr) = data["content"].as_array() {
+        let mut parts = Vec::new();
+        for block in arr {
+            if block["type"] == "text" {
+                if let Some(text) = block["text"].as_str() {
+                    parts.push(text.to_string());
+                }
+            }
+        }
+        if !parts.is_empty() {
+            return parts.join("\n");
+        }
+    }
+    data["result"].as_str().unwrap_or_default().to_string()
+}
+
+pub fn parse_search_meta(
+    meta: Option<&serde_json::Value>,
+    result_text: &str,
+) -> Option<SearchCardMeta> {
+    let meta = meta?;
+    let truncated = meta["truncated"].as_bool()?;
+    let total = meta["total"].as_u64()?;
+    let shape = meta["shape"].as_str()?;
+    let mut parsed = SearchCardMeta {
+        total,
+        truncated,
+        recovery: if truncated {
+            let text = result_text.trim();
+            (!text.is_empty()).then(|| text.to_string())
+        } else {
+            None
+        },
+        ..Default::default()
+    };
+    if shape == "matches" {
+        let files = meta["files"].as_array()?;
+        let mut parsed_files = Vec::new();
+        for file in files {
+            let path = file["path"].as_str()?.to_string();
+            let mut matches = Vec::new();
+            for match_value in file["matches"].as_array()? {
+                let line_number = match_value["lineNumber"].as_u64()?;
+                if line_number < 1 {
+                    return None;
+                }
+                matches.push(SearchMatch {
+                    line_number,
+                    line: match_value["line"].as_str()?.to_string(),
+                });
+            }
+            parsed_files.push(SearchFileMatches { path, matches });
+        }
+        parsed.files = Some(parsed_files);
+    } else if shape == "paths" {
+        let paths = meta["paths"].as_array()?;
+        let mut parsed_paths = Vec::new();
+        for path in paths {
+            parsed_paths.push(path.as_str()?.to_string());
+        }
+        parsed.paths = Some(parsed_paths);
+    } else {
+        return None;
+    }
+    Some(parsed)
+}
+
+pub fn parse_web_meta(tool_name: &str, meta: Option<&serde_json::Value>) -> Option<WebCardKind> {
+    let meta = meta?;
+    let truncated = meta["truncated"].as_bool()?;
+    if tool_name == "web_search" {
+        let sources_value = meta["sources"].as_array()?;
+        let mut sources = Vec::new();
+        for source in sources_value {
+            sources.push(WebSource {
+                url: source["url"].as_str()?.to_string(),
+                title: source["title"].as_str().map(str::to_string),
+                snippet: source["snippet"].as_str().map(str::to_string),
+                published_at: source["publishedAt"].as_str().map(str::to_string),
+            });
+        }
+        return Some(WebCardKind::Search {
+            answer: meta["answer"].as_str().map(str::to_string),
+            sources,
+            truncated,
+        });
+    }
+    if tool_name == "web_fetch" {
+        return Some(WebCardKind::Fetch {
+            url: meta["url"].as_str()?.to_string(),
+            status_code: meta["statusCode"].as_u64()? as u16,
+            truncated,
+        });
+    }
+    None
+}
+
+pub fn parse_message_attachments(data: &serde_json::Value) -> Vec<MessageAttachment> {
+    let mut attachments = Vec::new();
+    let blocks = data["message"]["content"]
+        .as_array()
+        .or_else(|| data["content"].as_array());
+    let Some(blocks) = blocks else {
+        return attachments;
+    };
+    for block in blocks {
+        let block_type = block["type"].as_str().unwrap_or_default();
+        if block_type == "image" {
+            let attachment_id = block["attachment"]
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| block["attachment"]["id"].as_str().map(str::to_string))
+                .or_else(|| block["attachment"]["attachmentId"].as_str().map(str::to_string))
+                .or_else(|| block["attachmentId"].as_str().map(str::to_string));
+            attachments.push(MessageAttachment::Image(UserImageAttachment {
+                name: block["attachment"]["name"]
+                    .as_str()
+                    .or_else(|| block["name"].as_str())
+                    .map(str::to_string),
+                mime_type: block["attachment"]["mediaType"]
+                    .as_str()
+                    .or_else(|| block["mimeType"].as_str())
+                    .unwrap_or("image/png")
+                    .to_string(),
+                data: block["data"].as_str().map(str::to_string),
+                attachment_id,
+            }));
+        } else if block_type == "file" {
+            let attachment_id = block["attachment"]["attachmentId"]
+                .as_str()
+                .or_else(|| block["attachment"]["id"].as_str())
+                .or_else(|| block["attachmentId"].as_str())
+                .map(str::to_string);
+            let name = block["attachment"]["name"]
+                .as_str()
+                .or_else(|| block["name"].as_str())
+                .unwrap_or_default();
+            if name.is_empty() && attachment_id.is_none() {
+                continue;
+            }
+            attachments.push(MessageAttachment::File(MessageFileAttachment {
+                name: name.to_string(),
+                bytes: block["attachment"]["bytes"]
+                    .as_u64()
+                    .or_else(|| block["bytes"].as_u64()),
+                attachment_id,
+            }));
+        }
+    }
+    attachments
 }
 
 pub fn parse_bash_tool(arguments: &str, result: &str) -> BashToolInfo {

@@ -299,6 +299,11 @@ menubutton.dsh-icon-button > button:active, menubutton.dsh-icon-button > button:
 .dsh-compaction-card {
   padding: 8px 12px;
 }
+.dsh-subcalls {
+  border-left: 2px solid var(--border-color);
+  margin: 2px 16px 2px 38px;
+  padding-left: 8px;
+}
 .dsh-hero {
   background: transparent;
 }

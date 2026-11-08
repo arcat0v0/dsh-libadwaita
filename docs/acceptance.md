@@ -76,7 +76,7 @@
 | M04 | Markdown/GFM/表格/脚注/安全链接 | 部分实现 | `render_markdown` 支持表格（GtkGrid）、脚注、任务列表、代码与链接；`attach_link_handler` 允许 http/https/mailto，拦截 javascript/data/vbscript，文件链接切 Files/Preview 并定位行；缺流式尾部增量解析与表格虚拟化。 |
 | M05 | 代码高亮/复制/换行/行号/流式 fence | 部分实现 | `build_code_block` 使用 `sourceview5::View`、语言识别、行号与复制按钮，live handle 每次更新正文；无换行开关、未闭合 fence 专用策略与超长行降级。 |
 | M06 | TeX 数学与复制 | 有意简化 | 按 `docs/web-ui-map.md` §10.3 不引入 KaTeX/WebView；TeX 作为普通文本显示，不声称完成数学排版。 |
-| M07 | 图片/文件附件、画廊、灯箱 | 已实现 | Attach 按钮、文件拖放与 Ctrl+V 图片经 `attachment/upload` 后作为 prompt image 发送；`build_user_message` 用 GtkFlowBox 展示图片并点击打开 AdwDialog 灯箱，非图片插入 `@path` 文件 chip（名称/大小）。 |
+| M07 | 图片/文件附件、画廊、灯箱 | 已实现 | Attach 按钮、文件拖放与 Ctrl+V 图片经 `attachment/upload` 后作为 prompt image 发送；`build_user_message` 用 GtkFlowBox 展示图片并点击打开 AdwDialog 灯箱，非图片插入 `@path` 文件 chip（名称/大小）；助手消息的 image/file content block 经 `parse_message_attachments` 渲染为缩略图与文件 chip。 |
 | M08 | 文件链接行号/HTTP 打开偏好 | 已实现 | `links::classify_link` 解析 `#L24-L30`/`:24-30`，`SessionController::open_link_target` 对 HTTP(S)/mailto 调系统 `UriLauncher`，对文件路径切 Preview 并 `PreviewPanel::set_pending_line` 滚动。 |
 | M09 | 消息复制/时间/fork/扩展动作 | 部分实现 | 用户与定稿 assistant 消息均有 Copy 按钮和本地 HH:MM 时间戳，assistant 保留 Fork；无通用扩展动作菜单或时间戳悬浮详情。 |
 | M10 | 工作过程分组/思考预览/整轮折叠 | 部分实现 | 会话头 DropDown 提供 Concise/Standard/Detailed/Expanded 并持久化；非 Expanded 将连续非错误 tool/generic/todo 块折叠为 Intermediate steps（Detailed 默认展开），错误块不隐藏；reasoning 仍在自身 Expander，未完全复刻上游整轮折叠时机。 |
@@ -103,17 +103,17 @@
 
 | 编号 | 功能点 | 状态 | 证据与剩余差异 |
 |---|---|---|---|
-| C01 | 工具调用树/PTC/通用 fallback | 部分实现 | `ConversationTranscript::apply_stream_frame` 聚合 tool-call delta，`render_tool_result_card` 路由专用卡并回退 `build_generic_fallback_card`；无 PTC 子树、dispatch 节点与 Trajectory 跳转。 |
+| C01 | 工具调用树/PTC/通用 fallback | 部分实现 | `ConversationTranscript` 聚合 `tool/ptc-dispatch-start`/`tool/ptc-dispatch` 并按 `parentCallId` 组装 `ToolCallInfo::sub_calls` 树，`render_tool_result_card` 递归渲染子调用（`dsh-subcalls` 缩进竖线）并回退 `build_generic_fallback_card`；无 dispatch 节点跳转 Trajectory 与深度上限保护。 |
 | C02 | `read` 文件读取卡 | 部分实现 | `transcript.rs::parse_file_read` 与 `cards.rs::build_read_card` 展示路径、范围、行号代码；点击路径不打开 Files/Preview。 |
 | C03 | `read_image` 图片卡 | 部分实现 | `cards.rs` 对 `read_image` 解析 attachmentId/data 并复用 `attachment/read` 缩略图组件，点击开 AdwDialog；缺少尺寸/字节元数据展示，非标准结果回退通用卡。 |
 | C04 | `write/edit/apply_patch` diff 卡 | 部分实现 | `parse_file_diff` 与 `build_diff_card` 使用 diff 高亮展示路径/增删；无参数流式预期 diff、多文件列表与 stopped/meta 权威状态。 |
 | C05 | Bash/Pwsh/terminal_send 输出卡 | 部分实现 | `parse_bash_tool` 与 `build_bash_card` 展示命令、cwd、退出码和输出；无 running spinner、后台状态与信号胶囊。 |
 | C06 | `todo_write` 摘要与 diff | 部分实现 | `build_todo_diff_card` 列出 todos，`TodoDock` 显示完成计数；无 done/total 头部、新增/状态/移动/删除 diff 与早期基线比较。 |
-| C07 | `grep/glob` 搜索卡 | 部分实现 | `parse_search_tool` 与 `build_search_card` 展示 pattern/path/results；未处理 `meta.truncated`，点击不打开预览。 |
-| C08 | `web_search/web_fetch` 卡 | 部分实现 | `parse_web_tool` 与 `build_web_card` 展示 query/URL/status/Markdown；无结构化来源列表、截断说明与外部打开动作。 |
+| C07 | `grep/glob` 搜索卡 | 部分实现 | `parse_search_meta` 解析 `meta.shape`（matches/paths）、`total`/`truncated` 与 recovery 文本，`build_search_card` 结构化展示匹配行/路径列表与截断说明；无 meta 时回退原始输出；点击结果不打开预览。 |
+| C08 | `web_search/web_fetch` 卡 | 部分实现 | `parse_web_meta` 解析 `meta.sources`/`answer`/`url`/`statusCode`/`truncated`，`build_web_card` 结构化展示来源列表（链接/摘要）、HTTP 状态、截断说明与外部打开按钮；无 meta 时回退 Markdown。 |
 | C09 | `ask_user_question` 工具行 | 部分实现 | `cards.rs::render_tool_result_card` 对 `ask_user_question` 增加 Reopen，`SessionController::reopen_question` 调 `question/reopen`；快照仍通过可回答 dialog 展示，不是只读回看。 |
 | C10 | 控制回执/结构化 details 卡 | 部分实现 | `build_control_details_card` 对 subagent/job/schedule/goal/workflow/lsp 展示顶层 JSON key/value 与原始结果；无嵌套/类型化 details 模型，未知工具仍回退通用卡。 |
-| C11 | Auto-review 拒绝优先呈现 | 缺失 | 无 auto-review meta 解析、拒绝优先卡或参数隐藏策略。 |
+| C11 | Auto-review 拒绝优先呈现 | 已实现 | `parse_auto_review_denial` 识别 `AutoReviewDeniedError`/`AUTO_REVIEW_DENIED` 并归一化原因；`build_auto_review_denial_card` 优先渲染拒绝卡（「Auto review 已拒绝」+「工具未执行。原因：…」），隐藏参数与原始输出；嵌套 PTC 子调用同样生效。 |
 | C12 | 改动/交付卡与 review diff | 部分实现 | `workspace/changes` 事件生成 `DeliverablesBlock`，`build_deliverables_card` 显示 summary/diff；未调用 `workspace/changes` RPC 指定 turn/fileIndex，无 review tabs、stat 或 Present 文件按钮。 |
 | C13 | Cordis 动态插件定义卡 run/stop | 缺失 | base 不挂载 Cordis define runner，GUI 无动态实例卡或 run/stop。 |
 | C14 | 通用 Markdown/终端/diff/读取/搜索渲染器 | 已实现 | `render_markdown`、`build_code_block`、`build_card_shell` 为 M/C 卡提供统一 Markdown、SourceView、复制与展开能力。 |
@@ -302,5 +302,6 @@
 - 项 3 异步响应会话隔离：主要 UiMessage 已加会话/代数守卫（`c5d0854`）；dock 布局与反馈映射的按会话隔离仍待补。
 - 项 4 重连与启动诊断：指数退避自动重连、恢复活动会话、保留 InitializeResult、console 诊断环形缓冲与设置页展示已完成（`644371b`）。
 - 项 5 统计与生命周期卡片：每轮 token/速率/耗时 Stats 面板、运行计时器、compaction/turn-error/max-tokens/llm-retry 卡片已完成（`8cdc5f5`）。
-- 项 6–12：待实施。
+- 项 6 结构化工具卡：auto-review 拒绝优先卡（参数隐藏、原因归一化）、`grep/glob` 结构化 meta 卡（matches/paths/total/truncated/recovery）、`web_search/web_fetch` 结构化卡（来源列表、HTTP 状态、截断说明、外部打开）、PTC 子调用树（嵌套渲染，含嵌套 sub-call 的独立专用卡）、助手消息图片/文件块画廊已完成；`parse_search_meta`/`parse_web_meta`/`parse_auto_review_denial`/PTC 组装等由 14 个单测覆盖。视觉截图验证受环境阻塞（headless sway 重启后新 GTK 窗口 VK surface lost、grim 无 screencopy；且本机 `DEEPSEEK_API_KEY` 已 401 失效无法发起真实模型轮次）。
+- 项 7–12：待实施。
 - 模型链路根因修复：bridge catalog 默认 provider 改为 `agentDefaultModel` 校验值（`deepseek-official`），App 采纳目录默认并纠正失效会话；BridgeCredentials 从 `*_API_KEY` 环境变量取种（`81f1d2c`）。
