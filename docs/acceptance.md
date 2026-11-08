@@ -240,13 +240,13 @@
 |---:|---|---|---|---|
 | 1 | 附件上传无分块进度/失败重试，无按会话图片缓存 | 大文件上传缺少进度反馈，图片重复读取 | UI scope；bridge `attachment/upload|read` 已是单次 base64 请求 | 小文件直接重试；图片在消息/工具卡内按需读取 |
 | 2 | Trajectory 缺时间线条与 turn outline，未订阅 `tool-result/watch` | 无法按时间缩放或查看未落盘中间工具值 | UI scope + G13 派生边界 | 使用事件表、搜索、JSON 检查器与 page 快照 |
-| 3 | 无生成速度、缓存命中与每轮 token 面板 | 只能看会话 token 胶囊与上下文百分比，不能分析每轮成本 | G12 base 省略 sessionStats/turnOutline | 使用 usage 胶囊与 context breakdown JSON |
+| 3 | 无生成速度与每轮 token 面板 | 不能分析每轮成本；上下文占用已按 `projectedTokens/pressureTokens` 与 `contextWindow` 显示百分比，并展示 system/tools/messages 分解 | G12 base 省略 sessionStats/turnOutline | 查看会话 token 胶囊与 Context 弹层分解 |
 | 4 | 审批仍是模态 dialog，不接管 composer，无命令预览 | 审批时布局与焦点流程和 Web 不同 | UI scope；displayReason/warning 依赖 bridge payload | 鼠标或 Enter/Esc 完成 Allow Once/Reject |
 | 5 | 提问无倒计时/聚焦暂停/迟到补答，问题草稿不持久化，推荐项不预选 | 长时间等待与跨刷新恢复体验弱于 Web | G28 remainingMs/attachWait base 限制 + UI scope | 问题选项、分页、Skip、自由文本与可重开快照可用 |
 | 6 | Locale 选择不翻译现有 GTK 文案；Host 表单仅 primitive schema 字段，复杂/嵌套/secret 字段跳过；无字体族选择 | 语言切换不会即时改界面文案，部分高级设置不可编辑 | UI scope + 无 Rust i18n 词典；G16 schema 已可用 | 主题/字号/Developer Tools/通知可持久化；其余用 JSON Settings Editor |
 | 7 | Models 无 provider 编辑/排序/增删与在线 discover | 只能使用 catalog 返回的 provider/model，不能管理自定义 provider | UI scope + G17 discovery base 限制 | 使用 API key 与动态 model picker |
 | 8 | DeepSeek 浏览器 OAuth、账号 watch、充值跳转与配额恢复弹窗缺失 | 不能从原生窗口完成登录或处理欠费恢复 | G18 base-blocked；OAuth 依赖 Host webServer | 使用 API key onboarding；账号页读取状态/资料/余额并退出 |
-| 9 | 插件市场、registry 测速、approvedBuilds 构建审批、Loader 诊断/页面模块 retry 缺失 | 不能浏览市场、测速或批准构建脚本，诊断粒度较浅 | G23/G22/G24 base 与 UI scope | 使用 npm/Git/local spec、registry selector、Detail/Retry |
+| 9 | approvedBuilds 构建审批、Loader 诊断与页面模块 retry 仍缺 | 市场浏览、index 切换、registry 测速与安装源持久化已接入；不能批准构建脚本，诊断粒度较浅 | G23/G24 base 与 UI scope | 使用 npm/Git/local spec、市场 Discover、Detail/Retry |
 | 10 | Agent Team、Agent Preset、Cordis define run/stop 缺失 | 不能管理 Team、preset 或动态 Cordis 实例 | G09/G20/G27 base-blocked | 使用默认 profile 与现有 session/permission 控制 |
 | 11 | Workflow 专用节点与成员子会话导航缺失 | 多阶段 workflow 仅显示通用事件 | UI scope；session events 已可 follow | 从 Subagents 区打开已知 child session |
 | 12 | PDF/Office 预览与完整文档渲染缺失 | 交付文件不能在内嵌预览中查看 PDF/Office | G07 base-blocked + UI scope | Files 行 Save As、Preview 外部打开；系统默认应用处理 |
@@ -270,6 +270,27 @@
 
 ## 12. 验收结论
 
-当前实现已覆盖核心会话、可靠 transcript、Queue/Steer、审批与提问、Workspace、Files/Preview/Save As、Terminal fallback、Schedules、Jobs、插件生命周期、Settings typed forms/CAS、GoalBar、Trajectory 检查器、附件、上下文/usage、credential records 与账号只读视图。相对 DSH Web，主要剩余差距集中在附件进度/缓存、Trajectory 时间线、每轮统计、OAuth、插件市场/构建审批、重型文档预览、VTE 终端与完整国际化。
+当前实现已覆盖核心会话、可靠 transcript、Queue/Steer、审批与提问、Workspace、Files/Preview/Save As、Terminal fallback、Schedules、Jobs、插件生命周期与市场、Settings typed forms/CAS、GoalBar、Trajectory 检查器、附件、上下文/usage、credential records 与账号只读视图。2026-11-08 补齐了持久会话冷列表、工作区成员关系、持久归档、按会话草稿/视图、修复消息流 revision/attempt 防护与历史缺口修复、打开旧会话时加载最近 200 条历史、上下文 meter 字段修正、审批协议可选 callId / 本地化 displayReason、GFM 表格/任务列表/脚注与 `path:line:column` 链接。相对 DSH Web，主要剩余差距集中在附件进度/缓存、Trajectory 时间线、每轮统计、OAuth、构建审批、重型文档预览、VTE 终端与完整国际化。
 
-按 132 行统计：**37 已实现、72 部分实现、14 缺失、8 有意不移植、1 有意简化**。因此不能宣称“功能与 DSH Web 无异”；上述 16 项差异与 G07/G09/G20/G23/G27 的 base-blocked 边界是后续验收和范围决策的明确输入。
+按 132 行统计（2026-11-08 审计前的基线）：**37 已实现、72 部分实现、14 缺失、8 有意不移植、1 有意简化**。因此不能宣称“功能与 DSH Web 无异”；上述 16 项差异与 G07/G09/G20/G23/G27 的 base-blocked 边界是后续验收和范围决策的明确输入。
+
+## 13. 2026-11-08 对等性审计与后续排序
+
+六个子系统（N/M/C/A+S/P/O）共记录 124 条原始差距，去重后按“用户可见影响 × 可验证性”排序出 12 个行动项：
+
+| 排名 | 主题 | 主要缺口 |
+|---:|---|---|
+| 1 | 消息流与历史 | 已补最近窗口加载、缺口修复与 attempt/revision 防护；仍缺 UI 替换/删除、流式尾部增量解析 |
+| 2 | 审批/提问/计划 | 窗口级模态改为会话内 composer 接管；键盘仲裁、命令预览、推荐项预选、倒计时 |
+| 3 | 异步响应会话隔离 | SessionFollowed/History/Projections/Feedback/Terminal/Files 已加会话/代数守卫；dock 布局与反馈映射仍需按会话隔离 |
+| 4 | 重连与启动诊断 | 自动退避重连、恢复活动会话、保留 InitializeResult、插件级启动诊断 |
+| 5 | 统计与生命周期卡片 | 每轮速度/缓存面板、Continue 可达性（已修事件/状态触发）、compaction/retry/error 专用卡片、运行计时 |
+| 6 | 工具卡 | 结构化 read/edit/grep/glob/web 卡、auto-review 拒绝原因、消息图片与文件块、PTC 调用树 |
+| 7 | 文件与 Markdown | 文件树/面包屑/刷新、预览格式（PDF/Office 受 G07 限制）、行内代码与链接细节（GFM 已启用） |
+| 8 | 设置与凭证 | 设置 CAS revision 回写、Ctrl+, 路由（已修）、凭证写后校验、内置插件 inventory、子智能体模型授权 |
+| 9 | 滚动与流式渲染 | 尾部跟随/回底按钮/轮次导航、流式 Markdown 增量、fork 边界、四档 transcript 模式 |
+| 10 | 插件管理 | missing bundle 安装流程、安装/更新 RPC 丢失后的对账、组件诊断、README 图片与来源错误 |
+| 11 | 密钥与附件 | 完整 secret 格式掩码、feedback message id、会话图片缓存、附件暂存与队列附件 |
+| 12 | 布局与周边 | 侧边栏/右栏拖拽宽度持久化、分组/平铺排序、计划时钟、通知路由、打开方式与应用选择器 |
+
+仍需 Host 侧能力（bridge RPC / profile mount / 原生依赖）的延后项：完整存档确认与分页、全文搜索（`session-query-sqlite` 目前 `openAt: never`）、VTE 终端与多标签 dock、PDF/Office 预览、Agent Team 与子智能体层级、请求关联提交与分块附件、完整 Trajectory ledger、变更文件多文件 diff、定时提问迟到回答、Provider CRUD/OAuth、第三方插件声明式配置、后台任务 unfollow 与完整 i18n/快捷键录制。

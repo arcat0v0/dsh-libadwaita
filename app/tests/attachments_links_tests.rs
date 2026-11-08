@@ -46,4 +46,28 @@ fn test_link_classification_and_lines() {
             end_line: None,
         }
     );
+    assert_eq!(
+        classify_link("src/lib.rs:24:5"),
+        LinkTarget::File {
+            path: "src/lib.rs".to_string(),
+            line: Some(24),
+            end_line: None,
+        }
+    );
+    assert_eq!(
+        classify_link("src/lib.rs#L24C5"),
+        LinkTarget::File {
+            path: "src/lib.rs".to_string(),
+            line: Some(24),
+            end_line: None,
+        }
+    );
+    assert_eq!(
+        classify_link("src/lib.rs#L24C5-L30C2"),
+        LinkTarget::File {
+            path: "src/lib.rs".to_string(),
+            line: Some(24),
+            end_line: Some(30),
+        }
+    );
 }

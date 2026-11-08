@@ -71,6 +71,7 @@ pub struct LiveAttemptState {
     pub turn: u32,
     pub step: u32,
     pub revision: u64,
+    pub next_index: u32,
     pub text: String,
     pub reasoning: Option<String>,
     pub tool_calls: Vec<ToolCallItem>,
@@ -106,6 +107,7 @@ pub enum TranscriptUpdate {
 pub struct ConversationTranscript {
     blocks: Vec<RenderBlock>,
     last_seq: i64,
+    stream_revision: u64,
     live_attempt: Option<LiveAttemptState>,
     pending_tool_calls: std::collections::HashMap<String, (String, String)>,
     pending_user: Option<usize>,
@@ -122,6 +124,7 @@ impl ConversationTranscript {
         Self {
             blocks: Vec::new(),
             last_seq: -1,
+            stream_revision: 0,
             live_attempt: None,
             pending_tool_calls: std::collections::HashMap::new(),
             pending_user: None,
@@ -181,6 +184,7 @@ impl ConversationTranscript {
     pub fn clear(&mut self) {
         self.blocks.clear();
         self.last_seq = -1;
+        self.stream_revision = 0;
         self.live_attempt = None;
         self.pending_tool_calls.clear();
         self.pending_user = None;
@@ -255,11 +259,13 @@ impl ConversationTranscript {
 
     pub fn apply_baseline(&mut self, baseline: Option<SessionAssistantBaseline>) {
         if let Some(b) = baseline {
+            let next_index = b.chunks.len() as u32;
             let mut state = LiveAttemptState {
                 attempt_id: b.attempt_id.clone(),
                 turn: b.turn,
                 step: b.step,
                 revision: b.revision,
+                next_index,
                 text: String::new(),
                 reasoning: None,
                 tool_calls: Vec::new(),
@@ -268,6 +274,8 @@ impl ConversationTranscript {
             for chunk in b.chunks {
                 Self::accumulate_chunk(&mut state, chunk);
             }
+
+            self.stream_revision = b.revision;
 
             let block = RenderBlock::AssistantMessage {
                 text: state.text.clone(),
@@ -285,6 +293,25 @@ impl ConversationTranscript {
     }
 
     pub fn apply_stream_frame(&mut self, frame: AssistantStreamFrame) {
+        let (revision, is_start) = match &frame {
+            AssistantStreamFrame::Start { revision, .. } => (*revision, true),
+            AssistantStreamFrame::Chunk { revision, .. } => (*revision, false),
+            AssistantStreamFrame::End { revision, .. } => (*revision, false),
+        };
+
+        if is_start && revision == 1 && self.stream_revision != 0 {
+            self.retire_live_blocks();
+            self.live_attempt = None;
+            self.stream_revision = 0;
+        }
+        if revision != self.stream_revision + 1 {
+            self.retire_live_blocks();
+            self.live_attempt = None;
+            self.stream_revision = revision;
+            return;
+        }
+        self.stream_revision = revision;
+
         match frame {
             AssistantStreamFrame::Start {
                 attempt_id,
@@ -292,17 +319,18 @@ impl ConversationTranscript {
                 turn,
                 step,
             } => {
-                let state = LiveAttemptState {
+                self.retire_live_blocks();
+                self.live_attempt = Some(LiveAttemptState {
                     attempt_id: attempt_id.clone(),
                     turn,
                     step,
                     revision,
+                    next_index: 0,
                     text: String::new(),
                     reasoning: None,
                     tool_calls: Vec::new(),
-                };
-
-                let block = RenderBlock::AssistantMessage {
+                });
+                self.blocks.push(RenderBlock::AssistantMessage {
                     text: String::new(),
                     reasoning: None,
                     tool_calls: Vec::new(),
@@ -310,83 +338,115 @@ impl ConversationTranscript {
                     attempt_id: Some(attempt_id),
                     seq: None,
                     time: 0,
-                };
-
-                self.live_attempt = Some(state);
-                self.blocks.push(block);
+                });
             }
             AssistantStreamFrame::Chunk {
-                attempt_id, chunk, ..
+                attempt_id,
+                revision,
+                index,
+                chunk,
+                ..
             } => {
-                if self.live_attempt.is_none() {
-                    self.live_attempt = Some(LiveAttemptState {
-                        attempt_id: attempt_id.clone(),
-                        turn: 0,
-                        step: 0,
-                        revision: 0,
-                        text: String::new(),
-                        reasoning: None,
-                        tool_calls: Vec::new(),
-                    });
+                let dense = matches!(
+                    &self.live_attempt,
+                    Some(live)
+                        if live.attempt_id == attempt_id && live.next_index == index
+                );
+                if !dense {
+                    self.retire_live_blocks();
+                    self.live_attempt = None;
+                    return;
                 }
-
-                if let Some(live) = self.live_attempt.as_mut() {
-                    Self::accumulate_chunk(live, chunk);
-
-                    if let Some(last_block) = self.blocks.iter_mut().rev().find(|b| match b {
-                        RenderBlock::AssistantMessage { is_live, .. } => *is_live,
-                        _ => false,
-                    }) {
-                        if let RenderBlock::AssistantMessage {
-                            text,
-                            reasoning,
-                            tool_calls,
-                            ..
-                        } = last_block
-                        {
-                            *text = live.text.clone();
-                            *reasoning = live.reasoning.clone();
-                            *tool_calls = live.tool_calls.clone();
-                        }
-                    } else {
-                        self.blocks.push(RenderBlock::AssistantMessage {
-                            text: live.text.clone(),
-                            reasoning: live.reasoning.clone(),
-                            tool_calls: live.tool_calls.clone(),
-                            is_live: true,
-                            attempt_id: Some(attempt_id),
-                            seq: None,
-                            time: 0,
+                let Some(live) = self.live_attempt.as_mut() else {
+                    return;
+                };
+                Self::accumulate_chunk(live, chunk);
+                live.next_index += 1;
+                live.revision = revision;
+                let live = live.clone();
+                self.update_live_block(&attempt_id, &live);
+            }
+            AssistantStreamFrame::End {
+                attempt_id, outcome, ..
+            } => {
+                match outcome {
+                    StreamOutcome::Abandoned => {
+                        self.blocks.retain(|block| {
+                            !matches!(
+                                block,
+                                RenderBlock::AssistantMessage {
+                                    is_live: true,
+                                    attempt_id: Some(id),
+                                    ..
+                                } if *id == attempt_id
+                            )
                         });
                     }
-                }
-            }
-            AssistantStreamFrame::End { outcome, .. } => match outcome {
-                StreamOutcome::Abandoned => {
-                    self.blocks.retain(|b| match b {
-                        RenderBlock::AssistantMessage { is_live, .. } => !*is_live,
-                        _ => true,
-                    });
-                    self.live_attempt = None;
-                }
-                StreamOutcome::Committed { seq, .. } => {
-                    if let Some(last_live) = self.blocks.iter_mut().rev().find(|b| match b {
-                        RenderBlock::AssistantMessage { is_live, .. } => *is_live,
-                        _ => false,
-                    }) {
-                        if let RenderBlock::AssistantMessage {
+                    StreamOutcome::Committed { seq, .. } => {
+                        if let Some(RenderBlock::AssistantMessage {
                             is_live,
                             seq: block_seq,
                             ..
-                        } = last_live
-                        {
+                        }) = self.blocks.iter_mut().find(|block| {
+                            matches!(
+                                block,
+                                RenderBlock::AssistantMessage {
+                                    is_live: true,
+                                    attempt_id: Some(id),
+                                    ..
+                                } if *id == attempt_id
+                            )
+                        }) {
                             *is_live = false;
                             *block_seq = Some(seq);
                         }
                     }
-                    self.live_attempt = None;
                 }
-            },
+                self.live_attempt = None;
+            }
+        }
+    }
+
+    fn retire_live_blocks(&mut self) {
+        self.blocks.retain(|block| {
+            !matches!(
+                block,
+                RenderBlock::AssistantMessage { is_live: true, .. }
+            )
+        });
+    }
+
+    fn update_live_block(&mut self, attempt_id: &str, live: &LiveAttemptState) {
+        let existing = self.blocks.iter_mut().find(|block| {
+            matches!(
+                block,
+                RenderBlock::AssistantMessage {
+                    is_live: true,
+                    attempt_id: Some(id),
+                    ..
+                } if id == attempt_id
+            )
+        });
+        if let Some(RenderBlock::AssistantMessage {
+            text,
+            reasoning,
+            tool_calls,
+            ..
+        }) = existing
+        {
+            *text = live.text.clone();
+            *reasoning = live.reasoning.clone();
+            *tool_calls = live.tool_calls.clone();
+        } else {
+            self.blocks.push(RenderBlock::AssistantMessage {
+                text: live.text.clone(),
+                reasoning: live.reasoning.clone(),
+                tool_calls: live.tool_calls.clone(),
+                is_live: true,
+                attempt_id: Some(attempt_id.to_string()),
+                seq: None,
+                time: 0,
+            });
         }
     }
 

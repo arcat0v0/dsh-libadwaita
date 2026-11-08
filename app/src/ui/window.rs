@@ -5,7 +5,6 @@ use crate::ui::layout::{
     SIDEBAR_AUTO_COLLAPSE, SIDEBAR_COLLAPSED, SIDEBAR_DEFAULT, SIDEBAR_DRAWER_BREAKPOINT,
 };
 use crate::ui::right_dock::RightDock;
-use crate::ui::settings::show_settings_dialog;
 use crate::ui::sidebar::{animations_enabled, PanelState, Sidebar};
 use gtk4::prelude::*;
 use libadwaita as adw;
@@ -368,15 +367,6 @@ impl MainWindow {
         });
         window.add_action(&show_help_action);
 
-        let window_weak = window.downgrade();
-        let show_account_action = gtk4::gio::SimpleAction::new("show-account", None);
-        show_account_action.connect_activate(move |_, _| {
-            if let Some(w) = window_weak.upgrade() {
-                let _ = show_settings_dialog(&w, None, None);
-            }
-        });
-        window.add_action(&show_account_action);
-
         Self {
             window,
             toast_overlay,
@@ -392,6 +382,10 @@ impl MainWindow {
             panel_state,
             chrome,
         }
+    }
+
+    pub fn controller(&self) -> Option<Rc<SessionController>> {
+        self.controller.borrow().clone()
     }
 
     pub fn set_controller(&self, controller: Rc<SessionController>) {

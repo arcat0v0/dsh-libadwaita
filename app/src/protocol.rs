@@ -738,15 +738,41 @@ pub struct UserQuestionCancelledParams {
 pub struct ApprovalRequestParams {
     pub session_id: String,
     pub tool_name: String,
-    pub call_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_localized_text",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub display_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LocalizedText {
+    Text(String),
+    Localized(HashMap<String, String>),
+}
+
+fn deserialize_localized_text<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<LocalizedText>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| match value {
+        LocalizedText::Text(text) => Some(text),
+        LocalizedText::Localized(mut map) => map
+            .remove("zh")
+            .or_else(|| map.remove("en"))
+            .or_else(|| map.into_iter().next().map(|(_, text)| text)),
+    }))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

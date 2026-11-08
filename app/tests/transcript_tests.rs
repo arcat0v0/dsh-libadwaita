@@ -52,7 +52,7 @@ fn test_normal_streaming_and_commit_flow() {
 
     transcript.apply_stream_frame(AssistantStreamFrame::Chunk {
         attempt_id: "att-1".to_string(),
-        revision: 1,
+        revision: 2,
         index: 0,
         time: 1010,
         chunk: StreamChunk::TextDelta {
@@ -63,7 +63,7 @@ fn test_normal_streaming_and_commit_flow() {
 
     transcript.apply_stream_frame(AssistantStreamFrame::Chunk {
         attempt_id: "att-1".to_string(),
-        revision: 1,
+        revision: 3,
         index: 1,
         time: 1020,
         chunk: StreamChunk::TextDelta {
@@ -83,7 +83,7 @@ fn test_normal_streaming_and_commit_flow() {
 
     transcript.apply_stream_frame(AssistantStreamFrame::End {
         attempt_id: "att-1".to_string(),
-        revision: 1,
+        revision: 4,
         index: 2,
         outcome: StreamOutcome::Committed {
             event_type: "assistant/message".to_string(),
@@ -141,7 +141,7 @@ fn test_abandoned_stream_flow() {
 
     transcript.apply_stream_frame(AssistantStreamFrame::Chunk {
         attempt_id: "att-fail".to_string(),
-        revision: 1,
+        revision: 2,
         index: 0,
         time: 1000,
         chunk: StreamChunk::TextDelta {
@@ -154,7 +154,7 @@ fn test_abandoned_stream_flow() {
 
     transcript.apply_stream_frame(AssistantStreamFrame::End {
         attempt_id: "att-fail".to_string(),
-        revision: 1,
+        revision: 3,
         index: 1,
         outcome: StreamOutcome::Abandoned,
     });
@@ -175,7 +175,7 @@ fn test_reasoning_deltas_accumulation() {
 
     transcript.apply_stream_frame(AssistantStreamFrame::Chunk {
         attempt_id: "att-reason".to_string(),
-        revision: 1,
+        revision: 2,
         index: 0,
         time: 1000,
         chunk: StreamChunk::ReasoningDelta {
@@ -186,7 +186,7 @@ fn test_reasoning_deltas_accumulation() {
 
     transcript.apply_stream_frame(AssistantStreamFrame::Chunk {
         attempt_id: "att-reason".to_string(),
-        revision: 1,
+        revision: 3,
         index: 1,
         time: 1010,
         chunk: StreamChunk::ReasoningDelta {
@@ -197,7 +197,7 @@ fn test_reasoning_deltas_accumulation() {
 
     transcript.apply_stream_frame(AssistantStreamFrame::Chunk {
         attempt_id: "att-reason".to_string(),
-        revision: 1,
+        revision: 4,
         index: 2,
         time: 1020,
         chunk: StreamChunk::TextDelta {
@@ -414,4 +414,179 @@ fn test_question_reply_renders_readonly_block() {
         }
         other => panic!("unexpected block: {:?}", other),
     }
+}
+
+#[test]
+fn test_stream_rejects_foreign_attempt_at_dense_revision() {
+    let mut transcript = ConversationTranscript::new();
+    transcript.apply_stream_frame(AssistantStreamFrame::Start {
+        attempt_id: "att-1".to_string(),
+        revision: 1,
+        turn: 1,
+        step: 0,
+    });
+    transcript.apply_stream_frame(AssistantStreamFrame::Chunk {
+        attempt_id: "att-1".to_string(),
+        revision: 2,
+        index: 0,
+        time: 1000,
+        chunk: StreamChunk::TextDelta {
+            index: 0,
+            text: "first attempt".to_string(),
+        },
+    });
+    transcript.apply_stream_frame(AssistantStreamFrame::Chunk {
+        attempt_id: "att-2".to_string(),
+        revision: 3,
+        index: 1,
+        time: 1010,
+        chunk: StreamChunk::TextDelta {
+            index: 0,
+            text: "foreign attempt".to_string(),
+        },
+    });
+    assert!(
+        transcript.blocks().is_empty(),
+        "a foreign attempt must retire the live block"
+    );
+
+    transcript.apply_stream_frame(AssistantStreamFrame::End {
+        attempt_id: "att-2".to_string(),
+        revision: 4,
+        index: 2,
+        outcome: StreamOutcome::Committed {
+            event_type: "assistant/message".to_string(),
+            seq: 1,
+        },
+    });
+    assert!(transcript.blocks().is_empty());
+}
+
+#[test]
+fn test_stream_start_replaces_superseded_attempt() {
+    let mut transcript = ConversationTranscript::new();
+    transcript.apply_stream_frame(AssistantStreamFrame::Start {
+        attempt_id: "att-1".to_string(),
+        revision: 1,
+        turn: 1,
+        step: 0,
+    });
+    transcript.apply_stream_frame(AssistantStreamFrame::Chunk {
+        attempt_id: "att-1".to_string(),
+        revision: 2,
+        index: 0,
+        time: 1000,
+        chunk: StreamChunk::TextDelta {
+            index: 0,
+            text: "superseded".to_string(),
+        },
+    });
+    transcript.apply_stream_frame(AssistantStreamFrame::Start {
+        attempt_id: "att-2".to_string(),
+        revision: 1,
+        turn: 1,
+        step: 1,
+    });
+    assert_eq!(transcript.blocks().len(), 1);
+    match &transcript.blocks()[0] {
+        RenderBlock::AssistantMessage {
+            is_live,
+            text,
+            attempt_id,
+            ..
+        } => {
+            assert!(is_live);
+            assert_eq!(text, "");
+            assert_eq!(attempt_id.as_deref(), Some("att-2"));
+        }
+        _ => panic!("expected the replacement attempt"),
+    }
+}
+
+#[test]
+fn test_stream_chunk_index_must_be_dense() {
+    let mut transcript = ConversationTranscript::new();
+    transcript.apply_stream_frame(AssistantStreamFrame::Start {
+        attempt_id: "att-1".to_string(),
+        revision: 1,
+        turn: 1,
+        step: 0,
+    });
+    transcript.apply_stream_frame(AssistantStreamFrame::Chunk {
+        attempt_id: "att-1".to_string(),
+        revision: 2,
+        index: 0,
+        time: 1000,
+        chunk: StreamChunk::TextDelta {
+            index: 0,
+            text: "kept".to_string(),
+        },
+    });
+    transcript.apply_stream_frame(AssistantStreamFrame::Chunk {
+        attempt_id: "att-1".to_string(),
+        revision: 3,
+        index: 2,
+        time: 1010,
+        chunk: StreamChunk::TextDelta {
+            index: 0,
+            text: "out of order".to_string(),
+        },
+    });
+    assert!(
+        transcript.blocks().is_empty(),
+        "a non-dense chunk must retire the live attempt"
+    );
+}
+
+#[test]
+fn test_baseline_stream_continues_at_next_revision() {
+    let mut transcript = ConversationTranscript::new();
+    transcript.apply_baseline(Some(SessionAssistantBaseline {
+        attempt_id: "att-base".to_string(),
+        turn: 2,
+        step: 0,
+        revision: 3,
+        chunks: vec![StreamChunk::TextDelta {
+            index: 0,
+            text: "base".to_string(),
+        }],
+    }));
+    transcript.apply_stream_frame(AssistantStreamFrame::Chunk {
+        attempt_id: "att-base".to_string(),
+        revision: 4,
+        index: 1,
+        time: 1000,
+        chunk: StreamChunk::TextDelta {
+            index: 1,
+            text: " continued".to_string(),
+        },
+    });
+    match &transcript.blocks()[0] {
+        RenderBlock::AssistantMessage { text, .. } => assert_eq!(text, "base continued"),
+        _ => panic!("expected baseline attempt"),
+    }
+}
+
+#[test]
+fn test_terminal_error_code_scan() {
+    let event = |event_type: &str, seq: i64, data: serde_json::Value| SessionEvent {
+        event_type: event_type.to_string(),
+        seq,
+        time: 1000 + seq as u64,
+        data,
+        ignorable: None,
+        surface_op: None,
+        source_event_seqs: None,
+    };
+    let error = event("turn/end", 2, serde_json::json!({"turn": 1, "reason": {"code": "RATE_LIMIT"}}));
+    let prompt = event("user/message", 3, serde_json::json!({"content": "next"}));
+    assert_eq!(
+        terminal_error_code(&[event("turn/start", 1, serde_json::json!({})), error.clone()]),
+        Some("RATE_LIMIT".to_string())
+    );
+    assert_eq!(terminal_error_code(&[error, prompt]), None);
+    assert_eq!(
+        terminal_error_code(&[event("stream/error", 4, serde_json::json!({"error": {"code": "STREAM_CLOSED"}}))]),
+        Some("STREAM_CLOSED".to_string())
+    );
 }

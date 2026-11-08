@@ -4,6 +4,31 @@ use std::collections::VecDeque;
 
 pub const MAX_RAW_EVENTS: usize = 2000;
 
+pub fn terminal_error_code(events: &[SessionEvent]) -> Option<String> {
+    for event in events.iter().rev() {
+        if event.event_type == "user/message" {
+            return None;
+        }
+        if event.event_type.contains("error") {
+            if let Some(code) = event.data["code"].as_str() {
+                return Some(code.to_string());
+            }
+            if let Some(code) = event.data["error"]["code"].as_str() {
+                return Some(code.to_string());
+            }
+        }
+        if event.event_type == "turn/end" {
+            if let Some(code) = event.data["reason"]["code"].as_str() {
+                return Some(code.to_string());
+            }
+            if let Some(code) = event.data["outcome"]["code"].as_str() {
+                return Some(code.to_string());
+            }
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionStatus {
     Idle,

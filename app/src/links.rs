@@ -47,6 +47,17 @@ pub fn parse_file_reference(raw: &str) -> Option<LinkTarget> {
     }
     if let Some((path, suffix)) = target.rsplit_once(':') {
         if path.contains('/') && suffix.chars().all(|c| c.is_ascii_digit() || c == '-') {
+            if !suffix.contains('-') {
+                if let Some((path, line)) = path.rsplit_once(':') {
+                    if !line.is_empty() && line.chars().all(|c| c.is_ascii_digit()) {
+                        return Some(LinkTarget::File {
+                            path: path.to_string(),
+                            line: Some(line.parse::<u32>().ok()?),
+                            end_line: None,
+                        });
+                    }
+                }
+            }
             let (line, end_line) = parse_line_range(suffix)?;
             return Some(LinkTarget::File {
                 path: path.to_string(),
@@ -62,18 +73,23 @@ pub fn parse_file_reference(raw: &str) -> Option<LinkTarget> {
     })
 }
 
+fn parse_line_number(text: &str) -> Option<u32> {
+    let trimmed = text.trim_start_matches(['L', 'l']);
+    let digits = trimmed
+        .split_once(['C', 'c'])
+        .map(|(line, _)| line)
+        .unwrap_or(trimmed);
+    digits.parse::<u32>().ok()
+}
+
 fn parse_line_range(text: &str) -> Option<(u32, Option<u32>)> {
     let (start, end) = match text.split_once('-') {
         Some((start, end)) => (start, Some(end)),
         None => (text, None),
     };
-    let start = start.trim_start_matches(['L', 'l']).parse::<u32>().ok()?;
+    let start = parse_line_number(start)?;
     let end = match end {
-        Some(end) => Some(
-            end.trim_start_matches(['L', 'l'])
-                .parse::<u32>()
-                .ok()?,
-        ),
+        Some(end) => Some(parse_line_number(end)?),
         None => None,
     };
     Some((start, end))

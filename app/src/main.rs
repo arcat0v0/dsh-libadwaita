@@ -1,6 +1,5 @@
 use dsh_libadwaita::ui::controller::SessionController;
 use dsh_libadwaita::ui::desktop::configure_system_style;
-use dsh_libadwaita::ui::settings::show_settings_dialog;
 use dsh_libadwaita::ui::window::MainWindow;
 use dsh_libadwaita::APP_ID;
 use gtk4::gio::prelude::*;
@@ -43,18 +42,17 @@ fn main() -> adw::glib::ExitCode {
         application.add_action(&activate_action);
     }
 
-    let app_weak = application.downgrade();
+    let main_window_store: Rc<RefCell<Option<MainWindow>>> = Rc::new(RefCell::new(None));
+    let main_window_store_for_settings = main_window_store.clone();
     let settings_action = gtk4::gio::SimpleAction::new("settings", None);
     settings_action.connect_activate(move |_, _| {
-        if let Some(app) = app_weak.upgrade() {
-            if let Some(active_window) = app.active_window() {
-                show_settings_dialog(&active_window, None, None);
+        if let Some(main_window) = main_window_store_for_settings.borrow().as_ref() {
+            if let Some(controller) = main_window.controller() {
+                controller.open_settings();
             }
         }
     });
     application.add_action(&settings_action);
-
-    let main_window_store: Rc<RefCell<Option<MainWindow>>> = Rc::new(RefCell::new(None));
 
     application.connect_activate(move |application| {
         let existing_window = {

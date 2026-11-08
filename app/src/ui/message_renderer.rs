@@ -3,7 +3,7 @@ use crate::transcript::{RenderBlock, ToolCallItem};
 use crate::ui::controller::SessionController;
 use gtk4::prelude::*;
 use libadwaita::prelude::*;
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use sourceview5::prelude::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -212,7 +212,13 @@ pub fn render_markdown(text: &str) -> gtk4::Box {
         .spacing(6)
         .build();
 
-    let parser = Parser::new(text);
+    let parser = Parser::new_ext(
+        text,
+        Options::ENABLE_TABLES
+            | Options::ENABLE_FOOTNOTES
+            | Options::ENABLE_STRIKETHROUGH
+            | Options::ENABLE_TASKLISTS,
+    );
     let mut current_markup = String::new();
     let mut in_code_block = false;
     let mut code_block_lang = String::new();

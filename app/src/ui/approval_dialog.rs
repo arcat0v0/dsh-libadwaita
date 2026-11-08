@@ -62,11 +62,13 @@ pub fn show_approval_dialog(
     tool_row.add_prefix(&gtk4::Image::from_icon_name("utilities-terminal-symbolic"));
     details_card.append(&tool_row);
 
-    let call_row = adw::ActionRow::builder()
-        .title("Call ID")
-        .subtitle(&req.call_id)
-        .build();
-    details_card.append(&call_row);
+    if let Some(ref call_id) = req.call_id {
+        let call_row = adw::ActionRow::builder()
+            .title("Call ID")
+            .subtitle(call_id)
+            .build();
+        details_card.append(&call_row);
+    }
 
     if let Some(ref reason) = req.reason {
         let reason_row = adw::ActionRow::builder()

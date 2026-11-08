@@ -206,7 +206,16 @@ fn test_approval_request_and_result() {
     let req: ApprovalRequestParams = serde_json::from_str(req_json).unwrap();
     assert_eq!(req.session_id, "sess-1");
     assert_eq!(req.tool_name, "bash");
-    assert_eq!(req.call_id, "call-123");
+    assert_eq!(req.call_id.as_deref(), Some("call-123"));
+
+    let optional = r#"{"sessionId":"sess-1","toolName":"bash","displayReason":{"zh":"运行 git status","en":"Run git status"}}"#;
+    let req: ApprovalRequestParams = serde_json::from_str(optional).unwrap();
+    assert_eq!(req.call_id, None);
+    assert_eq!(req.display_reason.as_deref(), Some("运行 git status"));
+
+    let plain = r#"{"sessionId":"sess-1","toolName":"bash","displayReason":"Run it"}"#;
+    let req: ApprovalRequestParams = serde_json::from_str(plain).unwrap();
+    assert_eq!(req.display_reason.as_deref(), Some("Run it"));
 
     let allowed = ApprovalRequestResult {
         outcome: ApprovalOutcome::AllowedOnce,

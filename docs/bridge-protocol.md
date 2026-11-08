@@ -195,7 +195,7 @@ GUI 连接 Socket 后的第一个请求必须为 `libadwaita/initialize`。在�
 | `libadwaita/initialize` | 协议握手与版本协商 | bridge 内部 |
 | `libadwaita/shutdown` | 正常请求退出 dsh 进程 | bridge 内部 |
 | `libadwaita/session/create` | 创建新会话 | `ctx.agents.create`（自动创建 session） |
-| `libadwaita/session/list` | 列出已存储的历史会话列表 | `ctx.sessions.list` |
+| `libadwaita/session/list` | 列出活跃与会话持久化中的历史会话 | `ctx.sessionQuery.listSessions` + `ctx.sessions.list` |
 | `libadwaita/session/follow` | 追踪会话并获取开场快照 | `ctx.sessions` + `ctx.agents` |
 | `libadwaita/session/page` | 分页拉取历史事件 / 缺口修复 | `ctx.sessions.get(id).slice` |
 | `libadwaita/session/prompt` | 向会话投递新的用户提示词 | `agent.followup` / `agent.steer` |
@@ -205,7 +205,7 @@ GUI 连接 Socket 后的第一个请求必须为 `libadwaita/initialize`。在�
 | `libadwaita/session/queue/steer` | 将排队项转为当前 turn 的 steer | `agent.inbox.remove` + `agent.steer` |
 | `libadwaita/session/cancel` | 停止当前正在运行的 turn | `agent.cancel({ kind: 'user' })` |
 | `libadwaita/session/release` | GUI 本地关闭视图，释放追踪 | bridge 内存释放 |
-| `libadwaita/session/archive` | 归档会话（清理队列，标记归档） | `agent.cancel` + 归档标记 |
+| `libadwaita/session/archive` | 归档会话（清理队列，写入持久归档集） | `workspaceRegistry.archiveSession` + `agent.cancel` |
 | `libadwaita/session/rename` | 手动重命名会话并 pin 用户标题 | `ctx.sessionTitle.rename(session, title)` |
 | `libadwaita/session/fork` | 从指定事件边界分支新会话 | `buildForkSeed` + `ctx.agents.create` |
 | `libadwaita/session/workdir/get` | 读取会话当前生效的工作目录 | `ctx.workingDirectory.get` |
@@ -311,7 +311,7 @@ GUI 连接 Socket 后的第一个请求必须为 `libadwaita/initialize`。在�
 
 #### `libadwaita/session/create`
 - **说明**：新建一个会话并初始化 Agent；`sessionId` 命名已存在会话时复用该会话（返回其现有 header/agent，必要时 resume），仅对不存在的 id 调用 `ctx.agents.create`。
-- **重要实现细节**：根据阶段 1 Spike 结论，调用 `ctx.agents.create({ sessionId, cwd })` 内部会自动创建底层 session；session 存储对重复 id 报 `session already exists`，因此命名已存在的 id 时必须走复用路径，不得重复 create（与上游 Host 复用命名 blank 会话的行为一致）。
+- **重要实现细节**：根据阶段 1 Spike 结论，调用 `ctx.agents.create({ sessionId, cwd })` 内部会自动创建底层 session；session 存储对重复 id 报 `session already exists`，因此命名已存在的 id 时必须走复用路径，不得重复 create（与上游 Host 复用命名 blank 会话的行为一致）。创建或复用成功后，bridge 通过 `workspaceRegistry.resolveByPath(cwd)` 找到匹配工作区并 `attachSession(sessionId)`，使侧边栏按工作区分组且成员关系跨重启保留；无匹配工作区时保持“未分组”。
 - **请求参数**：
   | 字段 | 类型 | 必选 | 说明 |
   |---|---|---|---|
@@ -327,7 +327,8 @@ GUI 连接 Socket 后的第一个请求必须为 `libadwaita/initialize`。在�
   | `header` | `SessionHeader` | 是 | 写入的不可变头部信息 |
 
 #### `libadwaita/session/list`
-- **说明**：列出本地磁盘存储的所有历史会话元数据（冷列表，不拉起 Agent 实例）。
+- **说明**：合并列出活跃会话与本地磁盘持久化的历史会话（冷列表，不拉起 Agent 实例）。冷条目的标题与轮次取自 `sessionProjectionCache`，无缓存时回退到 cwd 标题与 `turnCount: 0`；结果先整体排序再按 `limit` 截断。
+- **归档语义**：归档集合来自 `ctx.workspaceRegistry.archivedSessionIds`（持久化，跨 bridge/GUI 重启保留），`archived: true` 表示“包含已归档会话”而非“仅已归档”；客户端按 `isArchived` 再过滤。
 - **请求参数**：
   | 字段 | 类型 | 必选 | 说明 |
   |---|---|---|---|
@@ -368,7 +369,7 @@ GUI 连接 Socket 后的第一个请求必须为 `libadwaita/initialize`。在�
 - **响应结果**：`{ "ok": true }`
 
 #### `libadwaita/session/archive`
-- **说明**：归档指定会话。若该会话正在运行则先安全停止，并丢弃 pending inbox，标记为归档状态。磁盘日志保留，不会物理删除。
+- **说明**：归档指定会话。通过 `workspaceRegistry.archiveSession(id, { stopActivity: true })` 写入持久归档集（跨重启保留），随后安全停止运行中的 turn 并清空 pending inbox。取消归档走 `unarchiveSession`，保留原工作区排序槽位。磁盘日志保留，不会物理删除。
 - **请求参数**：`{ "sessionId": string, "archived": boolean }`
 - **响应结果**：`{ "sessionId": string, "archived": boolean }`
 
