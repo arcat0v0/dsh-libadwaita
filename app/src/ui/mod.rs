@@ -15,6 +15,7 @@ pub mod layout;
 pub mod message_renderer;
 pub mod menu;
 pub mod onboarding;
+pub mod open_with;
 pub mod plugins_page;
 pub mod presentation;
 pub mod queue_dock;

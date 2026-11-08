@@ -88,6 +88,14 @@ pub struct UiPrefs {
     pub dock_visible: HashMap<String, bool>,
     #[serde(default)]
     pub session_views: HashMap<String, String>,
+    #[serde(default)]
+    pub open_with_app: Option<String>,
+    #[serde(default)]
+    pub sidebar_width: Option<f64>,
+    #[serde(default)]
+    pub dock_width: Option<f64>,
+    #[serde(default)]
+    pub session_order: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -111,6 +119,10 @@ impl Default for UiPrefs {
             dock_tabs: HashMap::new(),
             dock_visible: HashMap::new(),
             session_views: HashMap::new(),
+            open_with_app: None,
+            sidebar_width: None,
+            dock_width: None,
+            session_order: Vec::new(),
         }
     }
 }

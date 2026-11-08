@@ -3,6 +3,7 @@ use crate::ui::conversation::ConversationView;
 use crate::ui::desktop::{begin_background_continuation, build_shortcuts_window};
 use crate::ui::layout::{
     SIDEBAR_AUTO_COLLAPSE, SIDEBAR_COLLAPSED, SIDEBAR_DEFAULT, SIDEBAR_DRAWER_BREAKPOINT,
+    SIDEBAR_MAX, SIDEBAR_MIN,
 };
 use crate::ui::right_dock::RightDock;
 use crate::ui::sidebar::{animations_enabled, PanelState, Sidebar};
@@ -26,12 +27,15 @@ pub struct MainWindow {
     startup_spinner: gtk4::Spinner,
     panel_state: Rc<PanelState>,
     chrome: Rc<SidebarChrome>,
+    paned: gtk4::Paned,
+    on_sidebar_width: Rc<RefCell<Option<Box<dyn Fn(f64)>>>>,
 }
 
 struct SidebarLayout {
     collapsed: Cell<bool>,
     narrow_expanded: Cell<bool>,
     last_width: Cell<i32>,
+    expanded_width: Cell<f64>,
 }
 
 impl SidebarLayout {
@@ -40,6 +44,7 @@ impl SidebarLayout {
             collapsed: Cell::new(false),
             narrow_expanded: Cell::new(false),
             last_width: Cell::new(0),
+            expanded_width: Cell::new(SIDEBAR_DEFAULT),
         }
     }
 }
@@ -74,7 +79,7 @@ impl SidebarChrome {
         self.split_view.set_collapsed(drawer);
         if drawer {
             self.sidebar.set_rail(false, animate);
-            self.animate_width(SIDEBAR_DEFAULT, animate);
+            self.animate_width(self.layout.expanded_width.get(), animate);
             self.update_opener(!self.split_view.shows_sidebar());
             return;
         }
@@ -88,7 +93,7 @@ impl SidebarChrome {
         let target = if rail {
             SIDEBAR_COLLAPSED
         } else {
-            SIDEBAR_DEFAULT
+            self.layout.expanded_width.get()
         };
         self.animate_width(target, animate);
     }
@@ -149,6 +154,22 @@ impl SidebarChrome {
         *self.width_animation.borrow_mut() = Some(animation.clone());
         animation.play();
     }
+
+    fn set_expanded_width(&self, width: f64) {
+        let width = width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+        self.layout.expanded_width.set(width);
+        let in_drawer = f64::from(self.window_width()) < SIDEBAR_DRAWER_BREAKPOINT;
+        let rail = !in_drawer
+            && (if f64::from(self.window_width()) < SIDEBAR_AUTO_COLLAPSE {
+                !self.layout.narrow_expanded.get()
+            } else {
+                self.layout.collapsed.get()
+            });
+        if !rail {
+            self.split_view.set_min_sidebar_width(width);
+            self.split_view.set_max_sidebar_width(width);
+        }
+    }
 }
 
 impl MainWindow {
@@ -162,7 +183,58 @@ impl MainWindow {
             .min_sidebar_width(SIDEBAR_DEFAULT)
             .max_sidebar_width(SIDEBAR_DEFAULT)
             .build();
-        split_view.set_sidebar(Some(sidebar.widget()));
+        sidebar.widget().set_hexpand(true);
+        let sidebar_resize = gtk4::Box::builder()
+            .width_request(6)
+            .css_classes(["dsh-sidebar-resize"])
+            .build();
+        sidebar_resize.set_cursor_from_name(Some("ew-resize"));
+        let sidebar_container = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Horizontal)
+            .build();
+        sidebar_container.append(sidebar.widget());
+        sidebar_container.append(&sidebar_resize);
+        split_view.set_sidebar(Some(&sidebar_container));
+        let on_sidebar_width: Rc<RefCell<Option<Box<dyn Fn(f64)>>>> =
+            Rc::new(RefCell::new(None));
+        let chrome_slot: Rc<RefCell<Option<Rc<SidebarChrome>>>> =
+            Rc::new(RefCell::new(None));
+        {
+            let drag = gtk4::GestureDrag::new();
+            let start_width = Rc::new(Cell::new(SIDEBAR_DEFAULT));
+            let start_for_begin = start_width.clone();
+            let split_for_begin = split_view.clone();
+            drag.connect_drag_begin(move |_, _, _| {
+                start_for_begin.set(split_for_begin.min_sidebar_width());
+            });
+            let split_for_update = split_view.clone();
+            let start_for_update = start_width.clone();
+            drag.connect_drag_update(move |_, offset_x, _| {
+                let width = (start_for_update.get() + offset_x).clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+                split_for_update.set_min_sidebar_width(width);
+                split_for_update.set_max_sidebar_width(width);
+            });
+            let start_for_end = start_width.clone();
+            let callback = on_sidebar_width.clone();
+            let split_for_end = split_view.clone();
+            let chrome_for_end = chrome_slot.clone();
+            drag.connect_drag_end(move |_, offset_x, _| {
+                let width = (start_for_end.get() + offset_x).clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+                split_for_end.set_min_sidebar_width(width);
+                split_for_end.set_max_sidebar_width(width);
+                if let Some(chrome) = chrome_for_end.borrow().as_ref() {
+                    chrome.set_expanded_width(width);
+                }
+                if let Some(handler) = callback.borrow().as_ref() {
+                    handler(width);
+                }
+            });
+            sidebar_resize.add_controller(drag);
+            let resize_for_collapse = sidebar_resize.clone();
+            split_view.connect_collapsed_notify(move |view| {
+                resize_for_collapse.set_visible(!view.is_collapsed());
+            });
+        }
 
         let paned = gtk4::Paned::builder()
             .orientation(gtk4::Orientation::Horizontal)
@@ -253,6 +325,7 @@ impl MainWindow {
             width_animation: Rc::new(RefCell::new(None)),
             opener: opener_btn.clone(),
         });
+        *chrome_slot.borrow_mut() = Some(chrome.clone());
         {
             let chrome_for_resize = chrome.clone();
             let layout_hooked = Rc::new(Cell::new(false));
@@ -382,6 +455,8 @@ impl MainWindow {
             startup_spinner,
             panel_state,
             chrome,
+            paned,
+            on_sidebar_width,
         }
     }
 
@@ -831,6 +906,18 @@ impl MainWindow {
 
     pub fn window(&self) -> &adw::ApplicationWindow {
         &self.window
+    }
+
+    pub fn paned(&self) -> &gtk4::Paned {
+        &self.paned
+    }
+
+    pub fn set_sidebar_width(&self, width: f64) {
+        self.chrome.set_expanded_width(width);
+    }
+
+    pub fn set_on_sidebar_width_change<F: Fn(f64) + 'static>(&self, callback: F) {
+        *self.on_sidebar_width.borrow_mut() = Some(Box::new(callback));
     }
 
     pub fn present(&self) {

@@ -30,6 +30,12 @@ pub fn sidebar_track(viewport: f64, width_preference: f64, collapsed: bool, draw
     width_preference.clamp(SIDEBAR_MIN, SIDEBAR_MAX)
 }
 
+pub fn dock_width(total: f64, saved: Option<f64>) -> f64 {
+    let desired = saved.unwrap_or(total * RIGHTBAR_DEFAULT_RATIO);
+    let max = (total * RIGHTBAR_MAX_RATIO).max(RIGHTBAR_MIN);
+    desired.clamp(RIGHTBAR_MIN, max)
+}
+
 pub fn solve_columns(viewport: f64, sidebar: f64, rightbar: f64) -> Columns {
     let sidebar = if viewport < SIDEBAR_DRAWER_BREAKPOINT {
         0.0

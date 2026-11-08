@@ -43,6 +43,20 @@ fn main() -> adw::glib::ExitCode {
     }
 
     let main_window_store: Rc<RefCell<Option<MainWindow>>> = Rc::new(RefCell::new(None));
+    let pending_open_session: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let pending_for_action = pending_open_session.clone();
+    let app_weak_open = application.downgrade();
+    let open_session_action =
+        gtk4::gio::SimpleAction::new("open-session", Some(&gtk4::glib::VariantTy::STRING));
+    open_session_action.connect_activate(move |_, param| {
+        if let Some(id) = param.and_then(|value| value.get::<String>()) {
+            *pending_for_action.borrow_mut() = Some(id);
+            if let Some(app) = app_weak_open.upgrade() {
+                ApplicationExt::activate(&app);
+            }
+        }
+    });
+    application.add_action(&open_session_action);
     let main_window_store_for_settings = main_window_store.clone();
     let settings_action = gtk4::gio::SimpleAction::new("settings", None);
     settings_action.connect_activate(move |_, _| {
@@ -55,6 +69,7 @@ fn main() -> adw::glib::ExitCode {
     application.add_action(&settings_action);
 
     application.connect_activate(move |application| {
+        let pending_for_activate = pending_open_session.clone();
         let existing_window = {
             main_window_store
                 .borrow()
@@ -65,6 +80,13 @@ fn main() -> adw::glib::ExitCode {
         if let Some(window) = existing_window {
             window.set_visible(true);
             window.present();
+            if let Some(session_id) = pending_for_activate.borrow_mut().take() {
+                if let Some(main_window) = main_window_store.borrow().as_ref() {
+                    if let Some(controller) = main_window.controller() {
+                        controller.follow_session(&session_id);
+                    }
+                }
+            }
             return;
         }
 
@@ -79,6 +101,13 @@ fn main() -> adw::glib::ExitCode {
         main_window.present();
         controller.bootstrap_supervisor();
         *main_window_store.borrow_mut() = Some(main_window);
+        if let Some(session_id) = pending_for_activate.borrow_mut().take() {
+            if let Some(main_window) = main_window_store.borrow().as_ref() {
+                if let Some(controller) = main_window.controller() {
+                    controller.follow_session(&session_id);
+                }
+            }
+        }
     });
 
     application.run()

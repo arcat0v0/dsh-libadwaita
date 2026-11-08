@@ -88,14 +88,20 @@ pub fn send_turn_completed_notification(
 ) {
     let notification = gio::Notification::new("Turn Completed");
     notification.set_body(Some(&format!("{}: {}", title, snippet)));
-    notification.set_default_action("app.activate");
+    notification.set_default_action_and_target_value(
+        "app.open-session",
+        Some(&session_id.to_variant()),
+    );
     app.send_notification(Some(session_id), &notification);
 }
 
 pub fn send_background_notification(app: &gtk4::Application, session_id: &str, title: &str) {
     let notification = gio::Notification::new("dsh is continuing in the background");
     notification.set_body(Some(&format!("{} is still running.", title)));
-    notification.set_default_action("app.activate");
+    notification.set_default_action_and_target_value(
+        "app.open-session",
+        Some(&session_id.to_variant()),
+    );
     app.send_notification(Some(&format!("{}-background", session_id)), &notification);
 }
 

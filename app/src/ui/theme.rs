@@ -106,6 +106,14 @@ menubutton.dsh-icon-button > button:active, menubutton.dsh-icon-button > button:
   background: color-mix(in srgb, currentColor 14%, transparent);
 }
 
+.dsh-sidebar-resize {
+  min-width: 6px;
+  background: transparent;
+  border-radius: 3px;
+}
+.dsh-sidebar-resize:hover {
+  background: color-mix(in srgb, currentColor 18%, transparent);
+}
 .dsh-sidebar {
   padding: 6px 8px;
   color: var(--sidebar-fg-color);

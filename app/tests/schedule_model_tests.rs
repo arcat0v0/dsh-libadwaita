@@ -1,5 +1,6 @@
 mod schedule_model {
 use dsh_libadwaita::schedule_model::*;
+use std::collections::HashSet;
 
 const NOW: i64 = 1789801200000;
 const SCHED_1551: &str = "2026-09-19T15:51:00Z";
@@ -1454,5 +1455,41 @@ fn test_locale_from_tag_resolves_lang_env_values() {
     assert_eq!(Locale::from_tag("en_US.UTF-8"), Locale::En);
     assert_eq!(Locale::from_tag("C"), Locale::En);
     assert_eq!(Locale::from_tag(""), Locale::En);
+}
+
+#[test]
+fn test_scheduled_session_ids_collects_active_targets_and_involved_sessions() {
+    let mut session = entry(ScheduleRecordKind::At, SCHED_1551);
+    session.target = ScheduleTarget::Session {
+        session_id: "sess-a".to_string(),
+    };
+    session.involved_session_ids = vec!["sess-a".to_string(), "sess-b".to_string()];
+
+    let mut new_once = entry(ScheduleRecordKind::At, SCHED_1551);
+    new_once.target = ScheduleTarget::NewOnce {
+        session_id: "sess-c".to_string(),
+        create: ScheduleSessionCreateSpec::default(),
+    };
+    new_once.involved_session_ids.clear();
+
+    let mut new = entry(ScheduleRecordKind::Every, SCHED_1551);
+    new.target = ScheduleTarget::New {
+        create: ScheduleSessionCreateSpec::default(),
+    };
+    new.involved_session_ids = vec!["sess-d".to_string()];
+
+    let mut paused = entry(ScheduleRecordKind::At, SCHED_1551);
+    paused.status = ScheduleStatus::Paused;
+    paused.target = ScheduleTarget::Session {
+        session_id: "sess-e".to_string(),
+    };
+    paused.involved_session_ids = vec!["sess-f".to_string()];
+
+    let sessions = scheduled_session_ids(&[session, new_once, new, paused]);
+    let expected: HashSet<String> = ["sess-a", "sess-b", "sess-c", "sess-d"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(sessions, expected);
 }
 }

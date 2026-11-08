@@ -2,7 +2,7 @@ use jiff::civil::{Date, DateTime, Time};
 use jiff::tz::{AmbiguousOffset, TimeZone};
 use jiff::{Timestamp, ToSpan};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 const MAX_SAFE_INTEGER: i128 = 9_007_199_254_740_991;
 const MAX_RRULE_COUNT: i64 = 1_000;
@@ -190,6 +190,24 @@ pub struct ScheduleCatalogEntry {
     pub delivery_floor_ends_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_delivery: Option<ScheduleDeliveryReceipt>,
+}
+
+pub fn scheduled_session_ids(entries: &[ScheduleCatalogEntry]) -> HashSet<String> {
+    let mut sessions = HashSet::new();
+    for entry in entries {
+        if entry.status != ScheduleStatus::Active {
+            continue;
+        }
+        match &entry.target {
+            ScheduleTarget::Session { session_id }
+            | ScheduleTarget::NewOnce { session_id, .. } => {
+                sessions.insert(session_id.clone());
+            }
+            ScheduleTarget::New { .. } => {}
+        }
+        sessions.extend(entry.involved_session_ids.iter().cloned());
+    }
+    sessions
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

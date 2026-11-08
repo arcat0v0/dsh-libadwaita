@@ -137,6 +137,22 @@ fn jump_to_turn(
     adjustment.set_value(f64::from(point.y()).max(0.0));
 }
 
+fn apply_open_with_label(
+    button: &gtk4::Button,
+    app: Option<&crate::ui::open_with::OpenWithApp>,
+) {
+    match app {
+        Some(app) if app.id != "filemanager" => {
+            button.set_label(&format!("Open in {}", app.label));
+            button.set_tooltip_text(Some(&format!("Open project folder in {}", app.label)));
+        }
+        _ => {
+            button.set_label("Open Folder");
+            button.set_tooltip_text(Some("Open project folder in default file manager"));
+        }
+    }
+}
+
 pub struct ConversationView {
     stack: gtk4::Stack,
     composer: Composer,
@@ -191,6 +207,10 @@ pub struct ConversationView {
     switcher_bar: gtk4::Box,
     preset_menu: gtk4::MenuButton,
     preset_label: gtk4::Label,
+    open_with_apps: Vec<&'static crate::ui::open_with::OpenWithApp>,
+    open_with_choice: Rc<RefCell<Option<&'static crate::ui::open_with::OpenWithApp>>>,
+    open_with_button: gtk4::Button,
+    on_open_with_choice: Rc<RefCell<Option<Box<dyn Fn(&str)>>>>,
 }
 
 impl ConversationView {
@@ -246,17 +266,73 @@ impl ConversationView {
         });
         title_label.add_controller(title_click);
 
-        let open_folder_btn = gtk4::Button::builder()
+        let open_with_apps = crate::ui::open_with::detect_apps();
+        let open_with_choice: Rc<RefCell<Option<&'static crate::ui::open_with::OpenWithApp>>> =
+            Rc::new(RefCell::new(crate::ui::open_with::default_app(
+                &open_with_apps,
+            )));
+        let open_with_button = gtk4::Button::builder()
             .label("Open Folder")
             .tooltip_text("Open project folder in default file manager")
             .css_classes(["flat"])
             .build();
+        apply_open_with_label(&open_with_button, *open_with_choice.borrow());
         let cwd_for_folder = active_cwd.clone();
-        open_folder_btn.connect_clicked(move |_| {
+        let choice_for_folder = open_with_choice.clone();
+        open_with_button.connect_clicked(move |_| {
             let path = cwd_for_folder.borrow().clone();
-            open_path_in_default_app(&path);
+            if let Some(app) = *choice_for_folder.borrow() {
+                let _ = crate::ui::open_with::launch(app, &path);
+            } else {
+                open_path_in_default_app(&path);
+            }
         });
-        session_header.append(&open_folder_btn);
+        session_header.append(&open_with_button);
+        let on_open_with_choice: Rc<RefCell<Option<Box<dyn Fn(&str)>>>> =
+            Rc::new(RefCell::new(None));
+        if open_with_apps.len() > 1 {
+            let open_with_menu = gtk4::MenuButton::builder()
+                .icon_name("pan-down-symbolic")
+                .tooltip_text("Choose an application")
+                .css_classes(["flat"])
+                .build();
+            let open_with_popover = gtk4::Popover::builder().build();
+            let open_with_list = gtk4::Box::builder()
+                .orientation(gtk4::Orientation::Vertical)
+                .spacing(2)
+                .margin_start(4)
+                .margin_end(4)
+                .margin_top(4)
+                .margin_bottom(4)
+                .build();
+            for app in &open_with_apps {
+                let row = gtk4::Button::builder()
+                    .label(app.label)
+                    .css_classes(["flat"])
+                    .halign(gtk4::Align::Fill)
+                    .build();
+                let cwd_for_app = active_cwd.clone();
+                let choice_for_app = open_with_choice.clone();
+                let button_for_app = open_with_button.clone();
+                let popover_for_app = open_with_popover.clone();
+                let on_choice_for_app = on_open_with_choice.clone();
+                let app = *app;
+                row.connect_clicked(move |_| {
+                    *choice_for_app.borrow_mut() = Some(app);
+                    apply_open_with_label(&button_for_app, Some(app));
+                    popover_for_app.popdown();
+                    let path = cwd_for_app.borrow().clone();
+                    let _ = crate::ui::open_with::launch(app, &path);
+                    if let Some(handler) = on_choice_for_app.borrow().as_ref() {
+                        handler(app.id);
+                    }
+                });
+                open_with_list.append(&row);
+            }
+            open_with_popover.set_child(Some(&open_with_list));
+            open_with_menu.set_popover(Some(&open_with_popover));
+            session_header.append(&open_with_menu);
+        }
 
         let open_terminal_btn = gtk4::Button::builder()
             .label("Open Terminal")
@@ -637,6 +713,10 @@ impl ConversationView {
             switcher_bar,
             preset_menu,
             preset_label,
+            open_with_apps,
+            open_with_choice,
+            open_with_button,
+            on_open_with_choice,
         }
     }
 
@@ -803,6 +883,22 @@ impl ConversationView {
 
     pub fn set_cwd(&self, cwd: &str) {
         *self.active_cwd.borrow_mut() = PathBuf::from(cwd);
+    }
+
+    pub fn set_on_open_with_choice<F: Fn(&str) + 'static>(&self, callback: F) {
+        *self.on_open_with_choice.borrow_mut() = Some(Box::new(callback));
+    }
+
+    pub fn set_open_with_choice(&self, id: Option<&str>) {
+        let app = id.and_then(|id| {
+            self.open_with_apps
+                .iter()
+                .copied()
+                .find(|app| app.id == id)
+        });
+        let app = app.or_else(|| crate::ui::open_with::default_app(&self.open_with_apps));
+        *self.open_with_choice.borrow_mut() = app;
+        apply_open_with_label(&self.open_with_button, app);
     }
 
     pub fn goal_bar(&self) -> &GoalBar {

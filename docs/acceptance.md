@@ -119,7 +119,7 @@
 | C14 | 通用 Markdown/终端/diff/读取/搜索渲染器 | 已实现 | `render_markdown`、`build_code_block`、`build_card_shell` 为 M/C 卡提供统一 Markdown、SourceView、复制与展开能力。 |
 | C15 | 下载/另存/图片复制 PNG/菜单 | 部分实现 | Files 行提供 Save As（`files/readBytes` + `GtkFileDialog.save`），Preview 提供 Copy PNG 与 Open Externally；无统一文件右键菜单或多选下载。 |
 | C16 | 拖放字节传递 | 缺失 | 无 `GtkDropTarget`、拖放遮罩或文件转 prompt attachment。 |
-| C17 | 在应用中打开 Workspace/文件 | 部分实现 | `ConversationView::new` 的 Open Folder/Open Terminal 调 `desktop.rs::{open_path_in_default_app,open_terminal_in_dir}`；无应用候选列表、文件 stat 与右键“打开方式”。 |
+| C17 | 在应用中打开 Workspace/文件 | 部分实现 | `ui::open_with` 提供 File Manager/Cursor/VS Code/Zed 等候选并按 PATH 探测，Open Folder 主按钮与 chevron 选择器可选择并持久化 `openWithApp`；Open Terminal 调 `desktop.rs::open_terminal_in_dir`；仍无文件 stat 与按文件类型的右键“打开方式”。 |
 | C18 | 右键菜单框架 | 部分实现 | 消息文本共享 Popover 支持 Copy/Quote，代码视图支持 Copy Code；不是按目标类型异步解析的通用菜单框架。 |
 
 ## 5. A：审批与提问
@@ -250,7 +250,7 @@
 | 10 | Agent Team、Agent Preset、Cordis define run/stop 缺失 | 不能管理 Team、preset 或动态 Cordis 实例 | G09/G20/G27 base-blocked | 使用默认 profile 与现有 session/permission 控制 |
 | 11 | Workflow 专用节点与成员子会话导航缺失 | 多阶段 workflow 仅显示通用事件 | UI scope；session events 已可 follow | 从 Subagents 区打开已知 child session |
 | 12 | PDF/Office 预览与完整文档渲染缺失 | 交付文件不能在内嵌预览中查看 PDF/Office | G07 base-blocked + UI scope | Files 行 Save As、Preview 外部打开；系统默认应用处理 |
-| 13 | 会话全文搜索仍为标题/cwd 元数据；无手动拖拽排序 | 大量历史消息时检索与排序效率低于 Web | G04 base `fullText:false` + UI scope | Pin 置顶、Active/Archived/All 过滤、标题/cwd 搜索 |
+| 13 | 会话全文搜索仍为标题/cwd 元数据；手动排序仅支持同组内拖拽 | 大量历史消息时检索效率低于 Web；跨工作区不能靠拖拽改变归属 | G04 base `fullText:false` + UI scope | Pin 置顶、Active/Archived/All 过滤、标题/cwd 搜索、手动排序 |
 | 14 | 右栏无分屏、浮动、全屏 | 多资源并排布局能力弱于 Web | UI scope | 每会话 tab/可见性已持久化，可手动切换固定标签 |
 | 15 | 终端是轮询 fallback，不是 VTE PTY | 无 shell 选择、重命名、resize、主题终端 | UI scope + G05 无 resize RPC；构建无 VTE 依赖 | Entry 发送命令，TextView 查看有界回滚并 Close |
 | 16 | Markdown 流式尾部增量解析与超大表格虚拟化缺失 | 超长流式 Markdown 会重复重建，超大表格无虚拟行 | UI scope | 定稿后完整渲染；表格可横向滚动 |
@@ -308,5 +308,6 @@
 - 项 9 滚动与流式渲染：`ScrollFollow` 尾部跟随（32px 回底阈值、上滚暂停、回底恢复、会话切换重置）、浮动回底按钮、右侧轮次轨道（已加载轮次、活动轮次按视口上沿高亮、点击跳转、提示预览、≥2 轮显示）、流式 Markdown 稳定前缀/尾部分离（按空行切分且拒绝未闭合代码围栏，live assistant 仅重绘尾部）、`session/end-seed` fork 边界分隔、fork 仅出现在最后一条已定稿 assistant 消息、四档 presentation policy（步骤分组 collapsed/history/none、运行过程明细、已结思考首行预览）与定稿时补齐动作行已完成（`0fd9937`）；同时修复 trajectory `ColumnView` 未放入 `ScrolledWindow` 导致窗口最小高度随事件数增长的问题。验证：新增 21 个单测（scroll 5、stream 7、turn nav 5、presentation 4）+ 1 个 fork 边界 transcript 单测，35 个测试套件全部通过；headless sway 截图确认 fork 分隔条、8 轮轨道与活动轮次高亮、点击 Turn 1 跳到首轮并出现回底按钮、回底后按钮隐藏且活动标记回到第 8 轮。未验证：真实模型流式（本机 `DEEPSEEK_API_KEY` 仍 401）、完整 turn outline（G12）、`collapseTiming`/`foldedReplies` 与整轮外折叠时机。
 - 项 10 插件管理：missing bundle 安装（`catalog_install_plan` 仅接受 missing + installTarget，排除 unsupported-platform/只读；包页“安装”按钮与启用开关自动改走 catalog 安装，registry target 带 saveExact）、安装 RPC 丢失自动 `wait-install` 对账且无结果时重读 inventory、更新 RPC 丢失后刷新 inventory 并重查版本、组件行显示 Host diagnostic、详情按 `name@version` 缓存并在失败时显示原因与重试、README 图片占位 chip 已完成（`9f36a76`）。验证：新增 5 个 model 单测（catalog 规则、detail key/version、diagnostic、图片占位）+ 1 个安装丢失对账 reducer 单测，35 个测试套件通过；headless 截图确认插件页与“自动授权审查”详情页（组件行、来源信息、README 图片占位）。未验证：真实 missing bundle 的安装按钮点击（测试 profile 中无 missing bundle）、真实安装/更新断线对账（无可用 API key，且不触发网络安装）。
 - 项 11 密钥与附件：`secret_mask` 完整移植上游格式表与掩码规则（PEM 块保留 BEGIN/END 行、URL 仅遮密码并按码点计数、前缀凭据保留 8 字符、重叠候选合并）；feedback 使用 `assistant/message` 持久 messageId，点赞/点踩撤回与七类原因/备注对话框、`version-conflict` 权威项对账；`ImageCache` 按会话+附件合并读取并在 release/archive 清理，bridge `attachment/read` 支持完整 `ImageAttachmentRef` 走 Host `readImage`；composer 附件暂存 rail（图片预览、文件卡、移除，按会话保留到成功回显后释放），文件提交经 `admitEncodedFile` 成为 durable ref，QueueDock 显示图片缩略图与文件 chip 已完成（`ae00389`）。验证：新增 17 个 secret mask 单测、5 个 image cache 单测、3 个 queue attachment 单测与 2 个 transcript message-id 单测，35 个集成测试二进制全部通过；bridge `tsc --noEmit`、Biome 与 66 个 node 单测通过；headless 截图确认附件暂存 rail 的图片预览、文件名与移除按钮。未验证：附件发送后的真实回显与队列附件视觉（测试会话无 live agent，prompt RPC 被 Host 拒绝）、模型请求中的文件块消费（无可用 API key）、真实 `version-conflict` 对账（需并发写反馈）。
-- 项 12：待实施。
+- 项 12 布局与周边：侧边栏右侧 6px 拖拽手柄（264–420px）与右栏 paned 拖拽宽度均写入 `ui-prefs.json` 的 `sidebarWidth`/`dockWidth`；右栏宽度仅在指针按下的拖拽中保存，程序化恢复/窗口尺寸变化不再用被布局钳制后的实际宽度覆盖偏好，恢复时经 `layout::dock_width` 按总宽与 70% 上限钳制。侧栏分组支持 Grouped/Flat，Manual 排序使用持久化 `sessionOrder` 并支持组内 DragSource/DropTarget 重排；`schedule/catalog` 的 Active 任务按其 target 与 `involvedSessionIds` 映射到侧栏时钟图标（running/unread 时不显示）；turn-completed/background 通知改为 `app.open-session` 带 sessionId，应用级 action 在已有窗口与新建窗口两条路径都 follow 目标会话；Open Folder 支持按 PATH 探测的候选应用列表、chevron 选择器与 `openWithApp` 持久化。验证：新增 `dock_width` 钳制、手动排序、计划时钟条件、Active 计划会话映射共 7 个单测，39 个测试二进制全部通过；headless 截图确认侧栏按保存值 360px 恢复、平铺列表无分组头、宽窗口下右栏按保存值 450px 应用（切隐藏/显示后仍为 450，偏好未被钳制值覆盖）、`app.open-session` 切换窗口标题与选中行到 hello-from-a、候选应用菜单显示 File Manager/Visual Studio Code/Zed 且选择 Zed 后重启主按钮变为 “Open in Zed”。未验证：鼠标拖拽侧栏/右栏与会话行的真实手感（headless seat 无输入设备）、计划时钟视觉（测试 profile 无 Active 计划，AT-SPI 打开新建表单不稳定）。另发现启动时初始会话 transcript 尚未加载完成就切换会话会让 GTK 主线程忙循环（`f162c46` 的 HEAD 二进制同样复现，非本项引入），需单独立项修复。
+
 - 模型链路根因修复：bridge catalog 默认 provider 改为 `agentDefaultModel` 校验值（`deepseek-official`），App 采纳目录默认并纠正失效会话；BridgeCredentials 从 `*_API_KEY` 环境变量取种（`81f1d2c`）。

@@ -157,3 +157,19 @@ fn test_transcript_view_persists_four_modes() {
         assert_eq!(UiPrefs::load(&path).transcript_view, mode);
     }
 }
+
+#[test]
+fn test_layout_and_open_with_preferences_round_trip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("ui-prefs.json");
+    let mut prefs = UiPrefs::default();
+    prefs.open_with_app = Some("vscode".to_string());
+    prefs.sidebar_width = Some(312.0);
+    prefs.dock_width = Some(410.0);
+    prefs.save(&path).unwrap();
+
+    let loaded = UiPrefs::load(&path);
+    assert_eq!(loaded.open_with_app.as_deref(), Some("vscode"));
+    assert_eq!(loaded.sidebar_width, Some(312.0));
+    assert_eq!(loaded.dock_width, Some(410.0));
+}

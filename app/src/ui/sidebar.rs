@@ -82,6 +82,9 @@ pub struct Sidebar {
     filter_menu_buttons: RefCell<Vec<(FilterMenuKind, gtk4::Button)>>,
     running: RefCell<HashSet<String>>,
     unread: RefCell<HashSet<String>>,
+    scheduled: RefCell<HashSet<String>>,
+    manual_order: RefCell<Vec<String>>,
+    on_reorder: Rc<RefCell<Option<Box<dyn Fn(String, String)>>>>,
     active_session: RefCell<Option<String>>,
     collapsed_groups: RefCell<HashSet<String>>,
     group_members: RefCell<HashMap<String, Vec<gtk4::Widget>>>,
@@ -326,6 +329,9 @@ impl Sidebar {
             filter_menu_buttons: RefCell::new(filter_buttons),
             running: RefCell::new(HashSet::new()),
             unread: RefCell::new(HashSet::new()),
+            scheduled: RefCell::new(HashSet::new()),
+            manual_order: RefCell::new(Vec::new()),
+            on_reorder: Rc::new(RefCell::new(None)),
             active_session: RefCell::new(None),
             collapsed_groups: RefCell::new(HashSet::new()),
             group_members: RefCell::new(HashMap::new()),
@@ -455,6 +461,19 @@ impl Sidebar {
         self.update_filter_menu();
         *self.running.borrow_mut() = running.clone();
         *self.unread.borrow_mut() = unread.clone();
+        self.rebuild_tree();
+    }
+
+    pub fn set_manual_order(&self, order: &[String]) {
+        *self.manual_order.borrow_mut() = order.to_vec();
+    }
+
+    pub fn set_on_reorder<F: Fn(String, String) + 'static>(&self, callback: F) {
+        *self.on_reorder.borrow_mut() = Some(Box::new(callback));
+    }
+
+    pub fn set_scheduled_sessions(self: &Rc<Self>, scheduled: &HashSet<String>) {
+        *self.scheduled.borrow_mut() = scheduled.clone();
         self.rebuild_tree();
     }
 
@@ -692,6 +711,8 @@ impl Sidebar {
         let pinned = self.pinned.borrow();
         let running = self.running.borrow();
         let unread = self.unread.borrow();
+        let scheduled = self.scheduled.borrow();
+        let manual_order = self.manual_order.borrow();
         let filter = self.archive_filter.get();
         let grouping = self.session_grouping.get();
         let sort_mode = self.session_sort.get();
@@ -701,7 +722,19 @@ impl Sidebar {
                 let right_pinned = pinned.contains(&right.id);
                 right_pinned.cmp(&left_pinned).then_with(|| match sort_mode {
                     SessionSort::Recent => right.updated_at.cmp(&left.updated_at),
-                    SessionSort::Manual => std::cmp::Ordering::Equal,
+                    SessionSort::Manual => {
+                        let left_index = manual_order
+                            .iter()
+                            .position(|id| id == &left.id)
+                            .unwrap_or(usize::MAX);
+                        let right_index = manual_order
+                            .iter()
+                            .position(|id| id == &right.id)
+                            .unwrap_or(usize::MAX);
+                        left_index
+                            .cmp(&right_index)
+                            .then_with(|| right.updated_at.cmp(&left.updated_at))
+                    }
                 })
             });
         };
@@ -718,6 +751,7 @@ impl Sidebar {
                     item,
                     &pinned,
                     &running,
+                    &scheduled,
                     &unread,
                     active.as_deref(),
                     panel_active,
@@ -747,6 +781,7 @@ impl Sidebar {
                     item,
                     &pinned,
                     &running,
+                    &scheduled,
                     &unread,
                     active.as_deref(),
                     panel_active,
@@ -782,6 +817,7 @@ impl Sidebar {
                     item,
                     &pinned,
                     &running,
+                    &scheduled,
                     &unread,
                     active.as_deref(),
                     panel_active,
@@ -900,6 +936,7 @@ impl Sidebar {
         pinned: &HashSet<String>,
         running: &HashSet<String>,
         unread: &HashSet<String>,
+        scheduled: &HashSet<String>,
         active_session: Option<&str>,
         panel_active: bool,
     ) -> gtk4::Widget {
@@ -911,10 +948,44 @@ impl Sidebar {
                 .build()
                 .upcast::<gtk4::Widget>()
         });
-        let button = sidebar_row(None, Some(&item.title), time_label);
+        let clock = shows_schedule_clock(scheduled, running, unread, &item.id);
+        let button = sidebar_row(clock.then_some("alarm-symbolic"), Some(&item.title), time_label);
+        if clock {
+            button.set_tooltip_text(Some("Active scheduled task"));
+        }
         button.set_action_name(Some("win.select-session"));
         button.set_action_target_value(Some(&item.id.to_variant()));
         button.set_hexpand(true);
+        if self.session_sort.get() == SessionSort::Manual {
+            let drag_source = gtk4::DragSource::new();
+            drag_source.set_actions(gtk4::gdk::DragAction::MOVE);
+            let dragged_id = item.id.clone();
+            drag_source.connect_prepare(move |_, _, _| {
+                Some(gtk4::gdk::ContentProvider::for_value(
+                    &dragged_id.to_value(),
+                ))
+            });
+            button.add_controller(drag_source);
+            let drop_target = gtk4::DropTarget::new(
+                gtk4::glib::Type::STRING,
+                gtk4::gdk::DragAction::MOVE,
+            );
+            let target_id = item.id.clone();
+            let on_reorder = self.on_reorder.clone();
+            drop_target.connect_drop(move |_, value, _, _| {
+                let Ok(dragged) = value.get::<String>() else {
+                    return false;
+                };
+                if dragged == target_id {
+                    return false;
+                }
+                if let Some(handler) = on_reorder.borrow().as_ref() {
+                    handler(dragged, target_id.clone());
+                }
+                true
+            });
+            button.add_controller(drop_target);
+        }
         if active_session == Some(item.id.as_str()) && !panel_active {
             button.add_css_class("dsh-row-selected");
         }
@@ -971,6 +1042,38 @@ impl Sidebar {
         row.append(&menu_btn);
         row.upcast()
     }
+}
+
+pub fn reorder_manual_order(
+    order: &[String],
+    known: &[String],
+    dragged: &str,
+    target: &str,
+) -> Vec<String> {
+    let mut result = order.to_vec();
+    for id in known {
+        if !result.contains(id) {
+            result.push(id.clone());
+        }
+    }
+    result.retain(|id| id != dragged);
+    let index = result
+        .iter()
+        .position(|id| id == target)
+        .unwrap_or(result.len());
+    result.insert(index, dragged.to_string());
+    result
+}
+
+pub fn shows_schedule_clock(
+    scheduled: &HashSet<String>,
+    running: &HashSet<String>,
+    unread: &HashSet<String>,
+    session_id: &str,
+) -> bool {
+    scheduled.contains(session_id)
+        && !running.contains(session_id)
+        && !unread.contains(session_id)
 }
 
 fn matches_filter(filter: ArchiveFilter, item: &SessionListItem) -> bool {

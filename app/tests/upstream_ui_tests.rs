@@ -181,6 +181,15 @@ fn test_layout_solves_sidebar_auto_collapse_and_rightbar_clamp() {
 }
 
 #[test]
+fn test_dock_width_uses_saved_value_and_clamps_to_bounds() {
+    assert_eq!(dock_width(1000.0, Some(450.0)), 450.0);
+    assert_eq!(dock_width(1000.0, Some(900.0)), 700.0);
+    assert_eq!(dock_width(1000.0, Some(100.0)), 300.0);
+    assert_eq!(dock_width(1000.0, None), 450.0);
+    assert_eq!(dock_width(400.0, Some(450.0)), 300.0);
+}
+
+#[test]
 fn test_locale_preference_round_trips() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("ui-prefs.json");

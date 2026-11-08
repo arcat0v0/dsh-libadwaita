@@ -487,6 +487,9 @@ pub struct SessionController {
     gap_repair: Rc<RefCell<Option<GapRepairState>>>,
     pending_attachments: Rc<RefCell<HashMap<String, Vec<PendingAttachment>>>>,
     attachment_seq: Rc<Cell<u64>>,
+    paned: gtk4::Paned,
+    dock_pointer_down: Rc<Cell<bool>>,
+    dock_width_save_gen: Rc<Cell<u64>>,
     pending_auto_send: Rc<RefCell<Option<String>>>,
     reconnect_active: Rc<Cell<bool>>,
     reconnect_generation: Rc<Cell<u64>>,
@@ -568,6 +571,9 @@ impl SessionController {
             gap_repair: Rc::new(RefCell::new(None)),
             pending_attachments: Rc::new(RefCell::new(HashMap::new())),
             attachment_seq: Rc::new(Cell::new(1)),
+            paned: main_window.paned().clone(),
+            dock_pointer_down: Rc::new(Cell::new(false)),
+            dock_width_save_gen: Rc::new(Cell::new(0)),
             pending_auto_send: Rc::new(RefCell::new(None)),
             reconnect_active: Rc::new(Cell::new(false)),
             reconnect_generation: Rc::new(Cell::new(0)),
@@ -760,6 +766,101 @@ impl SessionController {
             });
         }
 
+        {
+            let prefs = controller.prefs.borrow();
+            controller
+                .conversation_view
+                .set_open_with_choice(prefs.open_with_app.as_deref());
+        }
+        let weak_for_open_with = Rc::downgrade(&controller);
+        controller
+            .conversation_view
+            .set_on_open_with_choice(move |app_id| {
+                if let Some(ctrl) = weak_for_open_with.upgrade() {
+                    ctrl.prefs.borrow_mut().open_with_app = Some(app_id.to_string());
+                    let path = ctrl.prefs_path.clone();
+                    let prefs = ctrl.prefs.borrow();
+                    let _ = prefs.save(&path);
+                }
+            });
+        {
+            let prefs = controller.prefs.borrow();
+            main_window.set_sidebar_width(
+                prefs.sidebar_width.unwrap_or(crate::ui::layout::SIDEBAR_DEFAULT),
+            );
+        }
+        let weak_for_sidebar = Rc::downgrade(&controller);
+        main_window.set_on_sidebar_width_change(move |width| {
+            if let Some(ctrl) = weak_for_sidebar.upgrade() {
+                ctrl.prefs.borrow_mut().sidebar_width = Some(width);
+                ctrl.save_prefs();
+            }
+        });
+        {
+            let pressed = controller.dock_pointer_down.clone();
+            let buttons = gtk4::EventControllerLegacy::new();
+            buttons.set_propagation_phase(gtk4::PropagationPhase::Capture);
+            buttons.connect_event(move |_, event| {
+                match event.event_type() {
+                    gtk4::gdk::EventType::ButtonPress | gtk4::gdk::EventType::TouchBegin => {
+                        pressed.set(true)
+                    }
+                    gtk4::gdk::EventType::ButtonRelease | gtk4::gdk::EventType::TouchEnd => {
+                        pressed.set(false)
+                    }
+                    _ => {}
+                }
+                gtk4::glib::Propagation::Proceed
+            });
+            controller.window.add_controller(buttons);
+        }
+        let weak_for_dock_map = Rc::downgrade(&controller);
+        controller.paned.connect_map(move |paned| {
+            let weak = weak_for_dock_map.clone();
+            let paned = paned.clone();
+            gtk4::glib::idle_add_local_once(move || {
+                if let Some(ctrl) = weak.upgrade() {
+                    if ctrl.right_dock.widget().is_visible() && paned.width() > 0 {
+                        ctrl.apply_dock_width();
+                    }
+                }
+            });
+        });
+        let weak_for_dock_width = Rc::downgrade(&controller);
+        controller.paned.connect_position_notify(move |paned| {
+            let Some(ctrl) = weak_for_dock_width.upgrade() else {
+                return;
+            };
+            if !paned.is_mapped() || !ctrl.right_dock.widget().is_visible() {
+                return;
+            }
+            if !ctrl.dock_pointer_down.get() {
+                return;
+            }
+            let width = f64::from(paned.width()) - f64::from(paned.position());
+            if width < crate::ui::layout::RIGHTBAR_MIN {
+                return;
+            }
+            let generation = ctrl.dock_width_save_gen.get() + 1;
+            ctrl.dock_width_save_gen.set(generation);
+            let weak = Rc::downgrade(&ctrl);
+            gtk4::glib::timeout_add_local_once(std::time::Duration::from_millis(400), move || {
+                if let Some(ctrl) = weak.upgrade() {
+                    if ctrl.dock_width_save_gen.get() == generation {
+                        ctrl.prefs.borrow_mut().dock_width = Some(width);
+                        ctrl.save_prefs();
+                    }
+                }
+            });
+        });
+        let weak_for_reorder = Rc::downgrade(&controller);
+        controller
+            .sidebar
+            .set_on_reorder(move |dragged, target| {
+                if let Some(ctrl) = weak_for_reorder.upgrade() {
+                    ctrl.reorder_session(&dragged, &target);
+                }
+            });
         crate::ui::message_renderer::set_controller(&controller);
         let weak_for_attachments = Rc::downgrade(&controller);
         controller
@@ -2347,6 +2448,7 @@ impl SessionController {
     pub fn refresh_sidebar_sessions(&self) {
         let sessions = self.sessions_cache.borrow().clone();
         let prefs = self.prefs.borrow();
+        self.sidebar.set_manual_order(&prefs.session_order);
         self.sidebar.load_sessions(
             &sessions,
             &prefs.pinned_set(),
@@ -2366,8 +2468,21 @@ impl SessionController {
         self.set_dock_visible(!visible);
     }
 
+    fn apply_dock_width(&self) {
+        if !self.paned.is_mapped() || self.paned.width() <= 0 {
+            return;
+        }
+        let total = f64::from(self.paned.width());
+        let width = crate::ui::layout::dock_width(total, self.prefs.borrow().dock_width);
+        self.paned
+            .set_position((total - width).round() as i32);
+    }
+
     pub fn set_dock_visible(&self, visible: bool) {
         self.right_dock.widget().set_visible(visible);
+        if visible {
+            self.apply_dock_width();
+        }
         if let Some(session_id) = self.active_session_id() {
             self.prefs
                 .borrow_mut()
@@ -2382,6 +2497,9 @@ impl SessionController {
         let tab = prefs.dock_tab(session_id).unwrap_or(0);
         drop(prefs);
         self.right_dock.widget().set_visible(visible);
+        if visible {
+            self.apply_dock_width();
+        }
         self.right_dock.select_tab(tab);
     }
 
@@ -2452,6 +2570,24 @@ impl SessionController {
         self.save_prefs();
         let sort = self.prefs.borrow().session_sort;
         self.sidebar.set_session_options(grouping, sort);
+    }
+
+    fn reorder_session(&self, dragged: &str, target: &str) {
+        let known: Vec<String> = self
+            .sessions_cache
+            .borrow()
+            .iter()
+            .map(|item| item.id.clone())
+            .collect();
+        let order = crate::ui::sidebar::reorder_manual_order(
+            &self.prefs.borrow().session_order,
+            &known,
+            dragged,
+            target,
+        );
+        self.prefs.borrow_mut().session_order = order;
+        self.save_prefs();
+        self.refresh_sidebar_sessions();
     }
 
     pub fn set_session_sort(&self, sort: SessionSort) {
@@ -5008,6 +5144,10 @@ impl SessionController {
                         }
                     }
                     UiMessage::ScheduleCatalogLoaded(entries) => {
+                        if let Some(ctrl) = ctrl_weak.upgrade() {
+                            let scheduled = crate::schedule_model::scheduled_session_ids(&entries);
+                            ctrl.sidebar.set_scheduled_sessions(&scheduled);
+                        }
                         conv_view.schedules_page().handle_catalog(&entries);
                     }
                     UiMessage::ScheduleCatalogFailed => {
