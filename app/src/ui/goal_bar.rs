@@ -119,7 +119,12 @@ pub fn goal_edit_dialog(parent: &impl IsA<gtk4::Widget>, current: &GoalView, on_
         .title("Objective")
         .text(&current.objective)
         .build();
-    content.append(&entry);
+    let entry_list = gtk4::ListBox::builder()
+        .css_classes(["boxed-list"])
+        .selection_mode(gtk4::SelectionMode::None)
+        .build();
+    entry_list.append(&entry);
+    content.append(&entry_list);
     let save = gtk4::Button::builder()
         .label("Save")
         .css_classes(["suggested-action"])

@@ -1,7 +1,7 @@
 use crate::protocol::{SessionListItem, WorkspaceView};
 use crate::ui::brand::{brand_wordmark, fish_logo};
 use crate::ui::copy::Copybook;
-use crate::ui_prefs::ArchiveFilter;
+use crate::ui_prefs::{ArchiveFilter, SessionGrouping, SessionSort};
 use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
@@ -77,6 +77,9 @@ pub struct Sidebar {
     sessions: RefCell<Vec<SessionListItem>>,
     pinned: RefCell<HashSet<String>>,
     archive_filter: Cell<ArchiveFilter>,
+    session_grouping: Cell<SessionGrouping>,
+    session_sort: Cell<SessionSort>,
+    filter_menu_buttons: RefCell<Vec<(FilterMenuKind, gtk4::Button)>>,
     running: RefCell<HashSet<String>>,
     unread: RefCell<HashSet<String>>,
     active_session: RefCell<Option<String>>,
@@ -203,7 +206,8 @@ impl Sidebar {
             .tooltip_text(copy.workspaces)
             .css_classes(["dsh-filter-button", "dsh-icon-button"])
             .build();
-        filter_button.set_popover(Some(&filter_popover()));
+        let (filter_popover, filter_buttons) = filter_popover();
+        filter_button.set_popover(Some(&filter_popover));
         workspace_header.append(&filter_button);
         let new_workspace_btn = gtk4::Button::builder()
             .icon_name("folder-new-symbolic")
@@ -317,6 +321,9 @@ impl Sidebar {
             sessions: RefCell::new(Vec::new()),
             pinned: RefCell::new(HashSet::new()),
             archive_filter: Cell::new(ArchiveFilter::Active),
+            session_grouping: Cell::new(SessionGrouping::Grouped),
+            session_sort: Cell::new(SessionSort::Recent),
+            filter_menu_buttons: RefCell::new(filter_buttons),
             running: RefCell::new(HashSet::new()),
             unread: RefCell::new(HashSet::new()),
             active_session: RefCell::new(None),
@@ -445,9 +452,38 @@ impl Sidebar {
         *self.sessions.borrow_mut() = sessions.to_vec();
         *self.pinned.borrow_mut() = pinned.clone();
         self.archive_filter.set(filter);
+        self.update_filter_menu();
         *self.running.borrow_mut() = running.clone();
         *self.unread.borrow_mut() = unread.clone();
         self.rebuild_tree();
+    }
+
+    pub fn set_session_options(self: &Rc<Self>, grouping: SessionGrouping, sort: SessionSort) {
+        self.session_grouping.set(grouping);
+        self.session_sort.set(sort);
+        self.update_filter_menu();
+        self.rebuild_tree();
+    }
+
+    pub fn update_filter_menu(&self) {
+        let filter = self.archive_filter.get();
+        let grouping = self.session_grouping.get();
+        let sort = self.session_sort.get();
+        for (kind, button) in self.filter_menu_buttons.borrow().iter() {
+            let checked = match kind {
+                FilterMenuKind::Archive(active) => *active == filter,
+                FilterMenuKind::Grouping(active) => *active == grouping,
+                FilterMenuKind::Sort(active) => *active == sort,
+            };
+            if let Some(check) = button
+                .child()
+                .and_downcast::<gtk4::Box>()
+                .and_then(|content| content.last_child())
+                .and_downcast::<gtk4::Image>()
+            {
+                check.set_visible(checked);
+            }
+        }
     }
 
     pub fn show_search_results(self: &Rc<Self>, results: &[SessionListItem]) {
@@ -657,8 +693,39 @@ impl Sidebar {
         let running = self.running.borrow();
         let unread = self.unread.borrow();
         let filter = self.archive_filter.get();
+        let grouping = self.session_grouping.get();
+        let sort_mode = self.session_sort.get();
+        let order = |items: &mut Vec<&SessionListItem>| {
+            items.sort_by(|left, right| {
+                let left_pinned = pinned.contains(&left.id);
+                let right_pinned = pinned.contains(&right.id);
+                right_pinned.cmp(&left_pinned).then_with(|| match sort_mode {
+                    SessionSort::Recent => right.updated_at.cmp(&left.updated_at),
+                    SessionSort::Manual => std::cmp::Ordering::Equal,
+                })
+            });
+        };
         let active = self.active_session.borrow();
         let panel_active = self.panel_state.active_panel().is_some();
+        if grouping == SessionGrouping::Flat {
+            let mut all: Vec<&SessionListItem> = sessions
+                .iter()
+                .filter(|item| matches_filter(filter, item))
+                .collect();
+            order(&mut all);
+            for item in all {
+                let row = self.session_row(
+                    item,
+                    &pinned,
+                    &running,
+                    &unread,
+                    active.as_deref(),
+                    panel_active,
+                );
+                self.tree_list.append(&row);
+            }
+            return;
+        }
         let collapsed = self.collapsed_groups.borrow();
         let mut claimed: HashSet<String> = HashSet::new();
         for workspace in workspaces.iter() {
@@ -673,7 +740,7 @@ impl Sidebar {
                 .filter_map(|id| sessions.iter().find(|item| &item.id == id))
                 .filter(|item| matches_filter(filter, item))
                 .collect();
-            members.sort_by_key(|item| !pinned.contains(&item.id));
+            order(&mut members);
             let mut member_rows = Vec::new();
             for item in members {
                 let row = self.session_row(
@@ -702,7 +769,7 @@ impl Sidebar {
             .filter(|item| !claimed.contains(&item.id))
             .filter(|item| matches_filter(filter, item))
             .collect();
-        orphans.sort_by_key(|item| !pinned.contains(&item.id));
+        order(&mut orphans);
         if !orphans.is_empty() {
             let header = gtk4::Label::builder()
                 .label(self.copy.ungrouped)
@@ -1014,7 +1081,14 @@ fn menu_row(label: &str, action: &str, id: &str, popover: &gtk4::Popover) -> gtk
     button
 }
 
-fn filter_popover() -> gtk4::Popover {
+#[derive(Clone, Copy, PartialEq)]
+enum FilterMenuKind {
+    Archive(ArchiveFilter),
+    Grouping(SessionGrouping),
+    Sort(SessionSort),
+}
+
+fn filter_popover() -> (gtk4::Popover, Vec<(FilterMenuKind, gtk4::Button)>) {
     let popover = gtk4::Popover::builder().build();
     let box_widget = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
@@ -1023,22 +1097,56 @@ fn filter_popover() -> gtk4::Popover {
         .margin_top(4)
         .margin_bottom(4)
         .build();
-    for (label, action) in [
-        ("隐藏已归档", "win.filter-active"),
-        ("全部对话（显示已归档）", "win.filter-all"),
-        ("仅显示已归档", "win.filter-archived"),
-        ("按工作区", "win.filter-all"),
-        ("手动排序", "win.filter-all"),
-        ("最近更新", "win.filter-all"),
-    ] {
-        let button = sidebar_row(None, Some(label), None);
+    let entries = [
+        (
+            "隐藏已归档",
+            FilterMenuKind::Archive(ArchiveFilter::Active),
+            "win.filter-active",
+        ),
+        (
+            "全部对话（显示已归档）",
+            FilterMenuKind::Archive(ArchiveFilter::All),
+            "win.filter-all",
+        ),
+        (
+            "仅显示已归档",
+            FilterMenuKind::Archive(ArchiveFilter::Archived),
+            "win.filter-archived",
+        ),
+        (
+            "按工作区",
+            FilterMenuKind::Grouping(SessionGrouping::Grouped),
+            "win.group-by-workspace",
+        ),
+        (
+            "平铺列表",
+            FilterMenuKind::Grouping(SessionGrouping::Flat),
+            "win.flatten-sessions",
+        ),
+        (
+            "最近更新",
+            FilterMenuKind::Sort(SessionSort::Recent),
+            "win.sort-recent",
+        ),
+        (
+            "手动排序",
+            FilterMenuKind::Sort(SessionSort::Manual),
+            "win.sort-manual",
+        ),
+    ];
+    let mut buttons = Vec::new();
+    for (label, kind, action) in entries {
+        let check = gtk4::Image::from_icon_name("object-select-symbolic");
+        check.set_visible(false);
+        let button = sidebar_row(None, Some(label), Some(check.upcast()));
         button.set_action_name(Some(action));
         let popover_clone = popover.clone();
         button.connect_clicked(move |_| popover_clone.popdown());
         box_widget.append(&button);
+        buttons.push((kind, button));
     }
     popover.set_child(Some(&box_widget));
-    popover
+    (popover, buttons)
 }
 
 trait RelativeTime {

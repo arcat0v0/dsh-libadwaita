@@ -7,6 +7,7 @@ pub struct HeroParts {
     pub composer_slot: gtk4::Box,
     pub preset_menu: gtk4::MenuButton,
     pub preset_label: gtk4::Label,
+    pub workspace_menu: gtk4::MenuButton,
 }
 
 pub fn build_hero() -> HeroParts {
@@ -191,5 +192,6 @@ pub fn build_hero() -> HeroParts {
         composer_slot,
         preset_menu,
         preset_label,
+        workspace_menu,
     }
 }

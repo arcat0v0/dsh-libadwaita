@@ -31,7 +31,7 @@ use crate::ui::settings::{SettingsDialogHandle, show_settings_dialog};
 use crate::ui::sidebar::{PanelState, Sidebar};
 use crate::ui::trigger_popup::{TriggerOption, show_trigger_popup};
 use crate::ui::window::MainWindow;
-use crate::ui_prefs::{ArchiveFilter, UiPrefs, default_ui_prefs_path};
+use crate::ui_prefs::{ArchiveFilter, SessionGrouping, SessionSort, UiPrefs, default_ui_prefs_path};
 use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
@@ -400,6 +400,7 @@ pub struct SessionController {
     follow_generation: Rc<Cell<u64>>,
     gap_repair: Rc<RefCell<Option<GapRepairState>>>,
     pending_images: Rc<RefCell<Vec<PendingImage>>>,
+    pending_auto_send: Rc<RefCell<Option<String>>>,
     prefs: Rc<RefCell<UiPrefs>>,
     prefs_path: PathBuf,
     unread_sessions: Rc<RefCell<HashSet<String>>>,
@@ -470,6 +471,7 @@ impl SessionController {
             follow_generation: Rc::new(Cell::new(0)),
             gap_repair: Rc::new(RefCell::new(None)),
             pending_images: Rc::new(RefCell::new(Vec::new())),
+            pending_auto_send: Rc::new(RefCell::new(None)),
             prefs: {
                 let path = default_ui_prefs_path();
                 Rc::new(RefCell::new(UiPrefs::load(&path)))
@@ -511,6 +513,13 @@ impl SessionController {
             .plugins_page()
             .set_controller(controller.clone());
         controller.setup_ui_receiver(ui_receiver, Rc::downgrade(&controller));
+
+        {
+            let prefs = controller.prefs.borrow();
+            controller
+                .sidebar
+                .set_session_options(prefs.session_grouping, prefs.session_sort);
+        }
 
         {
             let weak = Rc::downgrade(&controller);
@@ -1274,6 +1283,10 @@ impl SessionController {
             .unwrap_or(false);
         let mode = if running && steer { "steer" } else { "prompt" };
         let Some(session_id) = self.active_session_id() else {
+            if !trimmed.is_empty() {
+                *self.pending_auto_send.borrow_mut() = Some(trimmed.to_string());
+                self.start_session_in(None, None, None);
+            }
             return;
         };
         let pending_text = if text.trim().is_empty() {
@@ -1564,6 +1577,7 @@ impl SessionController {
     fn show_blank_session_view(&self) {
         self.remember_composer_draft();
         self.next_follow_generation();
+        *self.pending_auto_send.borrow_mut() = None;
         *self.gap_repair.borrow_mut() = None;
         *self.active_session.borrow_mut() = None;
         self.conversation_view.clear_session();
@@ -2190,6 +2204,25 @@ impl SessionController {
 
     pub fn set_notifications_enabled(&self, enabled: bool) {
         self.prefs.borrow_mut().notifications_enabled = enabled;
+        self.save_prefs();
+    }
+
+    pub fn set_session_grouping(&self, grouping: SessionGrouping) {
+        self.prefs.borrow_mut().session_grouping = grouping;
+        self.save_prefs();
+        let sort = self.prefs.borrow().session_sort;
+        self.sidebar.set_session_options(grouping, sort);
+    }
+
+    pub fn set_session_sort(&self, sort: SessionSort) {
+        self.prefs.borrow_mut().session_sort = sort;
+        self.save_prefs();
+        let grouping = self.prefs.borrow().session_grouping;
+        self.sidebar.set_session_options(grouping, sort);
+    }
+
+    pub fn set_locale_preference(&self, code: &str) {
+        self.prefs.borrow_mut().locale = Some(code.to_string());
         self.save_prefs();
     }
 
@@ -3889,6 +3922,7 @@ impl SessionController {
                         }
                     }
                     UiMessage::WorkspacesLoaded(workspaces) => {
+                        conv_view.set_hero_workspaces(&workspaces);
                         if let Some(ctrl) = ctrl_weak.upgrade() {
                             *ctrl.workspaces.borrow_mut() = workspaces.clone();
                             sidebar.load_workspaces(&workspaces);
@@ -3991,6 +4025,11 @@ impl SessionController {
                             ctrl.refresh_subagents();
                             ctrl.refresh_jobs();
                             ctrl.load_feedback();
+                            if let Some(text) = ctrl.pending_auto_send.borrow_mut().take() {
+                                let buffer = conv_view.composer().text_view().buffer();
+                                buffer.set_text("");
+                                ctrl.submit_text(&text, false);
+                            }
                         }
                     }
                     UiMessage::Notification(notif) => match notif {

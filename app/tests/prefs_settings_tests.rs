@@ -76,6 +76,56 @@ fn test_settings_schema_fields_and_find_key() {
 }
 
 #[test]
+fn test_typert_schema_fields() {
+    let schema = json!({
+        "uid": 2972,
+        "refs": {
+            "2970": {"type": "number", "meta": {"step": 1, "min": 0, "max": 9007199254740991i64, "default": 1}},
+            "2971": {"type": "number", "meta": {"step": 1, "min": 1, "default": 8}},
+            "2972": {"type": "object", "meta": {"default": {}}, "dict": {"maxDepth": 2970, "maxActiveSubagents": 2971}}
+        }
+    });
+    let value = json!({"maxDepth": 1, "maxActiveSubagents": 8});
+    let fields = fields_from_schema(&schema, &value);
+    assert_eq!(fields.len(), 2);
+    let by_key = |key: &str| {
+        fields
+            .iter()
+            .find(|field| field.key == key)
+            .unwrap_or_else(|| panic!("missing field {key}"))
+    };
+    assert_eq!(by_key("maxDepth").kind, FieldKind::Number);
+    assert_eq!(by_key("maxActiveSubagents").kind, FieldKind::Number);
+    assert_eq!(find_key(&schema, &["maxDepth"]), Some("maxDepth".to_string()));
+    assert_eq!(find_key(&schema, &["missing"]), None);
+}
+
+#[test]
+fn test_typert_union_enum_and_nested_skip() {
+    let schema = json!({
+        "uid": 1,
+        "refs": {
+            "1": {"type": "object", "meta": {}, "dict": {"retryMode": 2, "retryCodes": 3}},
+            "2": {"type": "union", "meta": {}, "list": [4, 5]},
+            "4": {"type": "const", "meta": {}, "value": "auto"},
+            "5": {"type": "const", "meta": {}, "value": "manual"},
+            "3": {"type": "union", "meta": {}, "list": [6, 7]},
+            "6": {"type": "const", "meta": {}, "value": "a"},
+            "7": {"type": "array", "meta": {}, "inner": 4}
+        }
+    });
+    let value = json!({"retryMode": "manual"});
+    let fields = fields_from_schema(&schema, &value);
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields[0].key, "retryMode");
+    assert_eq!(
+        fields[0].kind,
+        FieldKind::Enum(vec!["auto".to_string(), "manual".to_string()])
+    );
+    assert_eq!(fields[0].value, json!("manual"));
+}
+
+#[test]
 fn test_transcript_view_and_registry_persist() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("ui-prefs.json");

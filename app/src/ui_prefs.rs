@@ -4,6 +4,32 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum SessionGrouping {
+    Grouped,
+    Flat,
+}
+
+impl Default for SessionGrouping {
+    fn default() -> Self {
+        Self::Grouped
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionSort {
+    Recent,
+    Manual,
+}
+
+impl Default for SessionSort {
+    fn default() -> Self {
+        Self::Recent
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ArchiveFilter {
     Active,
     Archived,
@@ -48,6 +74,10 @@ pub struct UiPrefs {
     pub pinned_sessions: Vec<String>,
     #[serde(default)]
     pub archive_filter: ArchiveFilter,
+    #[serde(default)]
+    pub session_grouping: SessionGrouping,
+    #[serde(default)]
+    pub session_sort: SessionSort,
     #[serde(default = "default_true")]
     pub notifications_enabled: bool,
     #[serde(default)]
@@ -79,6 +109,8 @@ impl Default for UiPrefs {
         Self {
             pinned_sessions: Vec::new(),
             archive_filter: ArchiveFilter::Active,
+            session_grouping: SessionGrouping::Grouped,
+            session_sort: SessionSort::Recent,
             notifications_enabled: true,
             theme: None,
             locale: None,

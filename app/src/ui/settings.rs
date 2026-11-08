@@ -133,17 +133,28 @@ pub fn build_preferences_dialog(
         "Português",
         "Русский",
     ]);
+    let locale_selected = match prefs.locale.as_deref() {
+        Some("en") => 1,
+        Some("zh") => 2,
+        Some("de") => 3,
+        Some("es") => 4,
+        Some("fr") => 5,
+        Some("ja") => 6,
+        Some("pt") => 7,
+        Some("ru") => 8,
+        _ => 0,
+    };
     let locale_row = adw::ComboRow::builder()
         .title("Language")
         .model(&locale_model)
-        .selected(0)
-        .sensitive(false)
+        .selected(locale_selected)
+        .sensitive(true)
         .build();
     let locale_config: Rc<RefCell<Option<(String, String, u64)>>> =
         Rc::new(RefCell::new(None));
     let locale_config_for_change = locale_config.clone();
     let locale_status = gtk4::Label::builder()
-        .label("Checking locale support…")
+        .label("Language preference is stored locally; some surfaces apply it after a restart.")
         .wrap(true)
         .xalign(0.0)
         .css_classes(["dim-label", "caption"])
@@ -162,6 +173,9 @@ pub fn build_preferences_dialog(
             8 => "ru",
             _ => "system",
         };
+        if let Some(ctrl) = locale_controller.as_ref() {
+            ctrl.set_locale_preference(code);
+        }
         if let (Some(config), Some(ctrl)) = (
             locale_config_for_change.borrow().clone(),
             locale_controller.as_ref(),
@@ -553,7 +567,7 @@ pub fn build_preferences_dialog(
 
 
     let general_group = adw::PreferencesGroup::builder()
-        .title("System & Version")
+        .title("System &amp; Version")
         .description("Bridge protocol and dsh runtime status")
         .build();
 
@@ -751,7 +765,12 @@ pub fn build_preferences_dialog(
                             .title("Record JSON")
                             .text(r#"{"kind":"api-key"}"#)
                             .build();
-                        content.append(&entry);
+                        let entry_list = gtk4::ListBox::builder()
+                            .css_classes(["boxed-list"])
+                            .selection_mode(gtk4::SelectionMode::None)
+                            .build();
+                        entry_list.append(&entry);
+                        content.append(&entry_list);
                         let save = gtk4::Button::builder()
                             .label("Save")
                             .css_classes(["suggested-action"])

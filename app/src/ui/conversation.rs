@@ -1,4 +1,4 @@
-use crate::protocol::QueueItem;
+use crate::protocol::{QueueItem, WorkspaceView};
 use crate::transcript::{ConversationTranscript, RenderBlock};
 use crate::ui::composer::Composer;
 use crate::ui::copy::Copybook;
@@ -110,6 +110,7 @@ pub struct ConversationView {
     active_cwd: Rc<RefCell<PathBuf>>,
     title_activate: Rc<RefCell<Option<Box<dyn Fn()>>>>,
     hero_composer_slot: gtk4::Box,
+    hero_workspace_menu: gtk4::MenuButton,
     composer_dock: gtk4::Box,
     session_header: gtk4::Box,
     dock_button: gtk4::Button,
@@ -326,6 +327,7 @@ impl ConversationView {
 
         let welcome_bubble = crate::ui::hero::build_hero();
         let hero_composer_slot = welcome_bubble.composer_slot.clone();
+        let hero_workspace_menu = welcome_bubble.workspace_menu.clone();
         let preset_menu = welcome_bubble.preset_menu.clone();
         let preset_label = welcome_bubble.preset_label.clone();
         let welcome_bubble = welcome_bubble.container;
@@ -433,6 +435,7 @@ impl ConversationView {
             active_cwd,
             title_activate,
             hero_composer_slot,
+            hero_workspace_menu,
             composer_dock,
             session_header,
             dock_button,
@@ -567,6 +570,24 @@ impl ConversationView {
 
     pub fn transcript_adjustment(&self) -> gtk4::Adjustment {
         self.transcript_scroll.vadjustment()
+    }
+
+    pub fn set_hero_workspaces(&self, workspaces: &[WorkspaceView]) {
+        let items = gtk4::gio::Menu::new();
+        for workspace in workspaces {
+            let item = gtk4::gio::MenuItem::new(Some(&workspace.title), None);
+            item.set_action_and_target_value(
+                Some("win.new-session-in-workspace"),
+                Some(&workspace.id.to_variant()),
+            );
+            items.append_item(&item);
+        }
+        let choose = gtk4::gio::MenuItem::new(
+            Some(&Copybook::for_code("system").choose_workspace),
+            Some("win.new-workspace"),
+        );
+        items.append_item(&choose);
+        self.hero_workspace_menu.set_menu_model(Some(&items));
     }
 
     pub fn scroll_transcript_to_bottom(&self) {

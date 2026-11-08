@@ -1196,7 +1196,12 @@ pub fn build_assistant_message(
                 let entry = libadwaita::EntryRow::builder()
                     .title("What went wrong or right?")
                     .build();
-                content.append(&entry);
+                let entry_list = gtk4::ListBox::builder()
+                    .css_classes(["boxed-list"])
+                    .selection_mode(gtk4::SelectionMode::None)
+                    .build();
+                entry_list.append(&entry);
+                content.append(&entry_list);
                 let send = gtk4::Button::builder()
                     .label("Record")
                     .css_classes(["suggested-action"])

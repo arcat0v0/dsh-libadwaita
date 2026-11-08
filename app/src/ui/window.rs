@@ -508,6 +508,42 @@ impl MainWindow {
         });
         self.window.add_action(&filter_archived);
 
+        let ctrl_grouping = Rc::downgrade(&controller);
+        let group_by_workspace = gtk4::gio::SimpleAction::new("group-by-workspace", None);
+        group_by_workspace.connect_activate(move |_, _| {
+            if let Some(c) = ctrl_grouping.upgrade() {
+                c.set_session_grouping(crate::ui_prefs::SessionGrouping::Grouped);
+            }
+        });
+        self.window.add_action(&group_by_workspace);
+
+        let ctrl_flat = Rc::downgrade(&controller);
+        let flatten_sessions = gtk4::gio::SimpleAction::new("flatten-sessions", None);
+        flatten_sessions.connect_activate(move |_, _| {
+            if let Some(c) = ctrl_flat.upgrade() {
+                c.set_session_grouping(crate::ui_prefs::SessionGrouping::Flat);
+            }
+        });
+        self.window.add_action(&flatten_sessions);
+
+        let ctrl_sort_recent = Rc::downgrade(&controller);
+        let sort_recent = gtk4::gio::SimpleAction::new("sort-recent", None);
+        sort_recent.connect_activate(move |_, _| {
+            if let Some(c) = ctrl_sort_recent.upgrade() {
+                c.set_session_sort(crate::ui_prefs::SessionSort::Recent);
+            }
+        });
+        self.window.add_action(&sort_recent);
+
+        let ctrl_sort_manual = Rc::downgrade(&controller);
+        let sort_manual = gtk4::gio::SimpleAction::new("sort-manual", None);
+        sort_manual.connect_activate(move |_, _| {
+            if let Some(c) = ctrl_sort_manual.upgrade() {
+                c.set_session_sort(crate::ui_prefs::SessionSort::Manual);
+            }
+        });
+        self.window.add_action(&sort_manual);
+
         let ctrl_filter = Rc::downgrade(&controller);
         let filter_all = gtk4::gio::SimpleAction::new("filter-all", None);
         filter_all.connect_activate(move |_, _| {

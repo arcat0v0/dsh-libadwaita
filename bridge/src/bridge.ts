@@ -1,6 +1,12 @@
+import { execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
+import { homedir } from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
+
 import { type Context, Service } from '@deepseek-ai/cordis';
 import type { SessionId } from '@deepseek-ai/dsh-session';
 import { buildForkSeed } from '@deepseek-ai/dsh-session/fork';
@@ -269,6 +275,15 @@ interface AgentLike {
   cancel: (cause: object, options?: object) => void;
 }
 
+async function defaultWorkspaceDirectory(): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync('xdg-user-dir', ['DOCUMENT']);
+    const directory = stdout.replace(/[\r\n]+$/, '');
+    if (directory !== '' && path.normalize(directory) !== homedir()) return directory;
+  } catch {}
+  return homedir();
+}
+
 interface WorkspaceRecordLike {
   id: string;
   path: string;
@@ -346,6 +361,7 @@ export class BridgeService extends Service {
 
   protected async [Service.init](): Promise<void> {
     await this.server.start();
+    void this.ensureDefaultWorkspace();
 
     this.ctx.on('agent/assistant-stream', (payload: unknown) => {
       if (!payload || typeof payload !== 'object') return;
@@ -1968,11 +1984,23 @@ export class BridgeService extends Service {
         delete: (id: string) => Promise<boolean>;
         archiveSession: (sessionId: string, options?: object) => Promise<void>;
         unarchiveSession: (sessionId: string) => Promise<void>;
+        initializeDefault: (
+          resolveDirectory: () => Promise<string>,
+        ) => Promise<WorkspaceRecordLike | undefined>;
         readonly archivedSessionIds: readonly string[];
       }
     | undefined
   > {
     return this.waitForService('workspaceRegistry');
+  }
+
+  private async ensureDefaultWorkspace(): Promise<void> {
+    try {
+      const registry = await this.workspaceRegistry();
+      if (!registry?.initializeDefault) return;
+      const directory = await defaultWorkspaceDirectory();
+      await registry.initializeDefault(async () => directory);
+    } catch {}
   }
 
   private async archivedSessionIds(): Promise<Set<string>> {

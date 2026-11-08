@@ -854,7 +854,13 @@ pub mod model {
 use model::*;
 
 pub fn ui_locale() -> Locale {
-    Locale::from_tag(&crate::ui::copy::system_locale())
+    let preference = crate::ui_prefs::UiPrefs::load(&crate::ui_prefs::default_ui_prefs_path())
+        .locale
+        .unwrap_or_default();
+    Locale::from_tag(&crate::ui::copy::resolve_locale(
+        Some(&preference),
+        &serde_json::Value::Null,
+    ))
 }
 
 fn now_ms() -> i64 {
